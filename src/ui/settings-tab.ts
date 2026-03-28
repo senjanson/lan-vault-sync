@@ -6,6 +6,14 @@ export class LANSyncSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  private async addPeerFromInput(value: string, container: HTMLElement, clear: () => void): Promise<void> {
+    const added = await this.plugin.addManualPeer(value);
+    if (!added) return;
+
+    clear();
+    this._renderPeerList(container);
+  }
+
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
@@ -68,13 +76,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
         text.setPlaceholder('192.168.1.100:53712');
         text.inputEl.addEventListener('keydown', async (e: KeyboardEvent) => {
           if (e.key === 'Enter') {
-            const val = text.getValue().trim();
-            if (val && val.includes(':')) {
-              this.plugin.settings.manualPeers.push(val);
-              await this.plugin.saveSettings();
-              text.setValue('');
-              this._renderPeerList(peerContainer);
-            }
+            await this.addPeerFromInput(text.getValue(), peerContainer, () => text.setValue(''));
           }
         });
       })
@@ -83,13 +85,9 @@ export class LANSyncSettingTab extends PluginSettingTab {
         .onClick(async () => {
           const input = containerEl.querySelector('.setting-item:last-child input') as HTMLInputElement;
           if (input) {
-            const val = input.value.trim();
-            if (val && val.includes(':')) {
-              this.plugin.settings.manualPeers.push(val);
-              await this.plugin.saveSettings();
+            await this.addPeerFromInput(input.value, peerContainer, () => {
               input.value = '';
-              this._renderPeerList(peerContainer);
-            }
+            });
           }
         }));
 
@@ -142,8 +140,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       row.createSpan({ text: peer });
       const removeBtn = row.createEl('button', { text: '✕', cls: 'lan-sync-peer-remove' });
       removeBtn.addEventListener('click', async () => {
-        this.plugin.settings.manualPeers.splice(i, 1);
-        await this.plugin.saveSettings();
+        await this.plugin.removeManualPeer(peer);
         this._renderPeerList(container);
       });
     }

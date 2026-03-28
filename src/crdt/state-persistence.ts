@@ -2,6 +2,7 @@ import { Vault } from 'obsidian';
 import * as Y from 'yjs';
 import { CRDT_STATE_DIR } from '../constants';
 import { logger } from '../logger';
+import { ensureParentDirectory } from '../utils/path-utils';
 
 /**
  * Persist / restore Yjs doc state to the vault's plugin data directory.
@@ -28,12 +29,7 @@ export class StatePersistence {
     try {
       const state = Y.encodeStateAsUpdate(doc);
       const stateFile = this._stateFilePath(filePath);
-
-      // Ensure directory exists
-      const dir = stateFile.substring(0, stateFile.lastIndexOf('/'));
-      if (!(await this.adapter.exists(dir))) {
-        await this.adapter.mkdir(dir);
-      }
+      await ensureParentDirectory(this.adapter, stateFile);
 
       await this.adapter.writeBinary(stateFile, state.buffer);
     } catch (err) {

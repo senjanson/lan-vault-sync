@@ -12,6 +12,7 @@ import {
 import { FileDeletePayload, FileRenamePayload, FileMeta, MessageType } from '../types';
 import { computeFileHash } from './file-hash';
 import { logger } from '../logger';
+import { ensureParentDirectory } from '../utils/path-utils';
 
 export class BinaryFileSyncService {
   private onRemoteFileWrittenCb: ((path: string) => void) | null = null;
@@ -141,13 +142,9 @@ export class BinaryFileSyncService {
       if (existing instanceof TFile) {
         await this.vault.modifyBinary(existing, content.buffer as ArrayBuffer);
       } else {
-        // Ensure parent directory exists
-        const dir = path.substring(0, path.lastIndexOf('/'));
-        if (dir) {
-          const adapter = (this.vault as any).adapter;
-          if (adapter && !(await adapter.exists(dir))) {
-            await adapter.mkdir(dir);
-          }
+        const adapter = (this.vault as any).adapter;
+        if (adapter) {
+          await ensureParentDirectory(adapter, path);
         }
         await this.vault.createBinary(path, content.buffer as ArrayBuffer);
       }
@@ -171,6 +168,10 @@ export class BinaryFileSyncService {
     if (file) {
       this.onRemoteFileWrittenCb?.(oldPath);
       this.onRemoteFileWrittenCb?.(newPath);
+      const adapter = (this.vault as any).adapter;
+      if (adapter) {
+        await ensureParentDirectory(adapter, newPath);
+      }
       await this.vault.rename(file, newPath);
       logger.debug(`Renamed file: ${oldPath} → ${newPath}`);
     }

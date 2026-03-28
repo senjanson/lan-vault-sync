@@ -75,13 +75,11 @@ export default class LANSyncPlugin extends Plugin {
     this.addCommand({
       id: 'lan-sync-add-peer',
       name: 'Add Manual Peer',
-      callback: () => {
+      callback: async () => {
         // Simple prompt for adding a peer
         const input = prompt('Enter peer address (ip:port):');
-        if (input && input.includes(':')) {
-          this.settings.manualPeers.push(input.trim());
-          this.saveSettings();
-          this.coordinator?.addManualPeer(input.trim());
+        if (input) {
+          await this.addManualPeer(input);
         }
       },
     });
@@ -104,6 +102,32 @@ export default class LANSyncPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
     setDebugEnabled(this.settings.enableDebugLog);
+  }
+
+  async addManualPeer(address: string): Promise<boolean> {
+    const normalized = address.trim();
+    if (!normalized || !normalized.includes(':')) {
+      return false;
+    }
+
+    if (!this.settings.manualPeers.includes(normalized)) {
+      this.settings.manualPeers.push(normalized);
+      await this.saveSettings();
+    }
+
+    this.coordinator?.addManualPeer(normalized);
+    return true;
+  }
+
+  async removeManualPeer(address: string): Promise<void> {
+    const normalized = address.trim();
+    const nextPeers = this.settings.manualPeers.filter((peer) => peer !== normalized);
+    if (nextPeers.length === this.settings.manualPeers.length) {
+      return;
+    }
+
+    this.settings.manualPeers = nextPeers;
+    await this.saveSettings();
   }
 
   async startSync(): Promise<void> {

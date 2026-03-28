@@ -22,6 +22,7 @@ import {
   SyncState,
 } from '../types';
 import { logger } from '../logger';
+import { ensureParentDirectory } from '../utils/path-utils';
 
 export class SyncCoordinator {
   private connectionManager: ConnectionManager;
@@ -308,13 +309,9 @@ export class SyncCoordinator {
       if (file instanceof TFile) {
         await this.vault.modify(file, content);
       } else {
-        // Ensure parent directory exists
-        const dir = filePath.substring(0, filePath.lastIndexOf('/'));
-        if (dir) {
-          const adapter = (this.vault as any).adapter;
-          if (adapter && !(await adapter.exists(dir))) {
-            await adapter.mkdir(dir);
-          }
+        const adapter = (this.vault as any).adapter;
+        if (adapter) {
+          await ensureParentDirectory(adapter, filePath);
         }
         await this.vault.create(filePath, content);
         this.watcher.markRemoteWrite(filePath);

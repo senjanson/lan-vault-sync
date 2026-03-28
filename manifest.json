@@ -5,5 +5,5 @@
   "minAppVersion": "1.4.0",
   "description": "Real-time vault synchronization over LAN using Yjs CRDT for conflict-free merging.",
   "author": "jan",
-  "isDesktopOnly": false
+  "isDesktopOnly": true
 }

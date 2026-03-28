@@ -3,6 +3,7 @@ import { WSServer } from './ws-server';
 import { WSClient } from './ws-client';
 import {
   decodeMessage,
+  decodeJSON,
   encodeHandshake,
   encodeHandshakeAck,
   encodePing,
@@ -19,6 +20,10 @@ import { logger } from '../logger';
 
 interface PeerConnection {
   deviceId: string;
+  deviceName: string;
+  ip: string;
+  port: number;
+  vaultId: string;
   ws: WebSocket;
   direction: 'inbound' | 'outbound';
   client?: WSClient;
@@ -76,18 +81,42 @@ export class ConnectionManager {
 
   /** Connect to a discovered peer. Dedup: lower deviceId connects first. */
   connectToPeer(device: DeviceInfo): void {
+    if (device.deviceId === this.settings.deviceId) return;
     if (this.peers.has(device.deviceId)) return;
-
-    // Dedup: only the device with the smaller ID initiates
-    if (this.settings.deviceId > device.deviceId) return;
+    if (!this._shouldInitiateConnection(device)) return;
 
     const url = `ws://${device.ip}:${device.port}`;
     const client = new WSClient(url);
 
     client.onOpen((ws) => {
-      // Send handshake
+      const onHandshakeAck = (raw: Buffer | ArrayBuffer) => {
+        const msg = decodeMessage(this._toUint8Array(raw));
+        if (msg.type !== MessageType.HANDSHAKE_ACK) {
+          logger.warn(`Expected handshake ack from ${url}, got: ${msg.type}`);
+          ws.close();
+          return;
+        }
+
+        const payload = decodeJSON<HandshakePayload>(msg.payload);
+        if (!this._isValidPeer(payload)) {
+          logger.warn(`Rejected outbound peer ${payload.deviceId}: invalid handshake ack`);
+          ws.close();
+          return;
+        }
+
+        ws.removeListener('message', onHandshakeAck);
+        this._setupWs(ws, {
+          deviceId: payload.deviceId,
+          deviceName: payload.deviceName,
+          ip: device.ip,
+          port: payload.port,
+          vaultId: payload.vaultId,
+          lastSeen: Date.now(),
+        }, 'outbound', client);
+      };
+
+      ws.on('message', onHandshakeAck);
       ws.send(encodeHandshake(this.localInfo));
-      this._setupWs(ws, device.deviceId, 'outbound', client, device.ip);
     });
 
     client.onClose(() => {
@@ -127,23 +156,16 @@ export class ConnectionManager {
   private _handleInbound(ws: WebSocket, ip: string): void {
     // Wait for handshake first message
     const onFirstMessage = (raw: Buffer | ArrayBuffer) => {
-      const data = raw instanceof ArrayBuffer
-        ? new Uint8Array(raw)
-        : new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
-
-      const msg = decodeMessage(data);
+      const msg = decodeMessage(this._toUint8Array(raw));
       if (msg.type !== MessageType.HANDSHAKE) {
         logger.warn('Expected handshake, got:', msg.type);
         ws.close();
         return;
       }
 
-      const decoder = new TextDecoder();
-      const payload: HandshakePayload = JSON.parse(decoder.decode(msg.payload));
-
-      // Validate same vault
-      if (payload.vaultId !== this.vaultId) {
-        logger.warn(`Rejected peer ${payload.deviceId}: different vault`);
+      const payload = decodeJSON<HandshakePayload>(msg.payload);
+      if (!this._isValidPeer(payload)) {
+        logger.warn(`Rejected peer ${payload.deviceId}: invalid handshake`);
         ws.close();
         return;
       }
@@ -152,20 +174,41 @@ export class ConnectionManager {
       ws.send(encodeHandshakeAck(this.localInfo));
 
       ws.removeListener('message', onFirstMessage);
-      this._setupWs(ws, payload.deviceId, 'inbound', undefined, ip);
+      this._setupWs(ws, {
+        deviceId: payload.deviceId,
+        deviceName: payload.deviceName,
+        ip,
+        port: payload.port,
+        vaultId: payload.vaultId,
+        lastSeen: Date.now(),
+      }, 'inbound');
     };
 
     ws.on('message', onFirstMessage);
   }
 
-  private _setupWs(ws: WebSocket, deviceId: string, direction: 'inbound' | 'outbound', client?: WSClient, ip?: string): void {
-    if (this.peers.has(deviceId)) {
+  private _setupWs(
+    ws: WebSocket,
+    device: DeviceInfo,
+    direction: 'inbound' | 'outbound',
+    client?: WSClient,
+  ): void {
+    if (this.peers.has(device.deviceId)) {
       // Already connected — close duplicate
       ws.close();
       return;
     }
 
-    const peer: PeerConnection = { deviceId, ws, direction, client };
+    const peer: PeerConnection = {
+      deviceId: device.deviceId,
+      deviceName: device.deviceName,
+      ip: device.ip,
+      port: device.port,
+      vaultId: device.vaultId,
+      ws,
+      direction,
+      client,
+    };
 
     // Ping keepalive
     peer.pingTimer = setInterval(() => {
@@ -174,13 +217,10 @@ export class ConnectionManager {
       }
     }, WS_PING_INTERVAL_MS);
 
-    this.peers.set(deviceId, peer);
+    this.peers.set(device.deviceId, peer);
 
     ws.on('message', (raw: Buffer | ArrayBuffer) => {
-      const data = raw instanceof ArrayBuffer
-        ? new Uint8Array(raw)
-        : new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
-      const msg = decodeMessage(data);
+      const msg = decodeMessage(this._toUint8Array(raw));
 
       if (msg.type === MessageType.PING) {
         ws.send(encodePong());
@@ -192,26 +232,19 @@ export class ConnectionManager {
         return;
       }
 
-      this.messageHandler?.(deviceId, msg.type, msg.payload);
+      this.messageHandler?.(device.deviceId, msg.type, msg.payload);
     });
 
     ws.on('close', () => {
-      this._removePeer(deviceId);
+      this._removePeer(device.deviceId);
     });
 
     ws.on('error', (err) => {
-      logger.error(`Peer ${deviceId} WS error:`, err.message);
+      logger.error(`Peer ${device.deviceId} WS error:`, err.message);
     });
 
-    logger.info(`Peer connected: ${deviceId} (${direction}) @ ${ip}`);
-    this.onPeerConnectedCb?.({
-      deviceId,
-      deviceName: '',
-      ip: ip || '',
-      port: 0,
-      vaultId: this.vaultId,
-      lastSeen: Date.now(),
-    });
+    logger.info(`Peer connected: ${device.deviceId} (${direction}) @ ${device.ip}:${device.port}`);
+    this.onPeerConnectedCb?.(device);
   }
 
   private _removePeer(deviceId: string): void {
@@ -221,5 +254,33 @@ export class ConnectionManager {
     this.peers.delete(deviceId);
     logger.info(`Peer disconnected: ${deviceId}`);
     this.onPeerDisconnectedCb?.(deviceId);
+  }
+
+  private _shouldInitiateConnection(device: DeviceInfo): boolean {
+    if (device.deviceId.startsWith('manual-')) {
+      return true;
+    }
+
+    // Dedup: only the device with the smaller ID initiates
+    return this.settings.deviceId <= device.deviceId;
+  }
+
+  private _isValidPeer(payload: HandshakePayload): boolean {
+    if (!payload.deviceId || payload.deviceId === this.settings.deviceId) {
+      return false;
+    }
+    if (payload.vaultId !== this.vaultId) {
+      return false;
+    }
+    if (!Number.isInteger(payload.port) || payload.port <= 0 || payload.port > 65535) {
+      return false;
+    }
+    return true;
+  }
+
+  private _toUint8Array(raw: Buffer | ArrayBuffer): Uint8Array {
+    return raw instanceof ArrayBuffer
+      ? new Uint8Array(raw)
+      : new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
   }
 }
