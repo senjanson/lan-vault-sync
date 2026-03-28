@@ -117,10 +117,12 @@ export default class LANSyncPlugin extends Plugin {
       const peerCount = this.coordinator?.getConnectedDevices().length ?? 0;
       this.statusBar?.update(state, peerCount);
       this.syncView?.setSyncState(state);
+      this.syncView?.setDevices(this.coordinator?.getDiscoveredDevices() ?? []);
     });
 
     this.coordinator.onSyncEvent((msg: string) => {
       this.syncView?.addLog(msg);
+      this.syncView?.setDevices(this.coordinator?.getDiscoveredDevices() ?? []);
     });
 
     await this.coordinator.start();
