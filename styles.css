@@ -1,0 +1,113 @@
+/* ─── Status Bar ───────────────────────────────── */
+.lan-sync-status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.lan-sync-status-icon {
+  font-size: 14px;
+}
+
+.lan-sync-status-text {
+  font-size: 12px;
+}
+
+/* ─── Sync View Panel ──────────────────────────── */
+.lan-sync-section {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.lan-sync-section h4 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.lan-sync-status-badge {
+  padding: 4px 8px;
+  border-radius: 4px;
+  display: inline-block;
+  font-size: 13px;
+}
+
+.lan-sync-state-watching {
+  color: var(--text-success);
+}
+
+.lan-sync-state-error {
+  color: var(--text-error);
+}
+
+.lan-sync-state-idle {
+  color: var(--text-muted);
+}
+
+.lan-sync-muted {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.lan-sync-device-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.lan-sync-device-list li {
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.lan-sync-device-name {
+  font-weight: 500;
+}
+
+.lan-sync-device-addr {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* ─── Logs ─────────────────────────────────────── */
+.lan-sync-logs {
+  max-height: 300px;
+  overflow-y: auto;
+  font-family: var(--font-monospace);
+  font-size: 11px;
+}
+
+.lan-sync-log-entry {
+  padding: 2px 0;
+  border-bottom: 1px solid var(--background-modifier-border-hover);
+  color: var(--text-muted);
+}
+
+/* ─── Settings: Peer List ──────────────────────── */
+.lan-sync-peer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  margin: 2px 0;
+  background: var(--background-secondary);
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.lan-sync-peer-remove {
+  background: none;
+  border: none;
+  color: var(--text-error);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+}
+
+.lan-sync-peer-remove:hover {
+  opacity: 0.7;
+}
+

@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output
+main.js
+*.js.map
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# TypeScript output
+dist/
+
+# Doc folder (internal planning docs)
+doc/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# npm debug
+npm-debug.log*
+
+# Environment files
+.env
+.env.local
