@@ -212,6 +212,7 @@ export class SyncCoordinator {
     switch (type) {
       case MessageType.YJS_SYNC_STEP1: {
         const msg = decodeYjsSync(payload);
+        if (!this._isSafePath(msg.filePath)) break;
         const response = await this.docManager.handleSyncStep1(msg.filePath, msg.data);
         const reply = encodeYjsSync(MessageType.YJS_SYNC_STEP2, msg.filePath, response);
         this.connectionManager.sendTo(deviceId, reply);
@@ -220,12 +221,14 @@ export class SyncCoordinator {
 
       case MessageType.YJS_SYNC_STEP2: {
         const msg = decodeYjsSync(payload);
+        if (!this._isSafePath(msg.filePath)) break;
         await this.docManager.handleSyncStep2(msg.filePath, msg.data);
         break;
       }
 
       case MessageType.YJS_UPDATE: {
         const msg = decodeYjsSync(payload);
+        if (!this._isSafePath(msg.filePath)) break;
         await this.docManager.applyRemoteUpdate(msg.filePath, msg.data);
         break;
       }
@@ -295,6 +298,10 @@ export class SyncCoordinator {
 
   private async _writeFileFromRemote(filePath: string, content: string): Promise<void> {
     try {
+      if (!this._isSafePath(filePath)) {
+        logger.warn(`Rejected unsafe remote path: ${filePath}`);
+        return;
+      }
       this.watcher.markRemoteWrite(filePath);
       const file = this.vault.getAbstractFileByPath(filePath);
 
@@ -367,7 +374,14 @@ export class SyncCoordinator {
 
     // Files only on remote — request them
     for (const file of treeDiff.remoteOnly) {
-      this.binarySync.requestFile(deviceId, file.path);
+      if (file.isTextFile) {
+        // For text files, initiate CRDT sync so content merges properly
+        const syncData = await this.docManager.encodeSyncStep1(file.path);
+        const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, file.path, syncData);
+        this.connectionManager.sendTo(deviceId, msg);
+      } else {
+        this.binarySync.requestFile(deviceId, file.path);
+      }
     }
 
     // Files only locally — send them
@@ -428,5 +442,15 @@ export class SyncCoordinator {
   private _emitEvent(msg: string): void {
     logger.info(msg);
     this.onSyncEventCb?.(msg);
+  }
+
+  /** Validate that a path from a remote peer is safe (no traversal) */
+  private _isSafePath(filePath: string): boolean {
+    if (!filePath) return false;
+    // Reject absolute paths, traversal, and null bytes
+    if (filePath.startsWith('/') || filePath.startsWith('\\')) return false;
+    if (filePath.includes('..')) return false;
+    if (filePath.includes('\0')) return false;
+    return true;
   }
 }

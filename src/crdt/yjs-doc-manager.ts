@@ -1,8 +1,5 @@
 import { Vault } from 'obsidian';
 import * as Y from 'yjs';
-import * as syncProtocol from 'y-protocols/sync';
-import * as encoding from 'lib0/encoding';
-import * as decoding from 'lib0/decoding';
 import diff from 'fast-diff';
 import { DocPool } from './doc-pool';
 import { StatePersistence } from './state-persistence';
@@ -98,26 +95,20 @@ export class YjsDocManager {
   /** Generate sync step 1 (state vector) for initial sync with a new peer */
   async encodeSyncStep1(filePath: string): Promise<Uint8Array> {
     const doc = await this.getOrCreateDoc(filePath);
-    const encoder = encoding.createEncoder();
-    syncProtocol.writeSyncStep1(encoder, doc);
-    return encoding.toUint8Array(encoder);
+    return Y.encodeStateVector(doc);
   }
 
-  /** Handle sync step 1 from peer, produce sync step 2 */
+  /** Handle sync step 1 from peer (state vector), produce sync step 2 (update diff) */
   async handleSyncStep1(filePath: string, data: Uint8Array): Promise<Uint8Array> {
     const doc = await this.getOrCreateDoc(filePath);
-    const decoder = decoding.createDecoder(data);
-    const encoder = encoding.createEncoder();
-    syncProtocol.readSyncStep1(decoder, encoder, doc);
-    return encoding.toUint8Array(encoder);
+    // data is the remote peer's state vector; produce the diff update
+    return Y.encodeStateAsUpdate(doc, data);
   }
 
-  /** Handle sync step 2 from peer */
+  /** Handle sync step 2 from peer (update diff) */
   async handleSyncStep2(filePath: string, data: Uint8Array): Promise<void> {
     const doc = await this.getOrCreateDoc(filePath);
-    const decoder = decoding.createDecoder(data);
-    const encoder = encoding.createEncoder();
-    syncProtocol.readSyncStep2(decoder, doc, 'remote');
+    Y.applyUpdate(doc, data, 'remote');
 
     // Update last known content
     const ytext = doc.getText('content');

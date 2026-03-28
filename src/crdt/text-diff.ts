@@ -26,5 +26,5 @@ export function applyDiffToYText(ytext: Y.Text, oldText: string, newText: string
           break;
       }
     }
-  });
+  }, 'local');
 }

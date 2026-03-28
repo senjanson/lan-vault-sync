@@ -11,8 +11,13 @@ export class StatePersistence {
   constructor(private vault: Vault, private adapter: any) {}
 
   private _keyForPath(filePath: string): string {
-    // Use base64url-safe encoding of the file path
-    return btoa(filePath).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    // Encode to UTF-8 bytes first, then base64url, to handle non-ASCII paths
+    const bytes = new TextEncoder().encode(filePath);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
   private _stateFilePath(filePath: string): string {

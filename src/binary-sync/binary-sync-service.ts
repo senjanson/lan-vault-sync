@@ -30,21 +30,25 @@ export class BinaryFileSyncService {
     switch (type) {
       case MessageType.FILE_REQUEST: {
         const path = decodeFileRequest(payload);
+        if (!this._isSafePath(path)) break;
         await this._sendFile(deviceId, path);
         break;
       }
       case MessageType.FILE_DATA: {
         const data = decodeFileData(payload);
+        if (!this._isSafePath(data.path)) break;
         await this._receiveFile(data.path, data.content, data.mtime);
         break;
       }
       case MessageType.FILE_DELETE: {
         const del = decodeJSON<FileDeletePayload>(payload);
+        if (!this._isSafePath(del.path)) break;
         await this._deleteFile(del.path);
         break;
       }
       case MessageType.FILE_RENAME: {
         const ren = decodeJSON<FileRenamePayload>(payload);
+        if (!this._isSafePath(ren.oldPath) || !this._isSafePath(ren.newPath)) break;
         await this._renameFile(ren.oldPath, ren.newPath);
         break;
       }
@@ -105,6 +109,14 @@ export class BinaryFileSyncService {
 
   // ─── Private ────────────────────────────────────────────
 
+  private _isSafePath(filePath: string): boolean {
+    if (!filePath) return false;
+    if (filePath.startsWith('/') || filePath.startsWith('\\')) return false;
+    if (filePath.includes('..')) return false;
+    if (filePath.includes('\0')) return false;
+    return true;
+  }
+
   private async _sendFile(deviceId: string, path: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) {
@@ -123,6 +135,8 @@ export class BinaryFileSyncService {
 
   private async _receiveFile(path: string, content: Uint8Array, _mtime: number): Promise<void> {
     try {
+      // Mark remote write BEFORE modifying vault to prevent echo-back
+      this.onRemoteFileWrittenCb?.(path);
       const existing = this.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) {
         await this.vault.modifyBinary(existing, content.buffer as ArrayBuffer);
@@ -137,7 +151,6 @@ export class BinaryFileSyncService {
         }
         await this.vault.createBinary(path, content.buffer as ArrayBuffer);
       }
-      this.onRemoteFileWrittenCb?.(path);
       logger.debug(`Received binary file: ${path}`);
     } catch (err) {
       logger.error(`Failed to write binary file ${path}:`, err);
@@ -147,6 +160,7 @@ export class BinaryFileSyncService {
   private async _deleteFile(path: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
+      this.onRemoteFileWrittenCb?.(path);
       await this.vault.delete(file);
       logger.debug(`Deleted file: ${path}`);
     }
@@ -155,6 +169,8 @@ export class BinaryFileSyncService {
   private async _renameFile(oldPath: string, newPath: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(oldPath);
     if (file) {
+      this.onRemoteFileWrittenCb?.(oldPath);
+      this.onRemoteFileWrittenCb?.(newPath);
       await this.vault.rename(file, newPath);
       logger.debug(`Renamed file: ${oldPath} → ${newPath}`);
     }

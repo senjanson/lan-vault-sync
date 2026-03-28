@@ -124,7 +124,6 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     await this.coordinator.start();
-    this.statusBar?.update('watching', 0);
   }
 
   async stopSync(): Promise<void> {
