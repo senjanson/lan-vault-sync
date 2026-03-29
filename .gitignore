@@ -29,3 +29,9 @@ npm-debug.log*
 # Environment files
 .env
 .env.local
+
+# Test data with credentials
+test/proxies.txt
+
+# Data folder
+data/
