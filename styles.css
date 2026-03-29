@@ -147,3 +147,52 @@
   margin-bottom: 8px;
 }
 
+/* ─── QR Code Section ──────────────────────────── */
+.lan-sync-qr-section {
+  margin: 12px 0;
+}
+
+.lan-sync-qr-canvas {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  background: #ffffff;
+  border-radius: 8px;
+  margin: 8px 0;
+  border: 1px solid var(--background-modifier-border);
+}
+
+.lan-sync-qr-info {
+  text-align: center;
+  margin: 8px 0;
+}
+
+.lan-sync-qr-address {
+  font-family: var(--font-monospace);
+  font-size: 14px;
+  font-weight: 500;
+  margin: 4px 0;
+}
+
+.lan-sync-qr-uri {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  word-break: break-all;
+  margin: 2px 0;
+}
+
+/* ─── Copyable elements ────────────────────────── */
+.lan-sync-copyable {
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background 0.15s ease;
+}
+
+.lan-sync-copyable:hover {
+  background: var(--background-modifier-hover);
+}
+
+.lan-sync-copyable:active {
+  background: var(--background-modifier-active-hover);
+}
+

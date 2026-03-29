@@ -30,6 +30,7 @@ Most sync solutions route your notes through a third-party server. LAN Vault Syn
 | **Binary file sync** | Images, PDFs, and other attachments synced via SHA-256 hash comparison |
 | **Auto-discovery** | Devices find each other via UDP broadcast — zero configuration needed |
 | **Manual peers** | Add peers by `IP:port` for networks where broadcast is blocked |
+| **QR code pairing** | Generate a QR code on desktop; scan with your phone to add the peer instantly — no typing required |
 | **Offline-friendly** | Edit while offline; changes are merged automatically on reconnect |
 | **P2P architecture** | Every device is equal — no central server or hub required |
 | **Conflict backups** | Binary-file conflicts are backed up before overwrite so nothing is lost |
@@ -82,6 +83,16 @@ Device A (Mac)                        Device B (iPhone / iPad)
 1. Install the plugin on **two or more devices** connected to the same Wi-Fi or LAN.
 2. Open Obsidian on each device.
 3. The plugin automatically discovers peers and begins syncing within seconds.
+
+### QR Code Pairing (Recommended for Mobile)
+
+The easiest way to connect a phone or tablet — no typing required:
+
+1. On the **desktop (Mac / Windows / Linux)**: open **Settings → LAN Vault Sync** and find the **QR Code Pairing** section. A QR code is displayed automatically.
+2. On your **phone / tablet**: scan the QR code with the system camera (or any QR scanner).
+3. The camera will prompt you to open Obsidian. Confirm — the plugin automatically adds the desktop's IP:port as a peer and shows a notification.
+
+> **Tip:** If your desktop has multiple network interfaces (e.g. Wi-Fi + Ethernet), use the dropdown above the QR code to select the correct IP before scanning.
 
 ### Manual Peer Connection
 
@@ -146,7 +157,7 @@ Open the command palette (`Cmd/Ctrl + P`) and search for:
 
 - Mobile devices (iOS / Android) act as WebSocket **clients** only — they cannot run a server due to OS restrictions.
 - A desktop device must be reachable on the network to act as a server for mobile clients.
-- Auto-discovery may not work on mobile; use **Manual Peers** as a fallback.
+- Auto-discovery may not work on mobile; use **QR Code Pairing** or **Manual Peers** as a fallback.
 - Sync resumes automatically when the Obsidian app returns to the foreground.
 
 ### Privacy & Security
@@ -191,6 +202,7 @@ See [doc/debug-and-testing.md](doc/debug-and-testing.md) for a full multi-device
 
 ## Roadmap
 
+- [x] QR code pairing — scan to add a peer instantly (mobile-friendly)
 - [ ] End-to-end encryption (TLS / WireGuard)
 - [ ] Sync progress indicator per file
 - [ ] Selective sync (include/exclude folders per peer)

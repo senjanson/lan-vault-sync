@@ -1,6 +1,6 @@
-import { Plugin, WorkspaceLeaf } from 'obsidian';
+import { Notice, Plugin, WorkspaceLeaf } from 'obsidian';
 import { LANSyncSettings, DEFAULT_SETTINGS, SyncState } from './types';
-import { SYNC_VIEW_TYPE } from './constants';
+import { PLUGIN_ID, SYNC_VIEW_TYPE } from './constants';
 import { setDebugEnabled } from './logger';
 import { SyncCoordinator } from './sync/sync-coordinator';
 import { StatusBar } from './ui/status-bar';
@@ -82,6 +82,16 @@ export default class LANSyncPlugin extends Plugin {
           await this.addManualPeer(input);
         }
       },
+    });
+
+    // Protocol handler: obsidian://lan-vault-sync?action=add-peer&address=ip:port
+    this.registerObsidianProtocolHandler(PLUGIN_ID, async (params) => {
+      if (params.action === 'add-peer' && params.address) {
+        const added = await this.addManualPeer(params.address);
+        if (added) {
+          new Notice(`LAN Sync: Peer ${params.address} added via QR code`);
+        }
+      }
     });
 
     // Auto-start if enabled
