@@ -505,6 +505,64 @@ export class SyncCoordinator {
     return true;
   }
 
+  // ─── Public: Manual full sync with progress ─────────────
+
+  async manualFullSync(
+    onProgress: (percent: number, message: string) => void,
+  ): Promise<void> {
+    const peers = this.connectionManager.getConnectedPeerIds();
+    if (peers.length === 0) {
+      onProgress(100, 'No connected peers');
+      return;
+    }
+
+    onProgress(5, 'Building file tree...');
+    const tree = await buildFileTree(this.vault, this.filter);
+    const metaList = Array.from(tree.files.values());
+    onProgress(15, `Found ${metaList.length} files, syncing with ${peers.length} peer(s)...`);
+
+    const totalPeers = peers.length;
+    for (let i = 0; i < peers.length; i++) {
+      const peerId = peers[i];
+      const peerPercent = 20 + ((i + 1) / totalPeers) * 50;
+
+      const msg = encodeFileMetaSync({ files: metaList });
+      this.connectionManager.sendTo(peerId, msg);
+      onProgress(peerPercent, `Sent file tree to peer ${i + 1}/${totalPeers}`);
+
+      if (i < peers.length - 1) {
+        await new Promise<void>(r => setTimeout(r, 500));
+      }
+    }
+
+    // Wait for sync events to settle (no new events for 2s, max 30s)
+    onProgress(75, 'Waiting for sync responses...');
+    let lastEventTime = Date.now();
+    const origCb = this.onSyncEventCb;
+    this.onSyncEventCb = (msg: string) => {
+      lastEventTime = Date.now();
+      origCb?.(msg);
+    };
+
+    const maxWait = 30_000;
+    const idleThreshold = 2_000;
+    const startWait = Date.now();
+
+    while (Date.now() - lastEventTime < idleThreshold && Date.now() - startWait < maxWait) {
+      await new Promise<void>(r => setTimeout(r, 500));
+      const elapsed = Date.now() - startWait;
+      const waitPercent = Math.min(95, 78 + (elapsed / maxWait) * 17);
+      onProgress(waitPercent, 'Processing sync...');
+    }
+
+    this.onSyncEventCb = origCb;
+
+    onProgress(96, 'Persisting state...');
+    await this.docManager.persistAll();
+
+    onProgress(100, `Sync complete — ${metaList.length} files checked with ${totalPeers} peer(s)`);
+  }
+
   // ─── Private: Periodic full sync ────────────────────────
 
   private async _periodicFullSync(): Promise<void> {

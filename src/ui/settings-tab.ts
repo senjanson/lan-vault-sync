@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 import type LANSyncPlugin from '../main';
 
 export class LANSyncSettingTab extends PluginSettingTab {
@@ -105,6 +105,57 @@ export class LANSyncSettingTab extends PluginSettingTab {
           this.plugin.settings.ignoredPaths = value.split('\n').map(s => s.trim()).filter(Boolean);
           await this.plugin.saveSettings();
         }));
+
+    // ─── Manual Sync ─────────────────────────────────────
+    containerEl.createEl('h3', { text: 'Manual Sync' });
+
+    const syncContainer = containerEl.createDiv({ cls: 'lan-sync-manual-sync' });
+
+    const progressBarOuter = syncContainer.createDiv({ cls: 'lan-sync-progress-bar-outer' });
+    const progressBarInner = progressBarOuter.createDiv({ cls: 'lan-sync-progress-bar-inner' });
+    progressBarInner.style.width = '0%';
+
+    const progressLabel = syncContainer.createDiv({ cls: 'lan-sync-progress-label' });
+    progressLabel.setText('Click "Sync Now" to start a full sync.');
+
+    let isSyncing = false;
+
+    new Setting(syncContainer)
+      .setName('Full Sync')
+      .setDesc('Manually trigger a full sync with all connected peers.')
+      .addButton(btn => {
+        btn.setButtonText('Sync Now')
+          .setCta()
+          .onClick(async () => {
+            if (isSyncing) return;
+            isSyncing = true;
+            btn.setDisabled(true);
+            btn.setButtonText('Syncing...');
+            progressBarInner.style.width = '0%';
+            progressBarInner.removeClass('lan-sync-progress-complete');
+            progressLabel.setText('Starting...');
+
+            try {
+              await this.plugin.manualFullSync((percent: number, message: string) => {
+                progressBarInner.style.width = `${percent}%`;
+                progressLabel.setText(`${Math.round(percent)}% — ${message}`);
+                if (percent >= 100) {
+                  progressBarInner.addClass('lan-sync-progress-complete');
+                }
+              });
+              new Notice('LAN Sync: Full sync complete!');
+            } catch (err) {
+              progressLabel.setText('Sync failed. Check console for details.');
+              progressBarInner.style.width = '100%';
+              progressBarInner.addClass('lan-sync-progress-error');
+              new Notice('LAN Sync: Sync failed!');
+            } finally {
+              isSyncing = false;
+              btn.setDisabled(false);
+              btn.setButtonText('Sync Now');
+            }
+          });
+      });
 
     // ─── Advanced ───────────────────────────────────────
     containerEl.createEl('h3', { text: 'Advanced' });

@@ -160,6 +160,16 @@ export default class LANSyncPlugin extends Plugin {
     this.statusBar?.update('idle');
   }
 
+  async manualFullSync(
+    onProgress: (percent: number, message: string) => void,
+  ): Promise<void> {
+    if (!this.coordinator) {
+      onProgress(100, 'Sync is not running');
+      return;
+    }
+    await this.coordinator.manualFullSync(onProgress);
+  }
+
   private async activateView(): Promise<void> {
     const { workspace } = this.app;
 
