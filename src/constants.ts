@@ -1,12 +1,12 @@
-export const PLUGIN_ID = 'lan-sync';
-export const PLUGIN_NAME = 'LAN Sync';
+export const PLUGIN_ID = 'lan-vault-sync';
+export const PLUGIN_NAME = 'LAN Vault Sync';
 
 export const DEFAULT_WS_PORT = 53712;
 export const DISCOVERY_PORT = 53713;
 export const DISCOVERY_INTERVAL_MS = 5000;
 export const DEVICE_TIMEOUT_MS = 15000;
 
-export const SYNC_VIEW_TYPE = 'lan-sync-view';
+export const SYNC_VIEW_TYPE = 'lan-vault-sync-view';
 
 export const TEXT_EXTENSIONS = new Set([
   'md', 'txt', 'css', 'js', 'ts', 'json', 'yaml', 'yml',
@@ -17,8 +17,8 @@ export const TEXT_EXTENSIONS = new Set([
   'markdown', 'mdown', 'mkdn', 'mdwn',
 ]);
 
-export const CRDT_STATE_DIR = '.obsidian/plugins/lan-sync/crdt-state';
-export const CONFLICT_BACKUP_DIR = '.obsidian/plugins/lan-sync/conflicts';
+export const CRDT_STATE_DIR = '.obsidian/plugins/lan-vault-sync/crdt-state';
+export const CONFLICT_BACKUP_DIR = '.obsidian/plugins/lan-vault-sync/conflicts';
 
 export const MAX_ACTIVE_DOCS = 50;
 export const DEBOUNCE_MS = 200;

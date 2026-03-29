@@ -18,11 +18,11 @@ export class LANSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl('h2', { text: 'LAN Sync Settings' });
+    containerEl.createEl('h2', { text: 'LAN Vault Sync Settings' });
 
     new Setting(containerEl)
       .setName('Enable Sync')
-      .setDesc('Turn LAN synchronization on or off.')
+      .setDesc('Turn LAN Vault Sync on or off.')
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.enabled)
         .onChange(async (value) => {

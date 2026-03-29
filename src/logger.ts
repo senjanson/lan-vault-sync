@@ -8,15 +8,15 @@ export function setDebugEnabled(enabled: boolean): void {
 
 export const logger: SyncLogger = {
   debug(...args: unknown[]) {
-    if (debugEnabled) console.debug('[LAN-Sync]', ...args);
+    if (debugEnabled) console.debug('[LAN-Vault-Sync]', ...args);
   },
   info(...args: unknown[]) {
-    console.info('[LAN-Sync]', ...args);
+    console.info('[LAN-Vault-Sync]', ...args);
   },
   warn(...args: unknown[]) {
-    console.warn('[LAN-Sync]', ...args);
+    console.warn('[LAN-Vault-Sync]', ...args);
   },
   error(...args: unknown[]) {
-    console.error('[LAN-Sync]', ...args);
+    console.error('[LAN-Vault-Sync]', ...args);
   },
 };

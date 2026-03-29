@@ -53,8 +53,8 @@ export default class LANSyncPlugin extends Plugin {
 
     // Commands
     this.addCommand({
-      id: 'lan-sync-toggle',
-      name: 'Toggle LAN Sync',
+      id: 'lan-vault-sync-toggle',
+      name: 'Toggle LAN Vault Sync',
       callback: async () => {
         this.settings.enabled = !this.settings.enabled;
         await this.saveSettings();
@@ -67,13 +67,13 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: 'lan-sync-open-panel',
+      id: 'lan-vault-sync-open-panel',
       name: 'Open Sync Panel',
       callback: () => this.activateView(),
     });
 
     this.addCommand({
-      id: 'lan-sync-add-peer',
+      id: 'lan-vault-sync-add-peer',
       name: 'Add Manual Peer',
       callback: async () => {
         // Simple prompt for adding a peer
