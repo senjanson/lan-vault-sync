@@ -137,6 +137,34 @@ export class YjsDocManager {
     this.lastKnownContent.set(filePath, content);
   }
 
+  /** Return true if a doc is currently active (loaded) in the pool. */
+  isDocActive(filePath: string): boolean {
+    return this.pool.has(filePath);
+  }
+
+  /**
+   * Initialize a doc from known content WITHOUT broadcasting the insert as a
+   * local update. Used for conflict-resolution CRDT exchange so we don't
+   * inadvertently push our full content to all peers before the merge step.
+   * No-op if the doc is already active.
+   */
+  async initDocFromContentSilent(filePath: string, content: string): Promise<void> {
+    if (this.pool.has(filePath)) return;
+
+    const doc = await this.getOrCreateDoc(filePath);
+    const ytext = doc.getText('content');
+
+    if (ytext.length === 0 && content.length > 0) {
+      // Use a neutral origin ('init') so the update listener does not fire
+      // the local-broadcast callback.
+      doc.transact(() => {
+        ytext.insert(0, content);
+      }, 'init');
+    }
+
+    this.lastKnownContent.set(filePath, ytext.toString());
+  }
+
   /** Remove a doc (file was deleted) */
   async removeDoc(filePath: string): Promise<void> {
     this.pool.delete(filePath);

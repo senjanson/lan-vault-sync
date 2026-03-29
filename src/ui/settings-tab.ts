@@ -70,9 +70,11 @@ export class LANSyncSettingTab extends PluginSettingTab {
     const peerContainer = containerEl.createDiv();
     this._renderPeerList(peerContainer);
 
+    let peerTextInput: import('obsidian').TextComponent;
     new Setting(containerEl)
       .setName('Add Peer')
       .addText(text => {
+        peerTextInput = text;
         text.setPlaceholder('192.168.1.100:53712');
         text.inputEl.addEventListener('keydown', async (e: KeyboardEvent) => {
           if (e.key === 'Enter') {
@@ -83,12 +85,11 @@ export class LANSyncSettingTab extends PluginSettingTab {
       .addButton(btn => btn
         .setButtonText('Add')
         .onClick(async () => {
-          const input = containerEl.querySelector('.setting-item:last-child input') as HTMLInputElement;
-          if (input) {
-            await this.addPeerFromInput(input.value, peerContainer, () => {
-              input.value = '';
-            });
-          }
+          await this.addPeerFromInput(
+            peerTextInput.getValue(),
+            peerContainer,
+            () => peerTextInput.setValue(''),
+          );
         }));
 
     // ─── Ignored Paths ──────────────────────────────────

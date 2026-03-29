@@ -214,6 +214,9 @@ export class SyncCoordinator {
       case MessageType.YJS_SYNC_STEP1: {
         const msg = decodeYjsSync(payload);
         if (!this._isSafePath(msg.filePath)) break;
+        // Ensure the local doc is seeded from disk so we don't respond with an
+        // empty state when we have content the remote peer hasn't seen yet.
+        await this._ensureCrdtInitialized(msg.filePath);
         const response = await this.docManager.handleSyncStep1(msg.filePath, msg.data);
         const reply = encodeYjsSync(MessageType.YJS_SYNC_STEP2, msg.filePath, response);
         this.connectionManager.sendTo(deviceId, reply);
@@ -363,20 +366,49 @@ export class SyncCoordinator {
       this._emitEvent(`Sending: ${file.path}`);
     }
 
-    // Conflicting files (different hash) — use mtime to pick winner
+    // Conflicting files (different hash).
+    // For text files use CRDT sync so both sides' edits are merged without
+    // losing data.  For binary files fall back to mtime-based winner selection.
     for (const { local, remote } of treeDiff.conflicting) {
-      if (remote.mtime > local.mtime) {
-        // Remote is newer — request it
-        this.binarySync.requestFile(deviceId, remote.path);
-        this._emitEvent(`Requesting newer: ${remote.path}`);
+      if (local.isTextFile) {
+        // Seed the local CRDT doc from disk (silently — no broadcast yet).
+        await this._ensureCrdtInitialized(local.path);
+        // Send sync step 1 — the peer will respond with its content diff and
+        // both sides will converge on the CRDT-merged result.
+        const stateVector = await this.docManager.encodeSyncStep1(local.path);
+        const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, local.path, stateVector);
+        this.connectionManager.sendTo(deviceId, msg);
+        this._emitEvent(`CRDT merge conflict: ${local.path}`);
       } else {
-        // Local is newer (or same mtime) — send ours
-        await this.binarySync.sendFileToPeer(deviceId, local.path);
-        this._emitEvent(`Sending newer: ${local.path}`);
+        if (remote.mtime > local.mtime) {
+          // Remote is newer — request it
+          this.binarySync.requestFile(deviceId, remote.path);
+          this._emitEvent(`Requesting newer binary: ${remote.path}`);
+        } else {
+          // Local is newer (or same mtime) — send ours
+          await this.binarySync.sendFileToPeer(deviceId, local.path);
+          this._emitEvent(`Sending newer binary: ${local.path}`);
+        }
       }
     }
 
     this._emitEvent(`Tree sync with ${deviceId}: +${treeDiff.remoteOnly.length} -0 ~${treeDiff.conflicting.length}`);
+  }
+
+  // ─── Private: CRDT initialization helper ─────────────────
+
+  /**
+   * If no CRDT doc is active for filePath yet, load the current file content
+   * from disk into a new doc WITHOUT broadcasting it as a local update.
+   * This is used to prime docs before a Yjs sync exchange so that the peer
+   * receives our actual content, not an empty state.
+   */
+  private async _ensureCrdtInitialized(filePath: string): Promise<void> {
+    if (this.docManager.isDocActive(filePath)) return;
+    const file = this.vault.getAbstractFileByPath(filePath);
+    if (!(file instanceof TFile)) return;
+    const content = await this.vault.cachedRead(file);
+    await this.docManager.initDocFromContentSilent(filePath, content);
   }
 
   // ─── Private: Periodic full sync ────────────────────────
