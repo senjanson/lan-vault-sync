@@ -30,8 +30,8 @@ npm-debug.log*
 .env
 .env.local
 
-# Test data with credentials
-test/proxies.txt
+# Test folder
+test/
 
 # Data folder
 data/
