@@ -41,6 +41,11 @@ export class SyncCoordinator {
   /** Tracks (deviceId:filePath) combos where we've already sent a reverse
    *  SYNC_STEP1 in response to receiving one, to prevent infinite loops. */
   private reverseSyncSent = new Set<string>();
+  /** Tracks file paths where we are the conflict "loser" and must NOT seed
+   *  the CRDT doc from disk.  The winner will send us their content via
+   *  YJS_UPDATE on an empty doc — initialising it from disk would cause
+   *  duplication when the update is applied. */
+  private conflictLoserPaths = new Set<string>();
   private vaultId: string;
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
@@ -191,6 +196,9 @@ export class SyncCoordinator {
       for (const key of this.reverseSyncSent) {
         if (key.startsWith(deviceId + ':')) this.reverseSyncSent.delete(key);
       }
+      // Clear any conflict-loser guards — if the winner disconnected before
+      // sending their content, we must not keep blocking these paths forever.
+      this.conflictLoserPaths.clear();
       this._emitEvent(`Disconnected: ${deviceId}`);
     });
 
@@ -231,7 +239,12 @@ export class SyncCoordinator {
         await this._flushPendingLocalTextChange(msg.filePath);
         // Ensure the local doc is seeded from disk so we don't respond with an
         // empty state when we have content the remote peer hasn't seen yet.
-        await this._ensureCrdtInitialized(msg.filePath);
+        // Skip seeding if we are the conflict "loser" for this path — the
+        // winner will overwrite our content via YJS_UPDATE and seeding from
+        // disk would cause duplication when the two states merge.
+        if (!this.conflictLoserPaths.has(msg.filePath)) {
+          await this._ensureCrdtInitialized(msg.filePath);
+        }
         const response = await this.docManager.handleSyncStep1(msg.filePath, msg.data);
         const reply = encodeYjsSync(MessageType.YJS_SYNC_STEP2, msg.filePath, response);
         this.connectionManager.sendTo(deviceId, reply);
@@ -348,24 +361,29 @@ export class SyncCoordinator {
       const latestContent = await this.docManager.getContent(filePath).catch(() => content);
       const file = this.vault.getAbstractFileByPath(filePath);
 
-      if (file instanceof TFile && typeof previousContent === 'string') {
+      // Always back up disk content when it will be overwritten with
+      // different data, regardless of whether previousContent is known.
+      // This is the last safety-net against data loss.
+      if (file instanceof TFile) {
         const diskContent = await this.vault.cachedRead(file);
-        if (
-          diskContent !== previousContent &&
-          diskContent !== latestContent
-        ) {
-          const backup = await this.backupService.backupTextFile(
-            filePath,
-            diskContent,
-            'text-remote-overwrite',
-            {
-              previousContent,
-              mergedContent: latestContent,
-            },
-          );
-          if (backup) {
-            logger.warn(`Backed up divergent text file before remote write: ${filePath} -> ${backup.contentPath}`);
-            this._emitEvent(`Conflict backup created for ${filePath}`);
+        if (diskContent !== latestContent) {
+          const needsBackup = typeof previousContent === 'string'
+            ? (diskContent !== previousContent)
+            : true; // previousContent unknown → always back up to be safe
+          if (needsBackup) {
+            const backup = await this.backupService.backupTextFile(
+              filePath,
+              diskContent,
+              'text-remote-overwrite',
+              {
+                previousContent: previousContent ?? '(unknown)',
+                mergedContent: latestContent,
+              },
+            );
+            if (backup) {
+              logger.warn(`Backed up divergent text file before remote write: ${filePath} -> ${backup.contentPath}`);
+              this._emitEvent(`Conflict backup created for ${filePath}`);
+            }
           }
         }
       }
@@ -382,6 +400,11 @@ export class SyncCoordinator {
         await this.vault.create(filePath, latestContent);
         this.watcher.markRemoteWrite(filePath);
       }
+
+      // If this file was in the conflict-loser set, the winner's content has
+      // now been written.  Clear the guard so future syncs treat the doc
+      // normally (it now has shared CRDT history with the winner).
+      this.conflictLoserPaths.delete(filePath);
     } catch (err) {
       logger.error(`Failed to write remote content to ${filePath}:`, err);
     }
@@ -457,14 +480,54 @@ export class SyncCoordinator {
     for (const { local, remote } of treeDiff.conflicting) {
       if (local.isTextFile) {
         await this._flushPendingLocalTextChange(local.path);
-        // Seed the local CRDT doc from disk (silently — no broadcast yet).
-        await this._ensureCrdtInitialized(local.path);
-        // Send sync step 1 — the peer will respond with its content diff and
-        // both sides will converge on the CRDT-merged result.
-        const stateVector = await this.docManager.encodeSyncStep1(local.path);
-        const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, local.path, stateVector);
-        this.connectionManager.sendTo(deviceId, msg);
-        this._emitEvent(`CRDT merge conflict: ${local.path}`);
+
+        // Check whether we have persisted CRDT state for this file.  Persisted
+        // state implies a previous sync established shared history, so a CRDT
+        // merge will produce correct results.  Without shared history the two
+        // Y.Docs were initialised independently and merging would concatenate
+        // their full contents — a destructive duplication bug.
+        const hasSharedHistory = await this.docManager.hasDocState(local.path);
+
+        if (hasSharedHistory) {
+          // Shared CRDT history exists — safe to merge via Yjs sync protocol.
+          await this._ensureCrdtInitialized(local.path);
+          const stateVector = await this.docManager.encodeSyncStep1(local.path);
+          const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, local.path, stateVector);
+          this.connectionManager.sendTo(deviceId, msg);
+          this._emitEvent(`CRDT merge conflict: ${local.path}`);
+        } else {
+          // No shared history — fall back to deterministic winner selection
+          // with a full backup so zero data is lost.
+          const localFile = this.vault.getAbstractFileByPath(local.path);
+          if (localFile instanceof TFile) {
+            const content = await this.vault.cachedRead(localFile);
+            await this.backupService.backupTextFile(
+              local.path,
+              content,
+              'text-conflict-no-history',
+              { localMtime: local.mtime, remoteMtime: remote.mtime },
+            );
+            this._emitEvent(`Conflict backup created: ${local.path}`);
+          }
+
+          const localWins = this._isConflictWinner(local.mtime, remote.mtime, deviceId);
+
+          if (localWins) {
+            // We are the winner — send our full content.  The losing side
+            // will receive it as a YJS_UPDATE on an empty doc so no
+            // duplication can occur.
+            await this._sendFullTextState(deviceId, local.path, 'Sending conflict winner');
+          } else {
+            // We are the loser — discard any queued local change and do NOT
+            // initialise the CRDT doc.  The winner's YJS_UPDATE will create
+            // the doc from scratch with their content, then
+            // _writeFileFromRemote will create a second backup of our disk
+            // content before overwriting.
+            this.watcher.consumePendingModify(local.path);
+            this.conflictLoserPaths.add(local.path);
+            this._emitEvent(`Waiting for conflict winner: ${local.path}`);
+          }
+        }
       } else {
         if (remote.mtime > local.mtime) {
           // Remote is newer — request it
@@ -497,17 +560,23 @@ export class SyncCoordinator {
   // ─── Private: CRDT initialization helper ─────────────────
 
   /**
-   * If no CRDT doc is active for filePath yet, load the current file content
-   * from disk into a new doc WITHOUT broadcasting it as a local update.
-   * This is used to prime docs before a Yjs sync exchange so that the peer
-   * receives our actual content, not an empty state.
+   * Ensure the CRDT doc for filePath contains the current on-disk content.
+   *
+   * If the doc is already active (in pool), trust its content — it was either
+   * updated by a local change event or by a recent remote update, both of
+   * which are more current than disk.
+   *
+   * If the doc is NOT active, create one and seed it from disk silently (no
+   * broadcast).  `initDocFromContentSilent` handles the case where persisted
+   * state was loaded but diverges from disk by applying the diff with a
+   * neutral origin that does NOT trigger the local-broadcast callback.
    */
   private async _ensureCrdtInitialized(filePath: string): Promise<void> {
     if (this.docManager.isDocActive(filePath)) return;
     const file = this.vault.getAbstractFileByPath(filePath);
     if (!(file instanceof TFile)) return;
-    const content = await this.vault.cachedRead(file);
-    await this.docManager.initDocFromContentSilent(filePath, content);
+    const diskContent = await this.vault.cachedRead(file);
+    await this.docManager.initDocFromContentSilent(filePath, diskContent);
   }
 
   private async _sendFullTextState(deviceId: string, filePath: string, eventPrefix: string): Promise<void> {
@@ -631,6 +700,20 @@ export class SyncCoordinator {
 
   private _shouldBootstrapSharedTextState(deviceId: string): boolean {
     return this.settings.deviceId <= deviceId;
+  }
+
+  /**
+   * Deterministic conflict winner selection.  Both sides compute the same
+   * result so exactly one sends its content and the other waits.
+   *
+   * Winner: the side with the more-recent mtime.  On tie: the side whose
+   * deviceId is lexicographically smaller.
+   */
+  private _isConflictWinner(localMtime: number, remoteMtime: number, remoteDeviceId: string): boolean {
+    if (localMtime !== remoteMtime) {
+      return localMtime > remoteMtime;
+    }
+    return this.settings.deviceId < remoteDeviceId;
   }
 
   /** Validate that a path from a remote peer is safe (no traversal) */

@@ -213,20 +213,45 @@ export class YjsDocManager {
    * Initialize a doc from known content WITHOUT broadcasting the insert as a
    * local update. Used for conflict-resolution CRDT exchange so we don't
    * inadvertently push our full content to all peers before the merge step.
-   * No-op if the doc is already active.
+   *
+   * If the doc already exists and its content matches `content`, this is a
+   * no-op.  If the doc exists but has *different* content (e.g. restored from
+   * stale persistence), the diff is applied silently so the doc reflects the
+   * actual on-disk state before the sync exchange begins.
    */
   async initDocFromContentSilent(filePath: string, content: string): Promise<void> {
     await this._enqueueForPath(filePath, async () => {
-      if (this.pool.has(filePath)) return;
-
       const doc = await this.getOrCreateDoc(filePath);
       const ytext = doc.getText('content');
+      const existing = ytext.toString();
 
+      if (existing === content) {
+        // Already up-to-date — nothing to do.
+        this.lastKnownContent.set(filePath, content);
+        return;
+      }
+
+      // Use a neutral origin ('init') so the update listener does not fire
+      // the local-broadcast callback.
       if (ytext.length === 0 && content.length > 0) {
-        // Use a neutral origin ('init') so the update listener does not fire
-        // the local-broadcast callback.
         doc.transact(() => {
           ytext.insert(0, content);
+        }, 'init');
+      } else if (existing !== content) {
+        // Doc has stale/different content — apply diff silently.
+        doc.transact(() => {
+          const diffs = diff(existing, content);
+          let index = 0;
+          for (const [op, text] of diffs) {
+            if (op === diff.EQUAL) {
+              index += text.length;
+            } else if (op === diff.INSERT) {
+              ytext.insert(index, text);
+              index += text.length;
+            } else if (op === diff.DELETE) {
+              ytext.delete(index, text.length);
+            }
+          }
         }, 'init');
       }
 
