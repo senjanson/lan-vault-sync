@@ -214,6 +214,7 @@ export class SyncCoordinator {
       case MessageType.YJS_SYNC_STEP1: {
         const msg = decodeYjsSync(payload);
         if (!this._isSafePath(msg.filePath)) break;
+        await this._flushPendingLocalTextChange(msg.filePath);
         // Ensure the local doc is seeded from disk so we don't respond with an
         // empty state when we have content the remote peer hasn't seen yet.
         await this._ensureCrdtInitialized(msg.filePath);
@@ -226,6 +227,7 @@ export class SyncCoordinator {
       case MessageType.YJS_SYNC_STEP2: {
         const msg = decodeYjsSync(payload);
         if (!this._isSafePath(msg.filePath)) break;
+        await this._flushPendingLocalTextChange(msg.filePath);
         await this.docManager.handleSyncStep2(msg.filePath, msg.data);
         break;
       }
@@ -233,6 +235,7 @@ export class SyncCoordinator {
       case MessageType.YJS_UPDATE: {
         const msg = decodeYjsSync(payload);
         if (!this._isSafePath(msg.filePath)) break;
+        await this._flushPendingLocalTextChange(msg.filePath);
         await this.docManager.applyRemoteUpdate(msg.filePath, msg.data);
         break;
       }
@@ -300,17 +303,19 @@ export class SyncCoordinator {
         logger.warn(`Rejected unsafe remote path: ${filePath}`);
         return;
       }
+      await this._flushPendingLocalTextChange(filePath);
+      const latestContent = await this.docManager.getContent(filePath).catch(() => content);
       this.watcher.markRemoteWrite(filePath);
       const file = this.vault.getAbstractFileByPath(filePath);
 
       if (file instanceof TFile) {
-        await this.vault.modify(file, content);
+        await this.vault.modify(file, latestContent);
       } else {
         const adapter = (this.vault as any).adapter;
         if (adapter) {
           await ensureParentDirectory(adapter, filePath);
         }
-        await this.vault.create(filePath, content);
+        await this.vault.create(filePath, latestContent);
         this.watcher.markRemoteWrite(filePath);
       }
     } catch (err) {
@@ -371,6 +376,7 @@ export class SyncCoordinator {
     // losing data.  For binary files fall back to mtime-based winner selection.
     for (const { local, remote } of treeDiff.conflicting) {
       if (local.isTextFile) {
+        await this._flushPendingLocalTextChange(local.path);
         // Seed the local CRDT doc from disk (silently — no broadcast yet).
         await this._ensureCrdtInitialized(local.path);
         // Send sync step 1 — the peer will respond with its content diff and
@@ -409,6 +415,25 @@ export class SyncCoordinator {
     if (!(file instanceof TFile)) return;
     const content = await this.vault.cachedRead(file);
     await this.docManager.initDocFromContentSilent(filePath, content);
+  }
+
+  /**
+   * If a local modify is still sitting in the debounce queue, ingest the
+   * current on-disk content into Yjs before we process a remote update.
+   */
+  private async _flushPendingLocalTextChange(filePath: string): Promise<boolean> {
+    if (!this.watcher.consumePendingModify(filePath)) {
+      return false;
+    }
+
+    const file = this.vault.getAbstractFileByPath(filePath);
+    if (!(file instanceof TFile)) {
+      return false;
+    }
+
+    const content = await this.vault.cachedRead(file);
+    await this.docManager.applyLocalChange(filePath, content);
+    return true;
   }
 
   // ─── Private: Periodic full sync ────────────────────────

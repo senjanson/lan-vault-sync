@@ -30,6 +30,23 @@ export class VaultWatcher {
     setTimeout(() => this.remoteWritePaths.delete(filePath), 2000);
   }
 
+  hasPendingModify(filePath: string): boolean {
+    return this.debounceTimers.has(filePath);
+  }
+
+  /**
+   * Cancel a pending debounced modify event so the caller can ingest the latest
+   * on-disk content immediately before applying a remote change.
+   */
+  consumePendingModify(filePath: string): boolean {
+    const timer = this.debounceTimers.get(filePath);
+    if (!timer) return false;
+
+    clearTimeout(timer);
+    this.debounceTimers.delete(filePath);
+    return true;
+  }
+
   start(): void {
     this.eventRefs.push(
       this.vault.on('create', (file) => this._onEvent('create', file)),
