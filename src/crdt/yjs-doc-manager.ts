@@ -10,6 +10,7 @@ export class YjsDocManager {
   private pool: DocPool;
   private persistence: StatePersistence;
   private lastKnownContent = new Map<string, string>();
+  private pendingDocs = new Map<string, Promise<Y.Doc>>();
 
   // Callbacks
   private onLocalUpdateCb: ((filePath: string, update: Uint8Array) => void) | null = null;
@@ -34,12 +35,30 @@ export class YjsDocManager {
     this.onRemoteContentCb = cb;
   }
 
-  /** Get or create the Y.Doc for a file path */
+  /** Get or create the Y.Doc for a file path (serialized per path to prevent races) */
   async getOrCreateDoc(filePath: string): Promise<Y.Doc> {
-    let doc = this.pool.get(filePath);
-    if (doc) return doc;
+    const existing = this.pool.get(filePath);
+    if (existing) return existing;
 
-    doc = new Y.Doc();
+    // If another call is already creating this doc, wait for it
+    const pending = this.pendingDocs.get(filePath);
+    if (pending) return pending;
+
+    const promise = this._createDoc(filePath);
+    this.pendingDocs.set(filePath, promise);
+    try {
+      return await promise;
+    } finally {
+      this.pendingDocs.delete(filePath);
+    }
+  }
+
+  private async _createDoc(filePath: string): Promise<Y.Doc> {
+    // Double-check after await in case another call snuck in
+    const existing = this.pool.get(filePath);
+    if (existing) return existing;
+
+    const doc = new Y.Doc();
     // Try to restore persisted state
     await this.persistence.loadDoc(filePath, doc);
 

@@ -220,19 +220,26 @@ export class ConnectionManager {
     this.peers.set(device.deviceId, peer);
 
     ws.on('message', (raw: Buffer | ArrayBuffer) => {
-      const msg = decodeMessage(this._toUint8Array(raw));
+      try {
+        const msg = decodeMessage(this._toUint8Array(raw));
 
-      if (msg.type === MessageType.PING) {
-        ws.send(encodePong());
-        return;
-      }
-      if (msg.type === MessageType.PONG) return;
-      if (msg.type === MessageType.HANDSHAKE_ACK) {
-        // Handshake complete for outbound
-        return;
-      }
+        if (msg.type === MessageType.PING) {
+          ws.send(encodePong());
+          return;
+        }
+        if (msg.type === MessageType.PONG) return;
+        if (msg.type === MessageType.HANDSHAKE_ACK) {
+          // Handshake complete for outbound
+          return;
+        }
 
-      this.messageHandler?.(device.deviceId, msg.type, msg.payload);
+        const result = this.messageHandler?.(device.deviceId, msg.type, msg.payload);
+        if (result && typeof (result as any).catch === 'function') {
+          (result as Promise<void>).catch(err => logger.error(`Error handling message from ${device.deviceId}:`, err));
+        }
+      } catch (err) {
+        logger.error(`Error decoding message from ${device.deviceId}:`, err);
+      }
     });
 
     ws.on('close', () => {
