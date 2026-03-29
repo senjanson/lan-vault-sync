@@ -1,4 +1,5 @@
 import { Vault, TFile } from 'obsidian';
+import * as Y from 'yjs';
 import { ConnectionManager } from '../transport/connection-manager';
 import {
   encodeYjsSync,
@@ -36,6 +37,7 @@ export class SyncCoordinator {
   private filter: FileFilter;
   private fullSyncTimer: ReturnType<typeof setInterval> | null = null;
   private persistTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingInitialBootstrapPeers = new Set<string>();
   private vaultId: string;
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
@@ -176,10 +178,12 @@ export class SyncCoordinator {
     // Peer connected → initial sync
     this.connectionManager.onPeerConnected(async (device) => {
       this._emitEvent(`Connected to ${device.deviceId}`);
+      this.pendingInitialBootstrapPeers.add(device.deviceId);
       await this._initialSyncWith(device.deviceId);
     });
 
     this.connectionManager.onPeerDisconnected((deviceId) => {
+      this.pendingInitialBootstrapPeers.delete(deviceId);
       this._emitEvent(`Disconnected: ${deviceId}`);
     });
 
@@ -382,6 +386,7 @@ export class SyncCoordinator {
 
   private async _handleRemoteFileTree(deviceId: string, meta: FileMetaSyncPayload): Promise<void> {
     const localTree = await buildFileTree(this.vault, this.filter);
+    const isInitialBootstrap = this.pendingInitialBootstrapPeers.has(deviceId);
     const remoteFiles = new Map<string, typeof meta.files[number]>();
     for (const f of meta.files) {
       remoteFiles.set(f.path, f);
@@ -391,14 +396,26 @@ export class SyncCoordinator {
 
     // Files only on remote — request them (file-level transfer for both text & binary)
     for (const file of treeDiff.remoteOnly) {
-      this.binarySync.requestFile(deviceId, file.path);
-      this._emitEvent(`Requesting: ${file.path}`);
+      if (file.isTextFile) {
+        await this.docManager.removeDoc(file.path);
+        const emptyState = Y.encodeStateVector(new Y.Doc());
+        const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, file.path, emptyState);
+        this.connectionManager.sendTo(deviceId, msg);
+        this._emitEvent(`Requesting text state: ${file.path}`);
+      } else {
+        this.binarySync.requestFile(deviceId, file.path);
+        this._emitEvent(`Requesting: ${file.path}`);
+      }
     }
 
     // Files only locally — send them to the specific peer
     for (const file of treeDiff.localOnly) {
-      await this.binarySync.sendFileToPeer(deviceId, file.path);
-      this._emitEvent(`Sending: ${file.path}`);
+      if (file.isTextFile) {
+        await this._sendFullTextState(deviceId, file.path, 'Sending text state');
+      } else {
+        await this.binarySync.sendFileToPeer(deviceId, file.path);
+        this._emitEvent(`Sending: ${file.path}`);
+      }
     }
 
     // Conflicting files (different hash).
@@ -428,6 +445,19 @@ export class SyncCoordinator {
       }
     }
 
+    if (isInitialBootstrap) {
+      for (const [path, local] of localTree.files) {
+        const remote = remoteFiles.get(path);
+        if (!remote || !local.isTextFile) continue;
+        if (local.hash !== remote.hash) continue;
+        if (!this._shouldBootstrapSharedTextState(deviceId)) continue;
+
+        await this._sendFullTextState(deviceId, path, 'Bootstrapping shared text state');
+      }
+
+      this.pendingInitialBootstrapPeers.delete(deviceId);
+    }
+
     this._emitEvent(`Tree sync with ${deviceId}: +${treeDiff.remoteOnly.length} -0 ~${treeDiff.conflicting.length}`);
   }
 
@@ -445,6 +475,15 @@ export class SyncCoordinator {
     if (!(file instanceof TFile)) return;
     const content = await this.vault.cachedRead(file);
     await this.docManager.initDocFromContentSilent(filePath, content);
+  }
+
+  private async _sendFullTextState(deviceId: string, filePath: string, eventPrefix: string): Promise<void> {
+    await this._flushPendingLocalTextChange(filePath);
+    await this._ensureCrdtInitialized(filePath);
+    const update = await this.docManager.encodeFullState(filePath);
+    const msg = encodeYjsSync(MessageType.YJS_UPDATE, filePath, update);
+    this.connectionManager.sendTo(deviceId, msg);
+    this._emitEvent(`${eventPrefix}: ${filePath}`);
   }
 
   /**
@@ -497,6 +536,10 @@ export class SyncCoordinator {
   private _emitEvent(msg: string): void {
     logger.info(msg);
     this.onSyncEventCb?.(msg);
+  }
+
+  private _shouldBootstrapSharedTextState(deviceId: string): boolean {
+    return this.settings.deviceId <= deviceId;
   }
 
   /** Validate that a path from a remote peer is safe (no traversal) */

@@ -149,6 +149,13 @@ export class YjsDocManager {
     });
   }
 
+  async encodeFullState(filePath: string): Promise<Uint8Array> {
+    return this._enqueueForPath(filePath, async () => {
+      const doc = await this.getOrCreateDoc(filePath);
+      return Y.encodeStateAsUpdate(doc);
+    });
+  }
+
   /** Handle sync step 1 from peer (state vector), produce sync step 2 (update diff) */
   async handleSyncStep1(filePath: string, data: Uint8Array): Promise<Uint8Array> {
     return this._enqueueForPath(filePath, async () => {
@@ -234,6 +241,11 @@ export class YjsDocManager {
       this.lastKnownContent.set(filePath, content);
       return content;
     });
+  }
+
+  async hasDocState(filePath: string): Promise<boolean> {
+    if (this.pool.has(filePath)) return true;
+    return this.persistence.hasDoc(filePath);
   }
 
   /** Remove a doc (file was deleted) */

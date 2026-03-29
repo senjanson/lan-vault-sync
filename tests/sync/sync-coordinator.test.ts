@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TFile } from 'obsidian';
-import { decodeMessage, encodeYjsSync } from '../../src/transport/protocol';
+import { decodeMessage, decodeYjsSync, encodeYjsSync } from '../../src/transport/protocol';
 import { SyncCoordinator } from '../../src/sync/sync-coordinator';
-import { DEFAULT_SETTINGS, MessageType } from '../../src/types';
+import { DEFAULT_SETTINGS, MessageType, type FileMetaSyncPayload } from '../../src/types';
 
 class FakeVault {
   adapter = {};
@@ -35,8 +35,18 @@ class FakeVault {
     return this.getFile(path);
   }
 
+  getFiles(): TFile[] {
+    return Array.from(this.files.values()).map((entry) => entry.file);
+  }
+
   async cachedRead(file: TFile): Promise<string> {
     return this.files.get(file.path)?.content ?? '';
+  }
+
+  async readBinary(file: TFile): Promise<ArrayBuffer> {
+    const text = this.files.get(file.path)?.content ?? '';
+    const bytes = new TextEncoder().encode(text);
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   }
 
   async modify(file: TFile, content: string): Promise<void> {
@@ -126,5 +136,100 @@ describe('SyncCoordinator text conflict safety', () => {
     );
     expect(markRemoteWrite).toHaveBeenCalledWith('note.md');
     expect(await vault.cachedRead(vault.getFile('note.md')!)).toBe('merged content');
+  });
+
+  it('requests remote-only text files through Yjs state sync', async () => {
+    const sendTo = vi.fn();
+    const buildFileTreeModule = await import('../../src/sync/file-tree');
+    const buildSpy = vi.spyOn(buildFileTreeModule, 'buildFileTree');
+
+    vault.setText('local.md', 'local');
+    (coordinator as any).connectionManager = { sendTo };
+    (coordinator as any).docManager = {
+      removeDoc: vi.fn().mockResolvedValue(undefined),
+    };
+    buildSpy.mockResolvedValueOnce({
+      files: new Map([
+        ['local.md', { path: 'local.md', hash: 'local-hash', mtime: 1, size: 5, isTextFile: true }],
+      ]),
+      timestamp: Date.now(),
+    });
+
+    const remoteTree: FileMetaSyncPayload = {
+      files: [
+        { path: 'local.md', hash: 'local-hash', mtime: 1, size: 5, isTextFile: true },
+        { path: 'remote.md', hash: 'remote-hash', mtime: 2, size: 6, isTextFile: true },
+      ],
+    };
+
+    await (coordinator as any)._handleRemoteFileTree('peer-1', remoteTree);
+
+    expect(sendTo).toHaveBeenCalledTimes(1);
+    expect(sendTo.mock.calls[0][0]).toBe('peer-1');
+
+    const outbound = decodeMessage(sendTo.mock.calls[0][1]);
+    expect(outbound.type).toBe(MessageType.YJS_SYNC_STEP1);
+    expect(decodeYjsSync(outbound.payload).filePath).toBe('remote.md');
+    buildSpy.mockRestore();
+  });
+
+  it('sends full text state for local-only text files', async () => {
+    const sendTo = vi.fn();
+    const sendFullTextState = vi
+      .spyOn(coordinator as any, '_sendFullTextState')
+      .mockResolvedValue(undefined);
+    const buildFileTreeModule = await import('../../src/sync/file-tree');
+    const buildSpy = vi.spyOn(buildFileTreeModule, 'buildFileTree');
+
+    (coordinator as any).connectionManager = { sendTo };
+    buildSpy.mockResolvedValueOnce({
+      files: new Map([
+        ['note.md', { path: 'note.md', hash: 'local-hash', mtime: 1, size: 13, isTextFile: true }],
+      ]),
+      timestamp: Date.now(),
+    });
+
+    const remoteTree: FileMetaSyncPayload = {
+      files: [],
+    };
+
+    await (coordinator as any)._handleRemoteFileTree('peer-1', remoteTree);
+
+    expect(sendFullTextState).toHaveBeenCalledWith('peer-1', 'note.md', 'Sending text state');
+    expect(sendTo).not.toHaveBeenCalled();
+    buildSpy.mockRestore();
+  });
+
+  it('bootstraps identical text files once during initial peer sync', async () => {
+    const sendFullTextState = vi
+      .spyOn(coordinator as any, '_sendFullTextState')
+      .mockResolvedValue(undefined);
+
+    (coordinator as any).pendingInitialBootstrapPeers.add('peer-z');
+
+    const remoteTree: FileMetaSyncPayload = {
+      files: [
+        { path: 'note.md', hash: 'same-hash', mtime: 1, size: 13, isTextFile: true },
+      ],
+    };
+
+    vi.spyOn(coordinator as any, '_shouldBootstrapSharedTextState').mockReturnValue(true);
+    vi.spyOn(coordinator as any, '_emitEvent').mockImplementation(() => {});
+
+    const buildFileTreeModule = await import('../../src/sync/file-tree');
+    const buildSpy = vi.spyOn(buildFileTreeModule, 'buildFileTree');
+    buildSpy.mockResolvedValueOnce({
+      files: new Map([
+        ['note.md', { path: 'note.md', hash: 'same-hash', mtime: 1, size: 13, isTextFile: true }],
+      ]),
+      timestamp: Date.now(),
+    });
+
+    await (coordinator as any)._handleRemoteFileTree('peer-z', remoteTree);
+
+    expect(sendFullTextState).toHaveBeenCalledWith('peer-z', 'note.md', 'Bootstrapping shared text state');
+    expect((coordinator as any).pendingInitialBootstrapPeers.has('peer-z')).toBe(false);
+
+    buildSpy.mockRestore();
   });
 });

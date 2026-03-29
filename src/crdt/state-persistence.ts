@@ -25,6 +25,15 @@ export class StatePersistence {
     return `${CRDT_STATE_DIR}/${this._keyForPath(filePath)}.ystate`;
   }
 
+  async hasDoc(filePath: string): Promise<boolean> {
+    try {
+      return await this.adapter.exists(this._stateFilePath(filePath));
+    } catch (err) {
+      logger.error(`Failed to check CRDT state for ${filePath}:`, err);
+      return false;
+    }
+  }
+
   async saveDoc(filePath: string, doc: Y.Doc): Promise<void> {
     try {
       const state = Y.encodeStateAsUpdate(doc);
