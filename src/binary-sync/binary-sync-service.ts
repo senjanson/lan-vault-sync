@@ -88,6 +88,20 @@ export class BinaryFileSyncService {
     this.connectionManager.sendTo(deviceId, msg);
   }
 
+  /** Send a file to a specific peer (not broadcast) */
+  async sendFileToPeer(deviceId: string, path: string): Promise<void> {
+    const file = this.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+
+    const content = await this.vault.readBinary(file);
+    const msg = encodeFileData({
+      path,
+      content: new Uint8Array(content),
+      mtime: file.stat.mtime,
+    });
+    this.connectionManager.sendTo(deviceId, msg);
+  }
+
   /** Build metadata list of all non-text files in the vault */
   async buildBinaryFileList(): Promise<FileMeta[]> {
     const files = this.vault.getFiles();

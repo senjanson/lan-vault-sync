@@ -26,8 +26,8 @@ export class VaultWatcher {
   /** Mark a path as coming from a remote write — next change will be ignored */
   markRemoteWrite(filePath: string): void {
     this.remoteWritePaths.add(filePath);
-    // Auto-clear after a short window
-    setTimeout(() => this.remoteWritePaths.delete(filePath), 500);
+    // Auto-clear after a generous window to ensure the vault event has fired
+    setTimeout(() => this.remoteWritePaths.delete(filePath), 2000);
   }
 
   start(): void {

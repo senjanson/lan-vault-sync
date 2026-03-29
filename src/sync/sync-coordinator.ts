@@ -280,12 +280,6 @@ export class SyncCoordinator {
       case 'rename': {
         if (oldPath && isTextFile) {
           await this.docManager.removeDoc(oldPath);
-          // Initialize new doc with current content
-          const file = this.vault.getAbstractFileByPath(path);
-          if (file instanceof TFile) {
-            const content = await this.vault.cachedRead(file);
-            await this.docManager.initDocWithContent(path, content);
-          }
         }
         if (oldPath) {
           this.binarySync.broadcastFileRename(oldPath, path);
@@ -328,30 +322,18 @@ export class SyncCoordinator {
     this._emitEvent(`Starting initial sync with ${deviceId}`);
 
     try {
-      // Send our file tree metadata
+      // Only exchange file tree metadata — NO CRDT initialization here.
+      // CRDT docs are created lazily on first edit after initial sync.
+      // This avoids the dual-initialization bug where both sides insert
+      // the full file content into independent Y.Docs, causing duplicated
+      // text when the docs are synced.
       const tree = await buildFileTree(this.vault, this.filter);
       const metaList = Array.from(tree.files.values());
       const msg = encodeFileMetaSync({ files: metaList });
       this.connectionManager.sendTo(deviceId, msg);
 
-      // For each text file, initiate Yjs sync
-      for (const [path, meta] of tree.files) {
-        if (meta.isTextFile) {
-          const file = this.vault.getAbstractFileByPath(path);
-          if (file instanceof TFile) {
-            const content = await this.vault.cachedRead(file);
-            await this.docManager.initDocWithContent(path, content);
-          }
-
-          // Send sync step 1
-          const syncData = await this.docManager.encodeSyncStep1(path);
-          const syncMsg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, path, syncData);
-          this.connectionManager.sendTo(deviceId, syncMsg);
-        }
-      }
-
       this.stateMachine.transition('watching');
-      this._emitEvent(`Initial sync with ${deviceId} complete`);
+      this._emitEvent(`File tree sent to ${deviceId}, waiting for remote tree`);
     } catch (err) {
       logger.error('Initial sync failed:', err);
       this.stateMachine.transition('error');
@@ -369,44 +351,32 @@ export class SyncCoordinator {
 
     const treeDiff = diffFileTrees(localTree.files, remoteFiles);
 
-    // Files only on remote — request them
+    // Files only on remote — request them (file-level transfer for both text & binary)
     for (const file of treeDiff.remoteOnly) {
-      if (file.isTextFile) {
-        // For text files, initiate CRDT sync so content merges properly
-        const syncData = await this.docManager.encodeSyncStep1(file.path);
-        const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, file.path, syncData);
-        this.connectionManager.sendTo(deviceId, msg);
-      } else {
-        this.binarySync.requestFile(deviceId, file.path);
-      }
+      this.binarySync.requestFile(deviceId, file.path);
+      this._emitEvent(`Requesting: ${file.path}`);
     }
 
-    // Files only locally — send them
+    // Files only locally — send them to the specific peer
     for (const file of treeDiff.localOnly) {
-      if (file.isTextFile) {
-        const syncData = await this.docManager.encodeSyncStep1(file.path);
-        const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, file.path, syncData);
-        this.connectionManager.sendTo(deviceId, msg);
+      await this.binarySync.sendFileToPeer(deviceId, file.path);
+      this._emitEvent(`Sending: ${file.path}`);
+    }
+
+    // Conflicting files (different hash) — use mtime to pick winner
+    for (const { local, remote } of treeDiff.conflicting) {
+      if (remote.mtime > local.mtime) {
+        // Remote is newer — request it
+        this.binarySync.requestFile(deviceId, remote.path);
+        this._emitEvent(`Requesting newer: ${remote.path}`);
       } else {
-        await this.binarySync.broadcastFileChange(file.path);
+        // Local is newer (or same mtime) — send ours
+        await this.binarySync.sendFileToPeer(deviceId, local.path);
+        this._emitEvent(`Sending newer: ${local.path}`);
       }
     }
 
-    // Conflicting files — for text files use CRDT, for binary use strategy
-    for (const { local, remote } of treeDiff.conflicting) {
-      if (local.isTextFile) {
-        // CRDT will handle merge automatically via sync protocol
-        const syncData = await this.docManager.encodeSyncStep1(local.path);
-        const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, local.path, syncData);
-        this.connectionManager.sendTo(deviceId, msg);
-      } else {
-        // Binary conflict — use configured strategy
-        if (remote.mtime > local.mtime) {
-          this.binarySync.requestFile(deviceId, remote.path);
-        }
-        // Otherwise keep local (last-write-wins default)
-      }
-    }
+    this._emitEvent(`Tree sync with ${deviceId}: +${treeDiff.remoteOnly.length} -0 ~${treeDiff.conflicting.length}`);
   }
 
   // ─── Private: Periodic full sync ────────────────────────
@@ -415,6 +385,7 @@ export class SyncCoordinator {
     const peers = this.connectionManager.getConnectedPeerIds();
     if (peers.length === 0) return;
 
+    // Re-send file tree metadata to trigger tree diff on peers
     const tree = await buildFileTree(this.vault, this.filter);
     const metaList = Array.from(tree.files.values());
     const msg = encodeFileMetaSync({ files: metaList });
