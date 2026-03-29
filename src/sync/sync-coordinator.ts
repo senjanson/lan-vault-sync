@@ -7,6 +7,7 @@ import {
   decodeJSON,
 } from '../transport/protocol';
 import { YjsDocManager } from '../crdt/yjs-doc-manager';
+import { ConflictBackupService } from '../conflict/conflict-backup-service';
 import { BinaryFileSyncService } from '../binary-sync/binary-sync-service';
 import { VaultWatcher } from '../watcher/vault-watcher';
 import { DiscoveryService } from '../discovery/discovery-service';
@@ -28,6 +29,7 @@ export class SyncCoordinator {
   private connectionManager: ConnectionManager;
   private docManager: YjsDocManager;
   private binarySync: BinaryFileSyncService;
+  private backupService: ConflictBackupService;
   private watcher: VaultWatcher;
   private discovery: DiscoveryService;
   private stateMachine: SyncStateMachine;
@@ -50,7 +52,8 @@ export class SyncCoordinator {
     this.stateMachine = new SyncStateMachine();
     this.connectionManager = new ConnectionManager(settings, this.vaultId);
     this.docManager = new YjsDocManager(vault);
-    this.binarySync = new BinaryFileSyncService(vault, this.connectionManager);
+    this.backupService = new ConflictBackupService(vault);
+    this.binarySync = new BinaryFileSyncService(vault, this.connectionManager, this.backupService);
     this.watcher = new VaultWatcher(vault, settings.ignoredPaths);
 
     const localDevice: DeviceInfo = {
@@ -197,8 +200,8 @@ export class SyncCoordinator {
     });
 
     // Yjs doc manager → remote content changed, write to file
-    this.docManager.onRemoteContent(async (filePath, content) => {
-      await this._writeFileFromRemote(filePath, content);
+    this.docManager.onRemoteContent(async (filePath, content, previousContent) => {
+      await this._writeFileFromRemote(filePath, content, previousContent);
     });
 
     // Binary sync → mark remote writes
@@ -297,7 +300,11 @@ export class SyncCoordinator {
 
   // ─── Private: Write remote content to file ──────────────
 
-  private async _writeFileFromRemote(filePath: string, content: string): Promise<void> {
+  private async _writeFileFromRemote(
+    filePath: string,
+    content: string,
+    previousContent?: string,
+  ): Promise<void> {
     try {
       if (!this._isSafePath(filePath)) {
         logger.warn(`Rejected unsafe remote path: ${filePath}`);
@@ -305,8 +312,31 @@ export class SyncCoordinator {
       }
       await this._flushPendingLocalTextChange(filePath);
       const latestContent = await this.docManager.getContent(filePath).catch(() => content);
-      this.watcher.markRemoteWrite(filePath);
       const file = this.vault.getAbstractFileByPath(filePath);
+
+      if (file instanceof TFile && typeof previousContent === 'string') {
+        const diskContent = await this.vault.cachedRead(file);
+        if (
+          diskContent !== previousContent &&
+          diskContent !== latestContent
+        ) {
+          const backup = await this.backupService.backupTextFile(
+            filePath,
+            diskContent,
+            'text-remote-overwrite',
+            {
+              previousContent,
+              mergedContent: latestContent,
+            },
+          );
+          if (backup) {
+            logger.warn(`Backed up divergent text file before remote write: ${filePath} -> ${backup.contentPath}`);
+            this._emitEvent(`Conflict backup created for ${filePath}`);
+          }
+        }
+      }
+
+      this.watcher.markRemoteWrite(filePath);
 
       if (file instanceof TFile) {
         await this.vault.modify(file, latestContent);

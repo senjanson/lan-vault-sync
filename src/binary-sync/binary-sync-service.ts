@@ -1,5 +1,6 @@
 import { Vault, TFile } from 'obsidian';
 import { ConnectionManager } from '../transport/connection-manager';
+import { ConflictBackupService } from '../conflict/conflict-backup-service';
 import {
   encodeFileData,
   encodeFileDelete,
@@ -20,6 +21,7 @@ export class BinaryFileSyncService {
   constructor(
     private vault: Vault,
     private connectionManager: ConnectionManager,
+    private backupService: ConflictBackupService,
   ) {}
 
   onRemoteFileWritten(cb: (path: string) => void): void {
@@ -154,6 +156,21 @@ export class BinaryFileSyncService {
       this.onRemoteFileWrittenCb?.(path);
       const existing = this.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) {
+        const currentContent = new Uint8Array(await this.vault.readBinary(existing));
+        if (!this._isSameBinary(currentContent, content)) {
+          const backup = await this.backupService.backupBinaryFile(
+            path,
+            currentContent,
+            'remote-file-overwrite',
+            {
+              incomingSize: content.byteLength,
+              existingSize: currentContent.byteLength,
+            },
+          );
+          if (backup) {
+            logger.warn(`Backed up file before remote overwrite: ${path} -> ${backup.contentPath}`);
+          }
+        }
         await this.vault.modifyBinary(existing, content.buffer as ArrayBuffer);
       } else {
         const adapter = (this.vault as any).adapter;
@@ -171,6 +188,20 @@ export class BinaryFileSyncService {
   private async _deleteFile(path: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
+      if (file instanceof TFile) {
+        const currentContent = new Uint8Array(await this.vault.readBinary(file));
+        const backup = await this.backupService.backupBinaryFile(
+          path,
+          currentContent,
+          'remote-file-delete',
+          {
+            size: currentContent.byteLength,
+          },
+        );
+        if (backup) {
+          logger.warn(`Backed up file before remote delete: ${path} -> ${backup.contentPath}`);
+        }
+      }
       this.onRemoteFileWrittenCb?.(path);
       await this.vault.delete(file);
       logger.debug(`Deleted file: ${path}`);
@@ -189,5 +220,13 @@ export class BinaryFileSyncService {
       await this.vault.rename(file, newPath);
       logger.debug(`Renamed file: ${oldPath} → ${newPath}`);
     }
+  }
+
+  private _isSameBinary(left: Uint8Array, right: Uint8Array): boolean {
+    if (left.byteLength !== right.byteLength) return false;
+    for (let i = 0; i < left.byteLength; i++) {
+      if (left[i] !== right[i]) return false;
+    }
+    return true;
   }
 }

@@ -91,6 +91,9 @@ describe('SyncCoordinator text conflict safety', () => {
     const applyLocalChange = vi.fn().mockResolvedValue(undefined);
     const getContent = vi.fn().mockResolvedValue('merged content');
     const markRemoteWrite = vi.fn();
+    const backupTextFile = vi.fn().mockResolvedValue({
+      contentPath: '.obsidian/plugins/lan-sync/conflicts/mock/files/note.md',
+    });
 
     (coordinator as any).watcher = {
       consumePendingModify: vi.fn().mockReturnValue(true),
@@ -100,11 +103,27 @@ describe('SyncCoordinator text conflict safety', () => {
       applyLocalChange,
       getContent,
     };
+    (coordinator as any).backupService = {
+      backupTextFile,
+    };
 
-    await (coordinator as any)._writeFileFromRemote('note.md', 'stale remote content');
+    await (coordinator as any)._writeFileFromRemote(
+      'note.md',
+      'stale remote content',
+      'server previous',
+    );
 
     expect(applyLocalChange).toHaveBeenCalledWith('note.md', 'local pending');
     expect(getContent).toHaveBeenCalledWith('note.md');
+    expect(backupTextFile).toHaveBeenCalledWith(
+      'note.md',
+      'local pending',
+      'text-remote-overwrite',
+      {
+        previousContent: 'server previous',
+        mergedContent: 'merged content',
+      },
+    );
     expect(markRemoteWrite).toHaveBeenCalledWith('note.md');
     expect(await vault.cachedRead(vault.getFile('note.md')!)).toBe('merged content');
   });

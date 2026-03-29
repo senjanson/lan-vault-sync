@@ -18,6 +18,7 @@ export const TEXT_EXTENSIONS = new Set([
 ]);
 
 export const CRDT_STATE_DIR = '.obsidian/plugins/lan-sync/crdt-state';
+export const CONFLICT_BACKUP_DIR = '.obsidian/plugins/lan-sync/conflicts';
 
 export const MAX_ACTIVE_DOCS = 50;
 export const DEBOUNCE_MS = 200;

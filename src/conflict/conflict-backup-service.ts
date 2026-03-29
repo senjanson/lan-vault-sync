@@ -1,0 +1,109 @@
+import { Vault } from 'obsidian';
+import { CONFLICT_BACKUP_DIR } from '../constants';
+import { logger } from '../logger';
+import { ensureParentDirectory } from '../utils/path-utils';
+
+type ConflictBackupKind = 'text' | 'binary';
+
+export interface ConflictBackupResult {
+  backupDir: string;
+  contentPath: string;
+  metadataPath: string;
+}
+
+export class ConflictBackupService {
+  private sequence = 0;
+
+  constructor(private vault: Vault) {}
+
+  async backupTextFile(
+    filePath: string,
+    content: string,
+    reason: string,
+    details: Record<string, unknown> = {},
+  ): Promise<ConflictBackupResult | null> {
+    const adapter = (this.vault as any).adapter;
+    if (!adapter?.write) {
+      logger.warn(`Conflict backup skipped for ${filePath}: adapter.write unavailable`);
+      return null;
+    }
+
+    const snapshot = this._buildSnapshotPaths(filePath);
+    const metadata = this._buildMetadata(filePath, reason, 'text', details);
+
+    await ensureParentDirectory(adapter, snapshot.contentPath);
+    await ensureParentDirectory(adapter, snapshot.metadataPath);
+    await adapter.write(snapshot.contentPath, content);
+    await adapter.write(snapshot.metadataPath, JSON.stringify(metadata, null, 2));
+    return snapshot;
+  }
+
+  async backupBinaryFile(
+    filePath: string,
+    content: Uint8Array,
+    reason: string,
+    details: Record<string, unknown> = {},
+  ): Promise<ConflictBackupResult | null> {
+    const adapter = (this.vault as any).adapter;
+    if (!adapter?.writeBinary || !adapter?.write) {
+      logger.warn(`Conflict backup skipped for ${filePath}: adapter write methods unavailable`);
+      return null;
+    }
+
+    const snapshot = this._buildSnapshotPaths(filePath);
+    const metadata = this._buildMetadata(filePath, reason, 'binary', details);
+
+    await ensureParentDirectory(adapter, snapshot.contentPath);
+    await ensureParentDirectory(adapter, snapshot.metadataPath);
+    await adapter.writeBinary(snapshot.contentPath, this._toArrayBuffer(content));
+    await adapter.write(snapshot.metadataPath, JSON.stringify(metadata, null, 2));
+    return snapshot;
+  }
+
+  private _buildSnapshotPaths(filePath: string): ConflictBackupResult {
+    const backupId = this._nextBackupId(filePath);
+    const backupDir = `${CONFLICT_BACKUP_DIR}/${backupId}`;
+    return {
+      backupDir,
+      contentPath: `${backupDir}/files/${filePath}`,
+      metadataPath: `${backupDir}/metadata.json`,
+    };
+  }
+
+  private _buildMetadata(
+    filePath: string,
+    reason: string,
+    kind: ConflictBackupKind,
+    details: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return {
+      originalPath: filePath,
+      reason,
+      kind,
+      savedAt: new Date().toISOString(),
+      details,
+    };
+  }
+
+  private _nextBackupId(filePath: string): string {
+    this.sequence += 1;
+    const safeTime = new Date().toISOString().replace(/[:.]/g, '-');
+    return `${safeTime}-${this.sequence}-${this._keyForPath(filePath)}`;
+  }
+
+  private _keyForPath(filePath: string): string {
+    const bytes = new TextEncoder().encode(filePath);
+    let binary = '';
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  private _toArrayBuffer(content: Uint8Array): ArrayBuffer {
+    return content.buffer.slice(
+      content.byteOffset,
+      content.byteOffset + content.byteLength,
+    ) as ArrayBuffer;
+  }
+}

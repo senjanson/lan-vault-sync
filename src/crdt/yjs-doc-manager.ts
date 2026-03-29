@@ -15,7 +15,7 @@ export class YjsDocManager {
 
   // Callbacks
   private onLocalUpdateCb: ((filePath: string, update: Uint8Array) => void) | null = null;
-  private onRemoteContentCb: ((filePath: string, content: string) => void) | null = null;
+  private onRemoteContentCb: ((filePath: string, content: string, previousContent: string) => void) | null = null;
 
   constructor(private vault: Vault) {
     this.pool = new DocPool();
@@ -32,7 +32,7 @@ export class YjsDocManager {
   }
 
   /** Register callback: fired when a remote update changes doc content → should write to file */
-  onRemoteContent(cb: (filePath: string, content: string) => void): void {
+  onRemoteContent(cb: (filePath: string, content: string, previousContent: string) => void): void {
     this.onRemoteContentCb = cb;
   }
 
@@ -128,13 +128,16 @@ export class YjsDocManager {
   async applyRemoteUpdate(filePath: string, update: Uint8Array): Promise<void> {
     await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
+      const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, update, 'remote');
 
       const ytext = doc.getText('content');
       const content = ytext.toString();
       this.lastKnownContent.set(filePath, content);
 
-      this.onRemoteContentCb?.(filePath, content);
+      if (content !== previousContent) {
+        this.onRemoteContentCb?.(filePath, content, previousContent);
+      }
     });
   }
 
@@ -159,13 +162,16 @@ export class YjsDocManager {
   async handleSyncStep2(filePath: string, data: Uint8Array): Promise<void> {
     await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
+      const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, data, 'remote');
 
       // Update last known content
       const ytext = doc.getText('content');
       const content = ytext.toString();
       this.lastKnownContent.set(filePath, content);
-      this.onRemoteContentCb?.(filePath, content);
+      if (content !== previousContent) {
+        this.onRemoteContentCb?.(filePath, content, previousContent);
+      }
     });
   }
 
