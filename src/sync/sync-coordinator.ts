@@ -42,10 +42,12 @@ export class SyncCoordinator {
    *  SYNC_STEP1 in response to receiving one, to prevent infinite loops. */
   private reverseSyncSent = new Set<string>();
   /** Tracks file paths where we are the conflict "loser" and must NOT seed
-   *  the CRDT doc from disk.  The winner will send us their content via
-   *  YJS_UPDATE on an empty doc — initialising it from disk would cause
-   *  duplication when the update is applied. */
-  private conflictLoserPaths = new Set<string>();
+   *  the CRDT doc from disk.  Stored per winning peer so an unrelated
+   *  disconnect does not clear protection for active conflicts on other peers.
+   *  The winner will send us their content via YJS_UPDATE on an empty doc —
+   *  initialising it from disk would cause duplication when the update is
+   *  applied. */
+  private conflictLoserPaths = new Map<string, Set<string>>();
   private vaultId: string;
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
@@ -196,9 +198,9 @@ export class SyncCoordinator {
       for (const key of this.reverseSyncSent) {
         if (key.startsWith(deviceId + ':')) this.reverseSyncSent.delete(key);
       }
-      // Clear any conflict-loser guards — if the winner disconnected before
-      // sending their content, we must not keep blocking these paths forever.
-      this.conflictLoserPaths.clear();
+      // Clear only guards associated with the disconnected peer — unrelated
+      // peers may still be mid-conflict on their own paths.
+      this._clearConflictLoserGuardsForDevice(deviceId);
       this._emitEvent(`Disconnected: ${deviceId}`);
     });
 
@@ -227,6 +229,28 @@ export class SyncCoordinator {
     this.binarySync.onRemoteFileWritten((path) => {
       this.watcher.markRemoteWrite(path);
     });
+
+    this.binarySync.onRemoteFileDeleted(async (path) => {
+      if (!this.filter.isTextFile(path)) return;
+      await this.docManager.removeDoc(path);
+      this._clearConflictLoserGuard(path);
+    });
+
+    this.binarySync.onRemoteFileRenamed(async (oldPath, newPath) => {
+      const oldIsText = this.filter.isTextFile(oldPath);
+      const newIsText = this.filter.isTextFile(newPath);
+
+      if (oldIsText && newIsText) {
+        await this.docManager.renameDoc(oldPath, newPath);
+        this._moveConflictLoserGuard(oldPath, newPath);
+        return;
+      }
+
+      if (oldIsText) {
+        await this.docManager.removeDoc(oldPath);
+        this._clearConflictLoserGuard(oldPath);
+      }
+    });
   }
 
   // ─── Private: Message handling ──────────────────────────
@@ -242,7 +266,7 @@ export class SyncCoordinator {
         // Skip seeding if we are the conflict "loser" for this path — the
         // winner will overwrite our content via YJS_UPDATE and seeding from
         // disk would cause duplication when the two states merge.
-        if (!this.conflictLoserPaths.has(msg.filePath)) {
+        if (!this._hasConflictLoserGuard(msg.filePath)) {
           await this._ensureCrdtInitialized(msg.filePath);
         }
         const response = await this.docManager.handleSyncStep1(msg.filePath, msg.data);
@@ -328,14 +352,22 @@ export class SyncCoordinator {
       case 'delete': {
         if (isTextFile) {
           await this.docManager.removeDoc(path);
+          this._clearConflictLoserGuard(path);
         }
         this.binarySync.broadcastFileDelete(path);
         break;
       }
 
       case 'rename': {
-        if (oldPath && isTextFile) {
-          await this.docManager.removeDoc(oldPath);
+        if (oldPath) {
+          const oldIsText = this.filter.isTextFile(oldPath);
+          if (oldIsText && isTextFile) {
+            await this.docManager.renameDoc(oldPath, path);
+            this._moveConflictLoserGuard(oldPath, path);
+          } else if (oldIsText) {
+            await this.docManager.removeDoc(oldPath);
+            this._clearConflictLoserGuard(oldPath);
+          }
         }
         if (oldPath) {
           this.binarySync.broadcastFileRename(oldPath, path);
@@ -380,10 +412,13 @@ export class SyncCoordinator {
                 mergedContent: latestContent,
               },
             );
-            if (backup) {
-              logger.warn(`Backed up divergent text file before remote write: ${filePath} -> ${backup.contentPath}`);
-              this._emitEvent(`Conflict backup created for ${filePath}`);
+            if (!backup) {
+              logger.error(`Aborting remote text overwrite for ${filePath}: conflict backup unavailable`);
+              this._emitEvent(`Skipped remote overwrite for ${filePath} because backup failed`);
+              return;
             }
+            logger.warn(`Backed up divergent text file before remote write: ${filePath} -> ${backup.contentPath}`);
+            this._emitEvent(`Conflict backup created for ${filePath}`);
           }
         }
       }
@@ -404,7 +439,7 @@ export class SyncCoordinator {
       // If this file was in the conflict-loser set, the winner's content has
       // now been written.  Clear the guard so future syncs treat the doc
       // normally (it now has shared CRDT history with the winner).
-      this.conflictLoserPaths.delete(filePath);
+      this._clearConflictLoserGuard(filePath);
     } catch (err) {
       logger.error(`Failed to write remote content to ${filePath}:`, err);
     }
@@ -524,7 +559,7 @@ export class SyncCoordinator {
             // _writeFileFromRemote will create a second backup of our disk
             // content before overwriting.
             this.watcher.consumePendingModify(local.path);
-            this.conflictLoserPaths.add(local.path);
+            this._addConflictLoserGuard(local.path, deviceId);
             this._emitEvent(`Waiting for conflict winner: ${local.path}`);
           }
         }
@@ -700,6 +735,47 @@ export class SyncCoordinator {
 
   private _shouldBootstrapSharedTextState(deviceId: string): boolean {
     return this.settings.deviceId <= deviceId;
+  }
+
+  private _hasConflictLoserGuard(filePath: string): boolean {
+    return (this.conflictLoserPaths.get(filePath)?.size ?? 0) > 0;
+  }
+
+  private _addConflictLoserGuard(filePath: string, deviceId: string): void {
+    const peerIds = this.conflictLoserPaths.get(filePath) ?? new Set<string>();
+    peerIds.add(deviceId);
+    this.conflictLoserPaths.set(filePath, peerIds);
+  }
+
+  private _clearConflictLoserGuard(filePath: string, deviceId?: string): void {
+    if (!deviceId) {
+      this.conflictLoserPaths.delete(filePath);
+      return;
+    }
+
+    const peerIds = this.conflictLoserPaths.get(filePath);
+    if (!peerIds) return;
+
+    peerIds.delete(deviceId);
+    if (peerIds.size === 0) {
+      this.conflictLoserPaths.delete(filePath);
+    }
+  }
+
+  private _clearConflictLoserGuardsForDevice(deviceId: string): void {
+    for (const filePath of this.conflictLoserPaths.keys()) {
+      this._clearConflictLoserGuard(filePath, deviceId);
+    }
+  }
+
+  private _moveConflictLoserGuard(oldPath: string, newPath: string): void {
+    if (oldPath === newPath) return;
+
+    const peerIds = this.conflictLoserPaths.get(oldPath);
+    if (!peerIds) return;
+
+    this.conflictLoserPaths.set(newPath, new Set(peerIds));
+    this.conflictLoserPaths.delete(oldPath);
   }
 
   /**

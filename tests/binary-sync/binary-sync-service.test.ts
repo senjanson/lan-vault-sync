@@ -48,6 +48,18 @@ class FakeVault {
   async delete(file: TFile): Promise<void> {
     this.files.delete(file.path);
   }
+
+  async rename(file: TFile, newPath: string): Promise<void> {
+    const entry = this.files.get(file.path);
+    if (!entry) return;
+
+    this.files.delete(file.path);
+    file.path = newPath;
+    this.files.set(newPath, {
+      file,
+      content: entry.content,
+    });
+  }
 }
 
 describe('BinaryFileSyncService conflict backups', () => {
@@ -101,5 +113,69 @@ describe('BinaryFileSyncService conflict backups', () => {
       },
     );
     expect(vault.getAbstractFileByPath('assets/file.bin')).toBeNull();
+  });
+
+  it('aborts remote overwrite when backup creation fails', async () => {
+    const vault = new FakeVault();
+    vault.setBinary('assets/file.bin', [1, 2, 3]);
+
+    const backupBinaryFile = vi.fn().mockResolvedValue(null);
+    const service = new BinaryFileSyncService(
+      vault as any,
+      { broadcast: vi.fn(), sendTo: vi.fn() } as any,
+      { backupBinaryFile } as any,
+    );
+
+    await (service as any)._receiveFile('assets/file.bin', new Uint8Array([9, 9, 9]), Date.now());
+
+    const content = new Uint8Array(await vault.readBinary(vault.getAbstractFileByPath('assets/file.bin')!));
+    expect(Array.from(content)).toEqual([1, 2, 3]);
+  });
+
+  it('backs up rename target before remote rename overwrite', async () => {
+    const vault = new FakeVault();
+    vault.setBinary('assets/source.bin', [1, 2, 3]);
+    vault.setBinary('assets/target.bin', [7, 8, 9]);
+
+    const backupBinaryFile = vi.fn().mockResolvedValue({
+      contentPath: '.obsidian/plugins/lan-sync/conflicts/mock/files/assets/target.bin',
+    });
+    const service = new BinaryFileSyncService(
+      vault as any,
+      { broadcast: vi.fn(), sendTo: vi.fn() } as any,
+      { backupBinaryFile } as any,
+    );
+
+    await (service as any)._renameFile('assets/source.bin', 'assets/target.bin');
+
+    expect(backupBinaryFile).toHaveBeenCalledWith(
+      'assets/target.bin',
+      new Uint8Array([7, 8, 9]),
+      'remote-file-rename-overwrite',
+      {
+        oldPath: 'assets/source.bin',
+        newPath: 'assets/target.bin',
+        size: 3,
+      },
+    );
+  });
+
+  it('aborts remote rename overwrite when target backup creation fails', async () => {
+    const vault = new FakeVault();
+    vault.setBinary('assets/source.bin', [1, 2, 3]);
+    vault.setBinary('assets/target.bin', [7, 8, 9]);
+
+    const backupBinaryFile = vi.fn().mockResolvedValue(null);
+    const service = new BinaryFileSyncService(
+      vault as any,
+      { broadcast: vi.fn(), sendTo: vi.fn() } as any,
+      { backupBinaryFile } as any,
+    );
+
+    await (service as any)._renameFile('assets/source.bin', 'assets/target.bin');
+
+    expect(vault.getAbstractFileByPath('assets/source.bin')).not.toBeNull();
+    const targetContent = new Uint8Array(await vault.readBinary(vault.getAbstractFileByPath('assets/target.bin')!));
+    expect(Array.from(targetContent)).toEqual([7, 8, 9]);
   });
 });

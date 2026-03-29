@@ -17,6 +17,8 @@ import { ensureParentDirectory } from '../utils/path-utils';
 
 export class BinaryFileSyncService {
   private onRemoteFileWrittenCb: ((path: string) => void) | null = null;
+  private onRemoteFileDeletedCb: ((path: string) => Promise<void> | void) | null = null;
+  private onRemoteFileRenamedCb: ((oldPath: string, newPath: string) => Promise<void> | void) | null = null;
 
   constructor(
     private vault: Vault,
@@ -26,6 +28,14 @@ export class BinaryFileSyncService {
 
   onRemoteFileWritten(cb: (path: string) => void): void {
     this.onRemoteFileWrittenCb = cb;
+  }
+
+  onRemoteFileDeleted(cb: (path: string) => Promise<void> | void): void {
+    this.onRemoteFileDeletedCb = cb;
+  }
+
+  onRemoteFileRenamed(cb: (oldPath: string, newPath: string) => Promise<void> | void): void {
+    this.onRemoteFileRenamedCb = cb;
   }
 
   /** Handle incoming protocol messages for binary file operations */
@@ -167,9 +177,11 @@ export class BinaryFileSyncService {
               existingSize: currentContent.byteLength,
             },
           );
-          if (backup) {
-            logger.warn(`Backed up file before remote overwrite: ${path} -> ${backup.contentPath}`);
+          if (!backup) {
+            logger.error(`Aborting remote overwrite for ${path}: conflict backup unavailable`);
+            return;
           }
+          logger.warn(`Backed up file before remote overwrite: ${path} -> ${backup.contentPath}`);
         }
         await this.vault.modifyBinary(existing, content.buffer as ArrayBuffer);
       } else {
@@ -198,19 +210,44 @@ export class BinaryFileSyncService {
             size: currentContent.byteLength,
           },
         );
-        if (backup) {
-          logger.warn(`Backed up file before remote delete: ${path} -> ${backup.contentPath}`);
+        if (!backup) {
+          logger.error(`Aborting remote delete for ${path}: conflict backup unavailable`);
+          return;
         }
+        logger.warn(`Backed up file before remote delete: ${path} -> ${backup.contentPath}`);
       }
       this.onRemoteFileWrittenCb?.(path);
       await this.vault.delete(file);
+      await this.onRemoteFileDeletedCb?.(path);
       logger.debug(`Deleted file: ${path}`);
     }
   }
 
   private async _renameFile(oldPath: string, newPath: string): Promise<void> {
+    if (oldPath === newPath) return;
+
     const file = this.vault.getAbstractFileByPath(oldPath);
     if (file) {
+      const existingTarget = this.vault.getAbstractFileByPath(newPath);
+      if (existingTarget instanceof TFile) {
+        const currentTargetContent = new Uint8Array(await this.vault.readBinary(existingTarget));
+        const backup = await this.backupService.backupBinaryFile(
+          newPath,
+          currentTargetContent,
+          'remote-file-rename-overwrite',
+          {
+            oldPath,
+            newPath,
+            size: currentTargetContent.byteLength,
+          },
+        );
+        if (!backup) {
+          logger.error(`Aborting remote rename ${oldPath} -> ${newPath}: target backup unavailable`);
+          return;
+        }
+        logger.warn(`Backed up rename target before remote rename: ${newPath} -> ${backup.contentPath}`);
+      }
+
       this.onRemoteFileWrittenCb?.(oldPath);
       this.onRemoteFileWrittenCb?.(newPath);
       const adapter = (this.vault as any).adapter;
@@ -218,6 +255,7 @@ export class BinaryFileSyncService {
         await ensureParentDirectory(adapter, newPath);
       }
       await this.vault.rename(file, newPath);
+      await this.onRemoteFileRenamedCb?.(oldPath, newPath);
       logger.debug(`Renamed file: ${oldPath} → ${newPath}`);
     }
   }

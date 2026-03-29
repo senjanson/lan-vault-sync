@@ -41,6 +41,24 @@ export class DocPool {
     }
   }
 
+  rename(oldPath: string, newPath: string): void {
+    if (oldPath === newPath) return;
+
+    const entry = this.docs.get(oldPath);
+    if (!entry) return;
+
+    const existing = this.docs.get(newPath);
+    if (existing && existing.doc !== entry.doc) {
+      existing.doc.destroy();
+    }
+
+    this.docs.delete(oldPath);
+    this.docs.set(newPath, {
+      doc: entry.doc,
+      lastAccess: Date.now(),
+    });
+  }
+
   getAll(): Map<string, Y.Doc> {
     const result = new Map<string, Y.Doc>();
     for (const [path, entry] of this.docs) {

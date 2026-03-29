@@ -282,6 +282,26 @@ export class YjsDocManager {
     });
   }
 
+  async renameDoc(oldPath: string, newPath: string): Promise<void> {
+    if (oldPath === newPath) return;
+
+    await this._enqueueForPath(oldPath, async () => {
+      await this._enqueueForPath(newPath, async () => {
+        if (this.pool.has(oldPath)) {
+          this.pool.rename(oldPath, newPath);
+        }
+
+        const content = this.lastKnownContent.get(oldPath);
+        if (content !== undefined) {
+          this.lastKnownContent.set(newPath, content);
+          this.lastKnownContent.delete(oldPath);
+        }
+
+        await this.persistence.renameDoc(oldPath, newPath);
+      });
+    });
+  }
+
   /** Persist all active docs */
   async persistAll(): Promise<void> {
     const docs = this.pool.getAll();

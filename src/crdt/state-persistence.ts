@@ -71,4 +71,36 @@ export class StatePersistence {
       logger.error(`Failed to delete CRDT state for ${filePath}:`, err);
     }
   }
+
+  async renameDoc(oldPath: string, newPath: string): Promise<void> {
+    if (oldPath === newPath) return;
+
+    try {
+      const oldStateFile = this._stateFilePath(oldPath);
+      if (!(await this.adapter.exists(oldStateFile))) {
+        return;
+      }
+
+      const newStateFile = this._stateFilePath(newPath);
+      await ensureParentDirectory(this.adapter, newStateFile);
+
+      if (typeof this.adapter.rename === 'function') {
+        if (typeof this.adapter.exists === 'function' && await this.adapter.exists(newStateFile)) {
+          if (typeof this.adapter.remove === 'function') {
+            await this.adapter.remove(newStateFile);
+          }
+        }
+        await this.adapter.rename(oldStateFile, newStateFile);
+        return;
+      }
+
+      const buffer: ArrayBuffer = await this.adapter.readBinary(oldStateFile);
+      await this.adapter.writeBinary(newStateFile, buffer);
+      if (typeof this.adapter.remove === 'function') {
+        await this.adapter.remove(oldStateFile);
+      }
+    } catch (err) {
+      logger.error(`Failed to rename CRDT state from ${oldPath} to ${newPath}:`, err);
+    }
+  }
 }

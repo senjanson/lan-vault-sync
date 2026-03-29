@@ -28,14 +28,19 @@ export class ConflictBackupService {
       return null;
     }
 
-    const snapshot = this._buildSnapshotPaths(filePath);
-    const metadata = this._buildMetadata(filePath, reason, 'text', details);
+    try {
+      const snapshot = this._buildSnapshotPaths(filePath);
+      const metadata = this._buildMetadata(filePath, reason, 'text', details);
 
-    await ensureParentDirectory(adapter, snapshot.contentPath);
-    await ensureParentDirectory(adapter, snapshot.metadataPath);
-    await adapter.write(snapshot.contentPath, content);
-    await adapter.write(snapshot.metadataPath, JSON.stringify(metadata, null, 2));
-    return snapshot;
+      await ensureParentDirectory(adapter, snapshot.contentPath);
+      await ensureParentDirectory(adapter, snapshot.metadataPath);
+      await adapter.write(snapshot.contentPath, content);
+      await adapter.write(snapshot.metadataPath, JSON.stringify(metadata, null, 2));
+      return snapshot;
+    } catch (err) {
+      logger.error(`Failed to create text conflict backup for ${filePath}:`, err);
+      return null;
+    }
   }
 
   async backupBinaryFile(
@@ -50,14 +55,19 @@ export class ConflictBackupService {
       return null;
     }
 
-    const snapshot = this._buildSnapshotPaths(filePath);
-    const metadata = this._buildMetadata(filePath, reason, 'binary', details);
+    try {
+      const snapshot = this._buildSnapshotPaths(filePath);
+      const metadata = this._buildMetadata(filePath, reason, 'binary', details);
 
-    await ensureParentDirectory(adapter, snapshot.contentPath);
-    await ensureParentDirectory(adapter, snapshot.metadataPath);
-    await adapter.writeBinary(snapshot.contentPath, this._toArrayBuffer(content));
-    await adapter.write(snapshot.metadataPath, JSON.stringify(metadata, null, 2));
-    return snapshot;
+      await ensureParentDirectory(adapter, snapshot.contentPath);
+      await ensureParentDirectory(adapter, snapshot.metadataPath);
+      await adapter.writeBinary(snapshot.contentPath, this._toArrayBuffer(content));
+      await adapter.write(snapshot.metadataPath, JSON.stringify(metadata, null, 2));
+      return snapshot;
+    } catch (err) {
+      logger.error(`Failed to create binary conflict backup for ${filePath}:`, err);
+      return null;
+    }
   }
 
   private _buildSnapshotPaths(filePath: string): ConflictBackupResult {

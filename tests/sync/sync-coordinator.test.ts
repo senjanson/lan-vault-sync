@@ -138,6 +138,35 @@ describe('SyncCoordinator text conflict safety', () => {
     expect(await vault.cachedRead(vault.getFile('note.md')!)).toBe('merged content');
   });
 
+  it('aborts remote text overwrite when conflict backup cannot be created', async () => {
+    const applyLocalChange = vi.fn().mockResolvedValue(undefined);
+    const getContent = vi.fn().mockResolvedValue('merged content');
+    const markRemoteWrite = vi.fn();
+    const backupTextFile = vi.fn().mockResolvedValue(null);
+
+    (coordinator as any).watcher = {
+      consumePendingModify: vi.fn().mockReturnValue(true),
+      markRemoteWrite,
+    };
+    (coordinator as any).docManager = {
+      applyLocalChange,
+      getContent,
+    };
+    (coordinator as any).backupService = {
+      backupTextFile,
+    };
+
+    await (coordinator as any)._writeFileFromRemote(
+      'note.md',
+      'stale remote content',
+      'server previous',
+    );
+
+    expect(backupTextFile).toHaveBeenCalled();
+    expect(markRemoteWrite).not.toHaveBeenCalled();
+    expect(await vault.cachedRead(vault.getFile('note.md')!)).toBe('local pending');
+  });
+
   it('requests remote-only text files through Yjs state sync', async () => {
     const sendTo = vi.fn();
     const buildFileTreeModule = await import('../../src/sync/file-tree');
@@ -231,5 +260,110 @@ describe('SyncCoordinator text conflict safety', () => {
     expect((coordinator as any).pendingInitialBootstrapPeers.has('peer-z')).toBe(false);
 
     buildSpy.mockRestore();
+  });
+
+  it('marks the local side as conflict loser when remote text wins without shared history', async () => {
+    const buildFileTreeModule = await import('../../src/sync/file-tree');
+    const buildSpy = vi.spyOn(buildFileTreeModule, 'buildFileTree');
+    const sendTo = vi.fn();
+    const consumePendingModify = vi.fn();
+    const backupTextFile = vi.fn().mockResolvedValue({
+      contentPath: '.obsidian/plugins/lan-sync/conflicts/mock/files/note.md',
+    });
+
+    vault.setText('note.md', 'local version');
+    const localFile = vault.getFile('note.md')!;
+    localFile.stat.mtime = 10;
+
+    (coordinator as any).connectionManager = { sendTo };
+    (coordinator as any).watcher = {
+      consumePendingModify,
+      markRemoteWrite: vi.fn(),
+    };
+    (coordinator as any).backupService = {
+      backupTextFile,
+    };
+    (coordinator as any).docManager = {
+      hasDocState: vi.fn().mockResolvedValue(false),
+    };
+
+    buildSpy.mockResolvedValueOnce({
+      files: new Map([
+        ['note.md', { path: 'note.md', hash: 'local-hash', mtime: 10, size: 13, isTextFile: true }],
+      ]),
+      timestamp: Date.now(),
+    });
+
+    const remoteTree: FileMetaSyncPayload = {
+      files: [
+        { path: 'note.md', hash: 'remote-hash', mtime: 20, size: 14, isTextFile: true },
+      ],
+    };
+
+    await (coordinator as any)._handleRemoteFileTree('peer-1', remoteTree);
+
+    expect(consumePendingModify).toHaveBeenCalledWith('note.md');
+    expect((coordinator as any)._hasConflictLoserGuard('note.md')).toBe(true);
+    expect(sendTo).not.toHaveBeenCalled();
+    buildSpy.mockRestore();
+  });
+
+  it('removes CRDT state after a remote text delete succeeds', async () => {
+    const removeDoc = vi.fn().mockResolvedValue(undefined);
+    (coordinator as any).docManager = { removeDoc };
+
+    await (coordinator as any).binarySync.onRemoteFileDeletedCb?.('note.md');
+
+    expect(removeDoc).toHaveBeenCalledWith('note.md');
+  });
+
+  it('renames CRDT state after a remote text rename succeeds', async () => {
+    const renameDoc = vi.fn().mockResolvedValue(undefined);
+    (coordinator as any).docManager = { renameDoc, removeDoc: vi.fn() };
+
+    await (coordinator as any).binarySync.onRemoteFileRenamedCb?.('old.md', 'new.md');
+
+    expect(renameDoc).toHaveBeenCalledWith('old.md', 'new.md');
+  });
+
+  it('migrates CRDT state on local text rename instead of deleting it', async () => {
+    const renameDoc = vi.fn().mockResolvedValue(undefined);
+    const removeDoc = vi.fn().mockResolvedValue(undefined);
+    (coordinator as any).docManager = { renameDoc, removeDoc };
+    (coordinator as any).binarySync = {
+      broadcastFileRename: vi.fn(),
+    };
+
+    await (coordinator as any)._handleLocalFileChange({
+      type: 'rename',
+      path: 'new.md',
+      oldPath: 'old.md',
+      isTextFile: true,
+      timestamp: Date.now(),
+    });
+
+    expect(renameDoc).toHaveBeenCalledWith('old.md', 'new.md');
+    expect(removeDoc).not.toHaveBeenCalled();
+  });
+
+  it('only clears conflict-loser guards for the disconnected peer', () => {
+    (coordinator as any)._addConflictLoserGuard('shared.md', 'peer-1');
+    (coordinator as any)._addConflictLoserGuard('shared.md', 'peer-2');
+    (coordinator as any)._addConflictLoserGuard('only-peer-1.md', 'peer-1');
+
+    (coordinator as any)._clearConflictLoserGuardsForDevice('peer-1');
+
+    expect((coordinator as any)._hasConflictLoserGuard('shared.md')).toBe(true);
+    expect((coordinator as any)._hasConflictLoserGuard('only-peer-1.md')).toBe(false);
+  });
+
+  it('clears conflict-loser guard after remote text delete', async () => {
+    const removeDoc = vi.fn().mockResolvedValue(undefined);
+    (coordinator as any).docManager = { removeDoc };
+    (coordinator as any)._addConflictLoserGuard('note.md', 'peer-1');
+
+    await (coordinator as any).binarySync.onRemoteFileDeletedCb?.('note.md');
+
+    expect((coordinator as any)._hasConflictLoserGuard('note.md')).toBe(false);
   });
 });
