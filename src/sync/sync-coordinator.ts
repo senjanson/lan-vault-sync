@@ -38,6 +38,9 @@ export class SyncCoordinator {
   private fullSyncTimer: ReturnType<typeof setInterval> | null = null;
   private persistTimer: ReturnType<typeof setInterval> | null = null;
   private pendingInitialBootstrapPeers = new Set<string>();
+  /** Tracks (deviceId:filePath) combos where we've already sent a reverse
+   *  SYNC_STEP1 in response to receiving one, to prevent infinite loops. */
+  private reverseSyncSent = new Set<string>();
   private vaultId: string;
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
@@ -184,6 +187,10 @@ export class SyncCoordinator {
 
     this.connectionManager.onPeerDisconnected((deviceId) => {
       this.pendingInitialBootstrapPeers.delete(deviceId);
+      // Clear reverse-sync tracking for this peer
+      for (const key of this.reverseSyncSent) {
+        if (key.startsWith(deviceId + ':')) this.reverseSyncSent.delete(key);
+      }
       this._emitEvent(`Disconnected: ${deviceId}`);
     });
 
@@ -228,6 +235,17 @@ export class SyncCoordinator {
         const response = await this.docManager.handleSyncStep1(msg.filePath, msg.data);
         const reply = encodeYjsSync(MessageType.YJS_SYNC_STEP2, msg.filePath, response);
         this.connectionManager.sendTo(deviceId, reply);
+
+        // Complete bidirectional sync: also send our own state vector so the
+        // initiator can send back the diff we're missing.  Guard with a
+        // per-(peer,file) flag to prevent infinite SYNC_STEP1 ping-pong.
+        const reverseKey = `${deviceId}:${msg.filePath}`;
+        if (!this.reverseSyncSent.has(reverseKey)) {
+          this.reverseSyncSent.add(reverseKey);
+          const ourSV = await this.docManager.encodeSyncStep1(msg.filePath);
+          const reverseStep1 = encodeYjsSync(MessageType.YJS_SYNC_STEP1, msg.filePath, ourSV);
+          this.connectionManager.sendTo(deviceId, reverseStep1);
+        }
         break;
       }
 
@@ -236,6 +254,8 @@ export class SyncCoordinator {
         if (!this._isSafePath(msg.filePath)) break;
         await this._flushPendingLocalTextChange(msg.filePath);
         await this.docManager.handleSyncStep2(msg.filePath, msg.data);
+        // Clear reverse-sync guard so future sync rounds can proceed
+        this.reverseSyncSent.delete(`${deviceId}:${msg.filePath}`);
         break;
       }
 
@@ -250,6 +270,16 @@ export class SyncCoordinator {
       case MessageType.FILE_META_SYNC: {
         const meta = decodeJSON<FileMetaSyncPayload>(payload);
         await this._handleRemoteFileTree(deviceId, meta);
+
+        // If this is NOT a response, send our file tree back so the peer also
+        // processes our files.  This ensures bidirectional tree exchange even
+        // during one-sided periodic syncs.
+        if (!meta.isResponse) {
+          const tree = await buildFileTree(this.vault, this.filter);
+          const metaList = Array.from(tree.files.values());
+          const reply = encodeFileMetaSync({ files: metaList, isResponse: true });
+          this.connectionManager.sendTo(deviceId, reply);
+        }
         break;
       }
 
@@ -394,10 +424,13 @@ export class SyncCoordinator {
 
     const treeDiff = diffFileTrees(localTree.files, remoteFiles);
 
-    // Files only on remote — request them (file-level transfer for both text & binary)
+    // Files only on remote — request them via CRDT sync or binary transfer
     for (const file of treeDiff.remoteOnly) {
       if (file.isTextFile) {
-        await this.docManager.removeDoc(file.path);
+        // DO NOT removeDoc here — it races with concurrent YJS_UPDATE messages
+        // from the peer's localOnly processing, potentially destroying freshly
+        // received content.  Sending SYNC_STEP1 with an empty state vector
+        // correctly fetches all remote content regardless of local state.
         const emptyState = Y.encodeStateVector(new Y.Doc());
         const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, file.path, emptyState);
         this.connectionManager.sendTo(deviceId, msg);

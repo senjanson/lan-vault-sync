@@ -97,6 +97,9 @@ export interface YjsSyncMessage {
 
 export interface FileMetaSyncPayload {
   files: FileMeta[];
+  /** When true this is a response to a received FILE_META_SYNC — the receiver
+   *  should NOT echo yet another FILE_META_SYNC back to avoid ping-pong. */
+  isResponse?: boolean;
 }
 
 export interface FileDataPayload {

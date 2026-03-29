@@ -28,9 +28,11 @@ interface PeerConnection {
   direction: 'inbound' | 'outbound';
   client?: WSClient;
   pingTimer?: ReturnType<typeof setInterval>;
+  /** Per-peer message queue to serialize async message handling */
+  messageQueue: Promise<void>;
 }
 
-type MessageHandler = (deviceId: string, type: MessageType, payload: Uint8Array) => void;
+type MessageHandler = (deviceId: string, type: MessageType, payload: Uint8Array) => void | Promise<void>;
 
 export class ConnectionManager {
   private server: WSServer;
@@ -208,6 +210,7 @@ export class ConnectionManager {
       ws,
       direction,
       client,
+      messageQueue: Promise.resolve(),
     };
 
     // Ping keepalive
@@ -233,9 +236,17 @@ export class ConnectionManager {
           return;
         }
 
-        const result = this.messageHandler?.(device.deviceId, msg.type, msg.payload);
-        if (result && typeof (result as any).catch === 'function') {
-          (result as Promise<void>).catch(err => logger.error(`Error handling message from ${device.deviceId}:`, err));
+        // Serialize message handling per peer to prevent race conditions.
+        // Each message waits for the previous one to finish before starting.
+        const p = this.peers.get(device.deviceId);
+        if (p) {
+          p.messageQueue = p.messageQueue.then(async () => {
+            try {
+              await this.messageHandler?.(device.deviceId, msg.type, msg.payload);
+            } catch (err) {
+              logger.error(`Error handling message from ${device.deviceId}:`, err);
+            }
+          });
         }
       } catch (err) {
         logger.error(`Error decoding message from ${device.deviceId}:`, err);
