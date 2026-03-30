@@ -35,6 +35,7 @@ export interface DeviceInfo {
   port: number;
   vaultId: string;
   lastSeen: number;
+  acceptsIncomingConnections?: boolean;
 }
 
 // ─── File events ─────────────────────────────────────────
@@ -88,6 +89,7 @@ export interface HandshakePayload {
   deviceName: string;
   vaultId: string;
   port: number;
+  acceptsIncomingConnections?: boolean;
 }
 
 export interface YjsSyncMessage {

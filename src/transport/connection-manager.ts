@@ -1,6 +1,13 @@
-import { WebSocket } from 'ws';
 import { WSServer } from './ws-server';
 import { WSClient } from './ws-client';
+import {
+  addSocketCloseListener,
+  addSocketErrorListener,
+  addSocketMessageListener,
+  SOCKET_OPEN,
+  SocketLike,
+  toUint8Array,
+} from './socket';
 import {
   decodeMessage,
   decodeJSON,
@@ -17,6 +24,7 @@ import {
 } from '../types';
 import { WS_PING_INTERVAL_MS } from '../constants';
 import { logger } from '../logger';
+import { supportsIncomingConnections } from '../utils/runtime';
 
 interface PeerConnection {
   deviceId: string;
@@ -24,7 +32,7 @@ interface PeerConnection {
   ip: string;
   port: number;
   vaultId: string;
-  ws: WebSocket;
+  ws: SocketLike;
   direction: 'inbound' | 'outbound';
   client?: WSClient;
   pingTimer?: ReturnType<typeof setInterval>;
@@ -41,14 +49,17 @@ export class ConnectionManager {
   private localInfo: HandshakePayload;
   private onPeerConnectedCb: ((device: DeviceInfo) => void) | null = null;
   private onPeerDisconnectedCb: ((deviceId: string) => void) | null = null;
+  private readonly acceptsIncomingConnections: boolean;
 
   constructor(private settings: LANSyncSettings, private vaultId: string) {
     this.server = new WSServer(settings.port);
+    this.acceptsIncomingConnections = supportsIncomingConnections();
     this.localInfo = {
       deviceId: settings.deviceId,
       deviceName: settings.deviceName,
       vaultId: this.vaultId,
       port: settings.port,
+      acceptsIncomingConnections: this.acceptsIncomingConnections,
     };
   }
 
@@ -65,6 +76,11 @@ export class ConnectionManager {
   }
 
   async start(): Promise<void> {
+    if (!this.acceptsIncomingConnections) {
+      logger.info('Incoming connections are disabled in this runtime; outbound-only mode enabled');
+      return;
+    }
+
     this.server.onConnection((ws, ip) => {
       this._handleInbound(ws, ip);
     });
@@ -91,8 +107,8 @@ export class ConnectionManager {
     const client = new WSClient(url);
 
     client.onOpen((ws) => {
-      const onHandshakeAck = (raw: Buffer | ArrayBuffer) => {
-        const msg = decodeMessage(this._toUint8Array(raw));
+      const offHandshakeAck = addSocketMessageListener(ws, async (raw) => {
+        const msg = decodeMessage(await toUint8Array(raw));
         if (msg.type !== MessageType.HANDSHAKE_ACK) {
           logger.warn(`Expected handshake ack from ${url}, got: ${msg.type}`);
           ws.close();
@@ -106,7 +122,7 @@ export class ConnectionManager {
           return;
         }
 
-        ws.removeListener('message', onHandshakeAck);
+        offHandshakeAck();
         this._setupWs(ws, {
           deviceId: payload.deviceId,
           deviceName: payload.deviceName,
@@ -114,10 +130,9 @@ export class ConnectionManager {
           port: payload.port,
           vaultId: payload.vaultId,
           lastSeen: Date.now(),
+          acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
         }, 'outbound', client);
-      };
-
-      ws.on('message', onHandshakeAck);
+      });
       ws.send(encodeHandshake(this.localInfo));
     });
 
@@ -131,7 +146,7 @@ export class ConnectionManager {
   /** Send raw bytes to a specific peer */
   sendTo(deviceId: string, data: Uint8Array): void {
     const peer = this.peers.get(deviceId);
-    if (peer && peer.ws.readyState === WebSocket.OPEN) {
+    if (peer && peer.ws.readyState === SOCKET_OPEN) {
       peer.ws.send(data);
     }
   }
@@ -139,7 +154,7 @@ export class ConnectionManager {
   /** Broadcast raw bytes to all connected peers */
   broadcast(data: Uint8Array): void {
     for (const [, peer] of this.peers) {
-      if (peer.ws.readyState === WebSocket.OPEN) {
+      if (peer.ws.readyState === SOCKET_OPEN) {
         peer.ws.send(data);
       }
     }
@@ -155,10 +170,10 @@ export class ConnectionManager {
 
   // ─── Private ────────────────────────────────────────────
 
-  private _handleInbound(ws: WebSocket, ip: string): void {
+  private _handleInbound(ws: SocketLike, ip: string): void {
     // Wait for handshake first message
-    const onFirstMessage = (raw: Buffer | ArrayBuffer) => {
-      const msg = decodeMessage(this._toUint8Array(raw));
+    const offFirstMessage = addSocketMessageListener(ws, async (raw) => {
+      const msg = decodeMessage(await toUint8Array(raw));
       if (msg.type !== MessageType.HANDSHAKE) {
         logger.warn('Expected handshake, got:', msg.type);
         ws.close();
@@ -175,7 +190,7 @@ export class ConnectionManager {
       // Send ack
       ws.send(encodeHandshakeAck(this.localInfo));
 
-      ws.removeListener('message', onFirstMessage);
+      offFirstMessage();
       this._setupWs(ws, {
         deviceId: payload.deviceId,
         deviceName: payload.deviceName,
@@ -183,14 +198,13 @@ export class ConnectionManager {
         port: payload.port,
         vaultId: payload.vaultId,
         lastSeen: Date.now(),
+        acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
       }, 'inbound');
-    };
-
-    ws.on('message', onFirstMessage);
+    });
   }
 
   private _setupWs(
-    ws: WebSocket,
+    ws: SocketLike,
     device: DeviceInfo,
     direction: 'inbound' | 'outbound',
     client?: WSClient,
@@ -215,16 +229,16 @@ export class ConnectionManager {
 
     // Ping keepalive
     peer.pingTimer = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws.readyState === SOCKET_OPEN) {
         ws.send(encodePing());
       }
     }, WS_PING_INTERVAL_MS);
 
     this.peers.set(device.deviceId, peer);
 
-    ws.on('message', (raw: Buffer | ArrayBuffer) => {
+    addSocketMessageListener(ws, async (raw) => {
       try {
-        const msg = decodeMessage(this._toUint8Array(raw));
+        const msg = decodeMessage(await toUint8Array(raw));
 
         if (msg.type === MessageType.PING) {
           ws.send(encodePong());
@@ -253,12 +267,13 @@ export class ConnectionManager {
       }
     });
 
-    ws.on('close', () => {
+    addSocketCloseListener(ws, () => {
       this._removePeer(device.deviceId);
     });
 
-    ws.on('error', (err) => {
-      logger.error(`Peer ${device.deviceId} WS error:`, err.message);
+    addSocketErrorListener(ws, (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(`Peer ${device.deviceId} WS error:`, message);
     });
 
     logger.info(`Peer connected: ${device.deviceId} (${direction}) @ ${device.ip}:${device.port}`);
@@ -275,6 +290,14 @@ export class ConnectionManager {
   }
 
   private _shouldInitiateConnection(device: DeviceInfo): boolean {
+    if (!this._peerAcceptsIncomingConnections(device)) {
+      return false;
+    }
+
+    if (!this.acceptsIncomingConnections) {
+      return true;
+    }
+
     if (device.deviceId.startsWith('manual-')) {
       return true;
     }
@@ -296,9 +319,9 @@ export class ConnectionManager {
     return true;
   }
 
-  private _toUint8Array(raw: Buffer | ArrayBuffer): Uint8Array {
-    return raw instanceof ArrayBuffer
-      ? new Uint8Array(raw)
-      : new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+  private _peerAcceptsIncomingConnections(
+    peer: Pick<DeviceInfo, 'acceptsIncomingConnections'> | Pick<HandshakePayload, 'acceptsIncomingConnections'>,
+  ): boolean {
+    return peer.acceptsIncomingConnections !== false;
   }
 }

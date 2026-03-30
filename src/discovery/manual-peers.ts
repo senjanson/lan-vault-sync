@@ -23,6 +23,7 @@ export class ManualPeers {
       port,
       vaultId,
       lastSeen: Date.now(),
+      acceptsIncomingConnections: true,
     };
 
     this.peers.set(device.deviceId, device);

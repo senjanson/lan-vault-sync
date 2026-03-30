@@ -1,10 +1,23 @@
-import * as dgram from 'dgram';
 import { DeviceInfo } from '../types';
 import { DISCOVERY_PORT, DISCOVERY_INTERVAL_MS } from '../constants';
 import { logger } from '../logger';
+import { getDynamicRequire } from '../utils/runtime';
 
 export class UdpBroadcast {
-  private socket: dgram.Socket | null = null;
+  private socket: {
+    bind(port: number, callback: () => void): void;
+    close(): void;
+    send(
+      msg: Uint8Array,
+      offset: number,
+      length: number,
+      port: number,
+      address: string,
+      callback: (err: Error | null) => void,
+    ): void;
+    setBroadcast(enabled: boolean): void;
+    on(event: string, listener: (...args: any[]) => void): void;
+  } | null = null;
   private broadcastTimer: ReturnType<typeof setInterval> | null = null;
   private onDeviceSeenCb: ((device: DeviceInfo) => void) | null = null;
 
@@ -17,15 +30,24 @@ export class UdpBroadcast {
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
+        const require = getDynamicRequire();
+        if (!require) {
+          resolve();
+          return;
+        }
+
+        const dgram = require('dgram') as {
+          createSocket(options: { type: 'udp4'; reuseAddr: boolean }): typeof this.socket;
+        };
         this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
 
         this.socket.on('error', (err) => {
           logger.error('UDP socket error:', err);
         });
 
-        this.socket.on('message', (msg, rinfo) => {
+        this.socket.on('message', (msg: Uint8Array, rinfo: { address: string }) => {
           try {
-            const data = JSON.parse(msg.toString()) as DeviceInfo;
+            const data = JSON.parse(new TextDecoder().decode(msg)) as DeviceInfo;
             // Ignore our own broadcasts
             if (data.deviceId === this.localDevice.deviceId) return;
             // Fill in the sender's IP from the packet (more reliable)
@@ -45,7 +67,6 @@ export class UdpBroadcast {
         });
       } catch (err) {
         logger.warn('UDP discovery not available (mobile?):', err);
-        // Don't reject — discovery is optional
         resolve();
       }
     });
@@ -65,7 +86,7 @@ export class UdpBroadcast {
   private _startBroadcasting(): void {
     const broadcast = () => {
       if (!this.socket) return;
-      const msg = Buffer.from(JSON.stringify(this.localDevice));
+      const msg = new TextEncoder().encode(JSON.stringify(this.localDevice));
       this.socket.send(msg, 0, msg.length, DISCOVERY_PORT, '255.255.255.255', (err) => {
         if (err) logger.debug('Broadcast send error:', err.message);
       });

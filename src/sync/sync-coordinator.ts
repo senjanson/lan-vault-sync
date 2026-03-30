@@ -25,6 +25,7 @@ import {
 } from '../types';
 import { logger } from '../logger';
 import { ensureParentDirectory } from '../utils/path-utils';
+import { supportsIncomingConnections } from '../utils/runtime';
 
 export class SyncCoordinator {
   private connectionManager: ConnectionManager;
@@ -75,6 +76,7 @@ export class SyncCoordinator {
       port: settings.port,
       vaultId: this.vaultId,
       lastSeen: Date.now(),
+      acceptsIncomingConnections: supportsIncomingConnections(),
     };
     this.discovery = new DiscoveryService(localDevice);
 

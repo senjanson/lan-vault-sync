@@ -125,8 +125,12 @@ export default class LANSyncPlugin extends Plugin {
       await this.saveSettings();
     }
 
-    this.coordinator?.addManualPeer(normalized);
-    return true;
+    try {
+      this.coordinator?.addManualPeer(normalized);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async removeManualPeer(address: string): Promise<void> {

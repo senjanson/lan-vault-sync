@@ -1,20 +1,29 @@
-import { WebSocket } from 'ws';
 import { RECONNECT_BASE_MS, RECONNECT_MAX_MS } from '../constants';
 import { logger } from '../logger';
+import {
+  addSocketCloseListener,
+  addSocketErrorListener,
+  addSocketMessageListener,
+  addSocketOpenListener,
+  setSocketBinaryType,
+  SOCKET_OPEN,
+  SocketLike,
+  toUint8Array,
+} from './socket';
 
 export class WSClient {
-  private ws: WebSocket | null = null;
+  private ws: SocketLike | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = RECONNECT_BASE_MS;
   private intentionallyClosed = false;
 
-  private onOpenCb: ((ws: WebSocket) => void) | null = null;
+  private onOpenCb: ((ws: SocketLike) => void) | null = null;
   private onMessageCb: ((data: Uint8Array) => void) | null = null;
   private onCloseCb: (() => void) | null = null;
 
   constructor(private url: string) {}
 
-  onOpen(cb: (ws: WebSocket) => void): void { this.onOpenCb = cb; }
+  onOpen(cb: (ws: SocketLike) => void): void { this.onOpenCb = cb; }
   onMessage(cb: (data: Uint8Array) => void): void { this.onMessageCb = cb; }
   onClose(cb: () => void): void { this.onCloseCb = cb; }
 
@@ -25,30 +34,33 @@ export class WSClient {
 
   private _doConnect(): void {
     try {
-      this.ws = new WebSocket(this.url);
-      this.ws.binaryType = 'arraybuffer';
+      const WebSocketCtor = globalThis.WebSocket;
+      if (!WebSocketCtor) {
+        throw new Error('Global WebSocket is unavailable in this runtime');
+      }
 
-      this.ws.on('open', () => {
+      this.ws = new WebSocketCtor(this.url) as SocketLike;
+      setSocketBinaryType(this.ws);
+
+      addSocketOpenListener(this.ws, () => {
         logger.info(`Connected to ${this.url}`);
         this.reconnectDelay = RECONNECT_BASE_MS;
         this.onOpenCb?.(this.ws!);
       });
 
-      this.ws.on('message', (data: ArrayBuffer | Buffer) => {
-        const arr = data instanceof ArrayBuffer
-          ? new Uint8Array(data)
-          : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-        this.onMessageCb?.(arr);
+      addSocketMessageListener(this.ws, async (data) => {
+        this.onMessageCb?.(await toUint8Array(data));
       });
 
-      this.ws.on('close', () => {
+      addSocketCloseListener(this.ws, () => {
         logger.info(`Connection closed: ${this.url}`);
         this.onCloseCb?.();
         this._scheduleReconnect();
       });
 
-      this.ws.on('error', (err) => {
-        logger.error(`WS client error (${this.url}):`, err.message);
+      addSocketErrorListener(this.ws, (err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(`WS client error (${this.url}):`, message);
         // close event will fire after error
       });
     } catch (err) {
@@ -71,7 +83,7 @@ export class WSClient {
   }
 
   send(data: Uint8Array): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.ws && this.ws.readyState === SOCKET_OPEN) {
       this.ws.send(data);
     }
   }
@@ -89,6 +101,6 @@ export class WSClient {
   }
 
   get isConnected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return this.ws?.readyState === SOCKET_OPEN;
   }
 }

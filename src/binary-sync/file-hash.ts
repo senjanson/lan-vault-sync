@@ -1,7 +1,6 @@
-import { createHash } from 'crypto';
-
 export async function computeFileHash(data: ArrayBuffer): Promise<string> {
-  const hash = createHash('sha256');
-  hash.update(Buffer.from(data));
-  return hash.digest('hex');
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }

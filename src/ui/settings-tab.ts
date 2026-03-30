@@ -1,6 +1,7 @@
 import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 import type LANSyncPlugin from '../main';
 import { getLocalIPv4Addresses } from '../utils/network';
+import { supportsIncomingConnections } from '../utils/runtime';
 import { buildPeerURI, renderQRCode } from './qr-code';
 
 function makeCopyable(el: HTMLElement, getText: () => string): void {
@@ -31,6 +32,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+    const canAcceptIncoming = supportsIncomingConnections();
 
     containerEl.createEl('h2', { text: 'LAN Vault Sync Settings' });
 
@@ -62,7 +64,11 @@ export class LANSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Port')
-      .setDesc('WebSocket port for sync (change requires restart).')
+      .setDesc(
+        canAcceptIncoming
+          ? 'WebSocket port for sync (change requires restart).'
+          : 'This device cannot accept incoming connections. Keep this port aligned with your desktop peers if needed.',
+      )
       .addText(text => text
         .setPlaceholder('53712')
         .setValue(String(this.plugin.settings.port))
@@ -76,60 +82,67 @@ export class LANSyncSettingTab extends PluginSettingTab {
 
     // ─── QR Code (Share This Device) ───────────────────
     containerEl.createEl('h3', { text: 'QR Code Pairing' });
-    containerEl.createEl('p', {
-      text: 'Let another device scan this QR code to quickly add this device as a peer.',
-      cls: 'setting-item-description',
-    });
-
-    const ips = getLocalIPv4Addresses();
-
-    if (ips.length === 0) {
+    if (!canAcceptIncoming) {
       containerEl.createEl('p', {
-        text: 'Unable to detect local IP address. QR code pairing requires a network connection.',
+        text: 'This device is running in outbound-only mode. On iPhone/iPad, please scan the QR code shown on a desktop device or add the desktop peer manually.',
         cls: 'setting-item-description',
       });
     } else {
-      const qrWrapper = containerEl.createDiv({ cls: 'lan-sync-qr-section' });
+      containerEl.createEl('p', {
+        text: 'Let another device scan this QR code to quickly add this device as a peer.',
+        cls: 'setting-item-description',
+      });
 
-      // Dropdown comes first so user picks IP before seeing the QR
-      const qrCanvas = qrWrapper.createDiv({ cls: 'lan-sync-qr-canvas' });
-      const qrInfo = qrWrapper.createDiv({ cls: 'lan-sync-qr-info' });
+      const ips = getLocalIPv4Addresses();
 
-      let selectedIP = ips[0];
+      if (ips.length === 0) {
+        containerEl.createEl('p', {
+          text: 'Unable to detect local IP address. QR code pairing requires a network connection.',
+          cls: 'setting-item-description',
+        });
+      } else {
+        const qrWrapper = containerEl.createDiv({ cls: 'lan-sync-qr-section' });
 
-      const updateQR = async (ip: string) => {
-        selectedIP = ip;
-        // Always read the current port from settings (may have changed on this page)
-        const currentPort = this.plugin.settings.port;
-        const uri = buildPeerURI(ip, currentPort);
-        qrInfo.empty();
-        const addrEl = qrInfo.createEl('p', { text: `Address: ${ip}:${currentPort}`, cls: 'lan-sync-qr-address' });
-        makeCopyable(addrEl, () => `${ip}:${currentPort}`);
-        const uriEl = qrInfo.createEl('p', { text: uri, cls: 'lan-sync-qr-uri setting-item-description' });
-        makeCopyable(uriEl, () => uri);
-        await renderQRCode(qrCanvas, uri);
-      };
+        // Dropdown comes first so user picks IP before seeing the QR
+        const qrCanvas = qrWrapper.createDiv({ cls: 'lan-sync-qr-canvas' });
+        const qrInfo = qrWrapper.createDiv({ cls: 'lan-sync-qr-info' });
 
-      if (ips.length > 1) {
-        new Setting(qrWrapper)
-          .setName('Network Interface')
-          .setDesc('Select which IP address to use.')
-          .addDropdown(drop => {
-            for (const ip of ips) {
-              drop.addOption(ip, ip);
-            }
-            drop.setValue(selectedIP);
-            drop.onChange(async (value) => {
-              await updateQR(value);
+        let selectedIP = ips[0];
+
+        const updateQR = async (ip: string) => {
+          selectedIP = ip;
+          // Always read the current port from settings (may have changed on this page)
+          const currentPort = this.plugin.settings.port;
+          const uri = buildPeerURI(ip, currentPort);
+          qrInfo.empty();
+          const addrEl = qrInfo.createEl('p', { text: `Address: ${ip}:${currentPort}`, cls: 'lan-sync-qr-address' });
+          makeCopyable(addrEl, () => `${ip}:${currentPort}`);
+          const uriEl = qrInfo.createEl('p', { text: uri, cls: 'lan-sync-qr-uri setting-item-description' });
+          makeCopyable(uriEl, () => uri);
+          await renderQRCode(qrCanvas, uri);
+        };
+
+        if (ips.length > 1) {
+          new Setting(qrWrapper)
+            .setName('Network Interface')
+            .setDesc('Select which IP address to use.')
+            .addDropdown(drop => {
+              for (const ip of ips) {
+                drop.addOption(ip, ip);
+              }
+              drop.setValue(selectedIP);
+              drop.onChange(async (value) => {
+                await updateQR(value);
+              });
             });
-          });
-        // Move the QR canvas/info below the dropdown
-        qrWrapper.appendChild(qrCanvas);
-        qrWrapper.appendChild(qrInfo);
-      }
+          // Move the QR canvas/info below the dropdown
+          qrWrapper.appendChild(qrCanvas);
+          qrWrapper.appendChild(qrInfo);
+        }
 
-      // Initial render — fire-and-forget (renderQRCode errors are non-critical)
-      void updateQR(selectedIP);
+        // Initial render — fire-and-forget (renderQRCode errors are non-critical)
+        void updateQR(selectedIP);
+      }
     }
 
     // ─── Manual Peers ───────────────────────────────────
