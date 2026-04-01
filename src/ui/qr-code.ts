@@ -1,4 +1,3 @@
-import QRCode from 'qrcode';
 import { PLUGIN_ID } from '../constants';
 
 /**
@@ -16,6 +15,7 @@ export async function renderQRCode(
   container: HTMLElement,
   text: string,
 ): Promise<void> {
+  const QRCode = (await import('qrcode')).default;
   const svg = await QRCode.toString(text, {
     type: 'svg',
     margin: 2,
