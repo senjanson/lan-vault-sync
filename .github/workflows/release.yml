@@ -20,12 +20,16 @@ jobs:
         run: |
           npm install
           npm run build
-      - name: Create Release
+      - name: Create or Update Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          gh release create "$tag" \
-            --title="$tag" \
-            --generate-notes \
-            main.js manifest.json styles.css
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" main.js manifest.json styles.css --clobber
+          else
+            gh release create "$tag" \
+              --title="$tag" \
+              --generate-notes \
+              main.js manifest.json styles.css
+          fi
