@@ -84,9 +84,10 @@ export default class LANSyncPlugin extends Plugin {
       },
     });
 
-    // Protocol handler: obsidian://lan-vault-sync?action=add-peer&address=ip:port
+    // Protocol handler: obsidian://lan-vault-sync?address=ip:port
+    // Note: Obsidian overwrites params.action with the handler name ("lan-vault-sync"),
+    // so we cannot use a custom action parameter — just check for address directly.
     this.registerObsidianProtocolHandler(PLUGIN_ID, async (params) => {
-      new Notice(`LAN Sync: protocol handler fired, params=${JSON.stringify(params)}`, 8000);
       await this.handleProtocolParams(params);
     });
 
@@ -130,14 +131,8 @@ export default class LANSyncPlugin extends Plugin {
   }
 
   private async handleProtocolParams(params: Record<string, string>): Promise<void> {
-    if (params.action === 'add-peer' && params.address) {
-      // Mobile (iOS) may pass URL-encoded values without decoding
-      let address: string;
-      try {
-        address = decodeURIComponent(params.address);
-      } catch {
-        address = params.address;
-      }
+    if (params.address) {
+      const address = params.address.trim();
       const added = await this.addManualPeer(address);
       if (added) {
         new Notice(`LAN Sync: Peer ${address} added via QR code`);

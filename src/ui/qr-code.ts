@@ -4,7 +4,7 @@ import { PLUGIN_ID } from '../constants';
  * Build the obsidian:// URI that, when opened, adds a manual peer.
  */
 export function buildPeerURI(ip: string, port: number): string {
-  return `obsidian://${PLUGIN_ID}?action=add-peer&address=${encodeURIComponent(`${ip}:${port}`)}`;
+  return `obsidian://${PLUGIN_ID}?address=${ip}:${port}`;
 }
 
 /**
