@@ -1,5 +1,6 @@
 import { RECONNECT_BASE_MS, RECONNECT_MAX_MS } from '../constants';
 import { logger } from '../logger';
+import { canUseNodeRuntime } from '../utils/runtime';
 import {
   addSocketCloseListener,
   addSocketErrorListener,
@@ -34,12 +35,17 @@ export class WSClient {
 
   private _doConnect(): void {
     try {
-      const WebSocketCtor = globalThis.WebSocket;
-      if (!WebSocketCtor) {
-        throw new Error('Global WebSocket is unavailable in this runtime');
+      if (canUseNodeRuntime()) {
+        // Desktop: use ws library (bundled by esbuild, lazy-initialized via __commonJS)
+        // Using require() instead of static import so ws module code only runs on desktop
+        const { WebSocket: WsWebSocket } = require('ws');
+        this.ws = new WsWebSocket(this.url) as unknown as SocketLike;
+      } else if (globalThis.WebSocket) {
+        // Mobile: use native browser WebSocket
+        this.ws = new globalThis.WebSocket(this.url) as unknown as SocketLike;
+      } else {
+        throw new Error('No WebSocket implementation available');
       }
-
-      this.ws = new WebSocketCtor(this.url) as SocketLike;
       setSocketBinaryType(this.ws);
 
       addSocketOpenListener(this.ws, () => {

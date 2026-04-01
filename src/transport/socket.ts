@@ -84,7 +84,7 @@ function addSocketListener(
   listener: (...args: any[]) => void,
 ): () => void {
   if (socket.addEventListener) {
-    const wrapped = (() => listener()) as EventListener;
+    const wrapped = ((...args: any[]) => listener(...args)) as EventListener;
     socket.addEventListener(event, wrapped);
     return () => socket.removeEventListener?.(event, wrapped);
   }
