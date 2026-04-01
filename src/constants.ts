@@ -1,24 +1,58 @@
-export const PLUGIN_ID = 'lan-vault-sync';
-export const PLUGIN_NAME = 'LAN Vault Sync';
+export const PLUGIN_ID = "lan-vault-sync";
+export const PLUGIN_NAME = "LAN Vault Sync";
 
-export const DEFAULT_WS_PORT = 53712;
+/** Range for randomly assigned WebSocket port on first install (IANA dynamic/private range). */
+export const WS_PORT_MIN = 49200;
+export const WS_PORT_MAX = 65000;
 export const DISCOVERY_PORT = 53713;
 export const DISCOVERY_INTERVAL_MS = 5000;
 export const DEVICE_TIMEOUT_MS = 15000;
 
-export const SYNC_VIEW_TYPE = 'lan-vault-sync-view';
+export const SYNC_VIEW_TYPE = "lan-vault-sync-view";
 
 export const TEXT_EXTENSIONS = new Set([
-  'md', 'txt', 'css', 'js', 'ts', 'json', 'yaml', 'yml',
-  'xml', 'html', 'htm', 'csv', 'svg', 'tex', 'bib',
-  'py', 'rb', 'sh', 'bash', 'zsh', 'fish',
-  'c', 'cpp', 'h', 'hpp', 'java', 'kt', 'rs', 'go',
-  'toml', 'ini', 'cfg', 'conf', 'properties',
-  'markdown', 'mdown', 'mkdn', 'mdwn',
+  "md",
+  "txt",
+  "css",
+  "js",
+  "ts",
+  "json",
+  "yaml",
+  "yml",
+  "xml",
+  "html",
+  "htm",
+  "csv",
+  "svg",
+  "tex",
+  "bib",
+  "py",
+  "rb",
+  "sh",
+  "bash",
+  "zsh",
+  "fish",
+  "c",
+  "cpp",
+  "h",
+  "hpp",
+  "java",
+  "kt",
+  "rs",
+  "go",
+  "toml",
+  "ini",
+  "cfg",
+  "conf",
+  "properties",
+  "markdown",
+  "mdown",
+  "mkdn",
+  "mdwn",
 ]);
 
-export const CRDT_STATE_DIR = '.obsidian/plugins/lan-vault-sync/crdt-state';
-export const CONFLICT_BACKUP_DIR = '.obsidian/plugins/lan-vault-sync/conflicts';
+export const CRDT_STATE_DIR = ".obsidian/plugins/lan-vault-sync/crdt-state";
+export const CONFLICT_BACKUP_DIR = ".obsidian/plugins/lan-vault-sync/conflicts";
 
 export const MAX_ACTIVE_DOCS = 50;
 export const DEBOUNCE_MS = 200;

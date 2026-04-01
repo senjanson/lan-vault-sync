@@ -1,19 +1,31 @@
-import { Notice, Plugin, WorkspaceLeaf } from 'obsidian';
-import { LANSyncSettings, DEFAULT_SETTINGS, SyncState } from './types';
-import { PLUGIN_ID, SYNC_VIEW_TYPE } from './constants';
-import { setDebugEnabled } from './logger';
-import { SyncCoordinator } from './sync/sync-coordinator';
-import { StatusBar } from './ui/status-bar';
-import { LANSyncSettingTab } from './ui/settings-tab';
-import { SyncView } from './ui/sync-view';
+import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { LANSyncSettings, DEFAULT_SETTINGS, SyncState } from "./types";
+import {
+  PLUGIN_ID,
+  SYNC_VIEW_TYPE,
+  WS_PORT_MIN,
+  WS_PORT_MAX,
+} from "./constants";
+import { setDebugEnabled } from "./logger";
+import { SyncCoordinator } from "./sync/sync-coordinator";
+import { StatusBar } from "./ui/status-bar";
+import { LANSyncSettingTab } from "./ui/settings-tab";
+import { SyncView } from "./ui/sync-view";
 
 function generateDeviceId(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let id = '';
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let id = "";
   for (let i = 0; i < 16; i++) {
     id += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return id;
+}
+
+function generateRandomPort(): number {
+  // Random port in the IANA dynamic/private range to avoid same-machine vault conflicts.
+  return (
+    Math.floor(Math.random() * (WS_PORT_MAX - WS_PORT_MIN + 1)) + WS_PORT_MIN
+  );
 }
 
 export default class LANSyncPlugin extends Plugin {
@@ -37,6 +49,12 @@ export default class LANSyncPlugin extends Plugin {
       await this.saveSettings();
     }
 
+    // Assign a random port on first install so multiple vaults on the same machine don't collide
+    if (!this.settings.port) {
+      this.settings.port = generateRandomPort();
+      await this.saveSettings();
+    }
+
     setDebugEnabled(this.settings.enableDebugLog);
 
     // Register view
@@ -53,8 +71,8 @@ export default class LANSyncPlugin extends Plugin {
 
     // Commands
     this.addCommand({
-      id: 'lan-vault-sync-toggle',
-      name: 'Toggle LAN Vault Sync',
+      id: "lan-vault-sync-toggle",
+      name: "Toggle LAN Vault Sync",
       callback: async () => {
         this.settings.enabled = !this.settings.enabled;
         await this.saveSettings();
@@ -67,17 +85,17 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: 'lan-vault-sync-open-panel',
-      name: 'Open Sync Panel',
+      id: "lan-vault-sync-open-panel",
+      name: "Open Sync Panel",
       callback: () => this.activateView(),
     });
 
     this.addCommand({
-      id: 'lan-vault-sync-add-peer',
-      name: 'Add Manual Peer',
+      id: "lan-vault-sync-add-peer",
+      name: "Add Manual Peer",
       callback: async () => {
         // Simple prompt for adding a peer
-        const input = prompt('Enter peer address (ip:port):');
+        const input = prompt("Enter peer address (ip:port):");
         if (input) {
           await this.addManualPeer(input);
         }
@@ -113,7 +131,7 @@ export default class LANSyncPlugin extends Plugin {
 
   async addManualPeer(address: string): Promise<boolean> {
     const normalized = address.trim();
-    if (!normalized || !normalized.includes(':')) {
+    if (!normalized || !normalized.includes(":")) {
       return false;
     }
 
@@ -130,7 +148,9 @@ export default class LANSyncPlugin extends Plugin {
     }
   }
 
-  private async handleProtocolParams(params: Record<string, string>): Promise<void> {
+  private async handleProtocolParams(
+    params: Record<string, string>,
+  ): Promise<void> {
     if (params.address) {
       const address = params.address.trim();
       const added = await this.addManualPeer(address);
@@ -144,7 +164,9 @@ export default class LANSyncPlugin extends Plugin {
 
   async removeManualPeer(address: string): Promise<void> {
     const normalized = address.trim();
-    const nextPeers = this.settings.manualPeers.filter((peer) => peer !== normalized);
+    const nextPeers = this.settings.manualPeers.filter(
+      (peer) => peer !== normalized,
+    );
     if (nextPeers.length === this.settings.manualPeers.length) {
       return;
     }
@@ -180,14 +202,14 @@ export default class LANSyncPlugin extends Plugin {
       await this.coordinator.stop();
       this.coordinator = null;
     }
-    this.statusBar?.update('idle');
+    this.statusBar?.update("idle");
   }
 
   async manualFullSync(
     onProgress: (percent: number, message: string) => void,
   ): Promise<void> {
     if (!this.coordinator) {
-      onProgress(100, 'Sync is not running');
+      onProgress(100, "Sync is not running");
       return;
     }
     await this.coordinator.manualFullSync(onProgress);
