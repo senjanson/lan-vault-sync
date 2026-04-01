@@ -86,21 +86,8 @@ export default class LANSyncPlugin extends Plugin {
 
     // Protocol handler: obsidian://lan-vault-sync?action=add-peer&address=ip:port
     this.registerObsidianProtocolHandler(PLUGIN_ID, async (params) => {
-      if (params.action === 'add-peer' && params.address) {
-        // Mobile (iOS) may pass URL-encoded values without decoding
-        let address: string;
-        try {
-          address = decodeURIComponent(params.address);
-        } catch {
-          address = params.address;
-        }
-        const added = await this.addManualPeer(address);
-        if (added) {
-          new Notice(`LAN Sync: Peer ${address} added via QR code`);
-        } else {
-          new Notice(`LAN Sync: Failed to add peer. Invalid address: ${address}`);
-        }
-      }
+      new Notice(`LAN Sync: protocol handler fired, params=${JSON.stringify(params)}`, 8000);
+      await this.handleProtocolParams(params);
     });
 
     // Auto-start if enabled
@@ -139,6 +126,24 @@ export default class LANSyncPlugin extends Plugin {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private async handleProtocolParams(params: Record<string, string>): Promise<void> {
+    if (params.action === 'add-peer' && params.address) {
+      // Mobile (iOS) may pass URL-encoded values without decoding
+      let address: string;
+      try {
+        address = decodeURIComponent(params.address);
+      } catch {
+        address = params.address;
+      }
+      const added = await this.addManualPeer(address);
+      if (added) {
+        new Notice(`LAN Sync: Peer ${address} added via QR code`);
+      } else {
+        new Notice(`LAN Sync: Failed to add peer. Invalid address: ${address}`);
+      }
     }
   }
 
