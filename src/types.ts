@@ -12,6 +12,8 @@ export interface LANSyncSettings {
   conflictStrategy: "crdt-auto" | "last-write-wins" | "keep-both";
   manualPeers: string[]; // "ip:port" list
   enableDebugLog: boolean;
+  enableSyncLog: boolean;
+  maxSyncLogEntries: number;
 }
 
 export const DEFAULT_SETTINGS: LANSyncSettings = {
@@ -25,6 +27,8 @@ export const DEFAULT_SETTINGS: LANSyncSettings = {
   conflictStrategy: "crdt-auto",
   manualPeers: [],
   enableDebugLog: false,
+  enableSyncLog: true,
+  maxSyncLogEntries: 500,
 };
 
 // ─── Device ──────────────────────────────────────────────
@@ -117,6 +121,29 @@ export interface FileDeletePayload {
 export interface FileRenamePayload {
   oldPath: string;
   newPath: string;
+}
+
+// ─── Sync Log ────────────────────────────────────────────
+export type SyncLogEntryType =
+  | 'remote-overwrite'
+  | 'remote-delete'
+  | 'local-send'
+  | 'initial-sync-receive'
+  | 'conflict-backup';
+
+export interface SyncLogEntry {
+  id: string;
+  timestamp: number;
+  type: SyncLogEntryType;
+  path: string;
+  deviceName?: string;
+  snapshotId?: string;
+  hasSnapshot: boolean;
+  details?: {
+    fileSize?: number;
+    isText?: boolean;
+    reason?: string;
+  };
 }
 
 // ─── Logger helper ─── (accessible everywhere via app)

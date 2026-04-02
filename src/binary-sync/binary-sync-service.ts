@@ -19,6 +19,7 @@ export class BinaryFileSyncService {
   private onRemoteFileWrittenCb: ((path: string) => void) | null = null;
   private onRemoteFileDeletedCb: ((path: string) => Promise<void> | void) | null = null;
   private onRemoteFileRenamedCb: ((oldPath: string, newPath: string) => Promise<void> | void) | null = null;
+  private onBackupCreatedCb: ((path: string, backupId: string, reason: string) => void) | null = null;
 
   constructor(
     private vault: Vault,
@@ -36,6 +37,10 @@ export class BinaryFileSyncService {
 
   onRemoteFileRenamed(cb: (oldPath: string, newPath: string) => Promise<void> | void): void {
     this.onRemoteFileRenamedCb = cb;
+  }
+
+  onBackupCreated(cb: (path: string, backupId: string, reason: string) => void): void {
+    this.onBackupCreatedCb = cb;
   }
 
   /** Handle incoming protocol messages for binary file operations */
@@ -182,6 +187,7 @@ export class BinaryFileSyncService {
             return;
           }
           logger.warn(`Backed up file before remote overwrite: ${path} -> ${backup.contentPath}`);
+          this.onBackupCreatedCb?.(path, backup.backupId, 'remote-file-overwrite');
         }
         await this.vault.modifyBinary(existing, content.buffer as ArrayBuffer);
       } else {
@@ -215,6 +221,7 @@ export class BinaryFileSyncService {
           return;
         }
         logger.warn(`Backed up file before remote delete: ${path} -> ${backup.contentPath}`);
+        this.onBackupCreatedCb?.(path, backup.backupId, 'remote-file-delete');
       }
       this.onRemoteFileWrittenCb?.(path);
       await this.vault.delete(file);
@@ -246,6 +253,7 @@ export class BinaryFileSyncService {
           return;
         }
         logger.warn(`Backed up rename target before remote rename: ${newPath} -> ${backup.contentPath}`);
+        this.onBackupCreatedCb?.(newPath, backup.backupId, 'remote-file-rename-overwrite');
       }
 
       this.onRemoteFileWrittenCb?.(oldPath);

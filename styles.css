@@ -196,3 +196,267 @@
   background: var(--background-modifier-active-hover);
 }
 
+/* ─── Sync Log View ────────────────────────────── */
+.sync-log-container {
+  padding: 8px;
+}
+
+.sync-log-filter-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.sync-log-filter-select {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+  min-width: 100px;
+}
+
+.sync-log-search-input {
+  flex: 1;
+  min-width: 120px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+}
+
+.sync-log-date-group {
+  margin-bottom: 12px;
+}
+
+.sync-log-date-header {
+  margin: 0 0 6px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sync-log-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin: 2px 0;
+  border-radius: 4px;
+  border-left: 3px solid transparent;
+  transition: background 0.1s ease;
+}
+
+.sync-log-entry:hover {
+  background: var(--background-secondary);
+}
+
+.sync-log-type-remote-overwrite {
+  border-left-color: var(--color-orange);
+}
+
+.sync-log-type-remote-delete {
+  border-left-color: var(--text-error);
+}
+
+.sync-log-type-local-send {
+  border-left-color: var(--interactive-accent);
+}
+
+.sync-log-type-initial-sync-receive {
+  border-left-color: var(--text-success);
+}
+
+.sync-log-type-conflict-backup {
+  border-left-color: var(--color-yellow);
+}
+
+.sync-log-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.sync-log-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.sync-log-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sync-log-path {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sync-log-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sync-log-label-remote-overwrite {
+  color: var(--color-orange);
+}
+
+.sync-log-label-remote-delete {
+  color: var(--text-error);
+}
+
+.sync-log-label-local-send {
+  color: var(--interactive-accent);
+}
+
+.sync-log-label-initial-sync-receive {
+  color: var(--text-success);
+}
+
+.sync-log-label-conflict-backup {
+  color: var(--color-yellow);
+}
+
+.sync-log-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sync-log-action-btn {
+  background: none;
+  border: none;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sync-log-action-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.sync-log-action-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ─── Sync Log Modal ───────────────────────────── */
+.sync-log-modal {
+  width: 80vw;
+  max-width: 800px;
+}
+
+.sync-log-modal-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 8px;
+}
+
+.sync-log-modal-tab {
+  padding: 6px 16px;
+  border: none;
+  border-radius: 4px 4px 0 0;
+  background: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.sync-log-modal-tab.is-active {
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.sync-log-modal-body {
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.sync-log-modal-content {
+  padding: 12px;
+  background: var(--background-secondary);
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-x: auto;
+  margin: 0;
+}
+
+.sync-log-modal-content code {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.sync-log-modal-error {
+  color: var(--text-error);
+  font-style: italic;
+}
+
+.sync-log-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+/* ─── Diff View ────────────────────────────────── */
+.sync-log-diff-legend {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.sync-log-diff {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--background-secondary);
+  border-radius: 4px;
+  padding: 8px;
+  overflow-x: auto;
+}
+
+.sync-log-diff-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.sync-log-diff-add {
+  background: rgba(0, 180, 0, 0.15);
+  color: var(--text-success);
+}
+
+.sync-log-diff-remove {
+  background: rgba(220, 0, 0, 0.15);
+  color: var(--text-error);
+}
+
+.sync-log-diff-same {
+  color: var(--text-muted);
+}
+

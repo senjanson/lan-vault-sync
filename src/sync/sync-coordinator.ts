@@ -15,6 +15,7 @@ import { DiscoveryService } from '../discovery/discovery-service';
 import { FileFilter } from '../watcher/file-filter';
 import { SyncStateMachine } from './sync-state';
 import { buildFileTree, diffFileTrees } from './file-tree';
+import { SyncLogService } from '../sync-log/sync-log-service';
 import {
   DeviceInfo,
   FileChangeEvent,
@@ -50,6 +51,7 @@ export class SyncCoordinator {
    *  applied. */
   private conflictLoserPaths = new Map<string, Set<string>>();
   private vaultId: string;
+  private syncLogService: SyncLogService | null;
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
   private onSyncEventCb: ((msg: string) => void) | null = null;
@@ -57,6 +59,10 @@ export class SyncCoordinator {
   constructor(
     private vault: Vault,
     private settings: LANSyncSettings,
+    options?: {
+      backupService?: ConflictBackupService;
+      syncLogService?: SyncLogService;
+    },
   ) {
     // Generate a vault ID from the vault name
     this.vaultId = this._hashVaultId(vault.getName());
@@ -65,7 +71,8 @@ export class SyncCoordinator {
     this.stateMachine = new SyncStateMachine();
     this.connectionManager = new ConnectionManager(settings, this.vaultId);
     this.docManager = new YjsDocManager(vault);
-    this.backupService = new ConflictBackupService(vault);
+    this.backupService = options?.backupService ?? new ConflictBackupService(vault);
+    this.syncLogService = options?.syncLogService ?? null;
     this.binarySync = new BinaryFileSyncService(vault, this.connectionManager, this.backupService);
     this.watcher = new VaultWatcher(vault, settings.ignoredPaths);
 
@@ -160,6 +167,7 @@ export class SyncCoordinator {
     this.connectionManager.stop();
     await this.docManager.persistAll();
     await this.docManager.destroy();
+    await this.syncLogService?.flush();
 
     this.stateMachine.transition('idle');
     this._emitEvent('Sync service stopped');
@@ -236,6 +244,24 @@ export class SyncCoordinator {
       if (!this.filter.isTextFile(path)) return;
       await this.docManager.removeDoc(path);
       this._clearConflictLoserGuard(path);
+    });
+
+    // Binary sync → backup created → sync log entry
+    this.binarySync.onBackupCreated((path, backupId, reason) => {
+      if (!this.syncLogService) return;
+      if (reason.includes('delete')) {
+        this.syncLogService.addEntry('remote-delete', path, {
+          snapshotId: backupId,
+          hasSnapshot: true,
+          details: { isText: false },
+        });
+      } else {
+        this.syncLogService.addEntry('remote-overwrite', path, {
+          snapshotId: backupId,
+          hasSnapshot: true,
+          details: { isText: false },
+        });
+      }
     });
 
     this.binarySync.onRemoteFileRenamed(async (oldPath, newPath) => {
@@ -348,6 +374,10 @@ export class SyncCoordinator {
         } else {
           await this.binarySync.broadcastFileChange(path);
         }
+        this.syncLogService?.addEntry('local-send', path, {
+          hasSnapshot: false,
+          details: { isText: isTextFile },
+        });
         break;
       }
 
@@ -357,6 +387,10 @@ export class SyncCoordinator {
           this._clearConflictLoserGuard(path);
         }
         this.binarySync.broadcastFileDelete(path);
+        this.syncLogService?.addEntry('local-send', path, {
+          hasSnapshot: false,
+          details: { isText: isTextFile, reason: 'delete' },
+        });
         break;
       }
 
@@ -394,13 +428,17 @@ export class SyncCoordinator {
       await this._flushPendingLocalTextChange(filePath);
       const latestContent = await this.docManager.getContent(filePath).catch(() => content);
       const file = this.vault.getAbstractFileByPath(filePath);
+      const isExistingFile = file instanceof TFile;
+      let backupId: string | undefined;
+      let contentChanged = !isExistingFile; // new file counts as changed
 
       // Always back up disk content when it will be overwritten with
       // different data, regardless of whether previousContent is known.
       // This is the last safety-net against data loss.
-      if (file instanceof TFile) {
+      if (isExistingFile) {
         const diskContent = await this.vault.cachedRead(file);
         if (diskContent !== latestContent) {
+          contentChanged = true;
           const needsBackup = typeof previousContent === 'string'
             ? (diskContent !== previousContent)
             : true; // previousContent unknown → always back up to be safe
@@ -419,6 +457,7 @@ export class SyncCoordinator {
               this._emitEvent(`Skipped remote overwrite for ${filePath} because backup failed`);
               return;
             }
+            backupId = backup.backupId;
             logger.warn(`Backed up divergent text file before remote write: ${filePath} -> ${backup.contentPath}`);
             this._emitEvent(`Conflict backup created for ${filePath}`);
           }
@@ -436,6 +475,19 @@ export class SyncCoordinator {
         }
         await this.vault.create(filePath, latestContent);
         this.watcher.markRemoteWrite(filePath);
+      }
+
+      // Sync log entry
+      if (this.syncLogService && contentChanged) {
+        this.syncLogService.addEntry(
+          isExistingFile ? 'remote-overwrite' : 'initial-sync-receive',
+          filePath,
+          {
+            snapshotId: backupId,
+            hasSnapshot: !!backupId,
+            details: { isText: true },
+          },
+        );
       }
 
       // If this file was in the conflict-loser set, the winner's content has
@@ -538,13 +590,18 @@ export class SyncCoordinator {
           const localFile = this.vault.getAbstractFileByPath(local.path);
           if (localFile instanceof TFile) {
             const content = await this.vault.cachedRead(localFile);
-            await this.backupService.backupTextFile(
+            const conflictBackup = await this.backupService.backupTextFile(
               local.path,
               content,
               'text-conflict-no-history',
               { localMtime: local.mtime, remoteMtime: remote.mtime },
             );
             this._emitEvent(`Conflict backup created: ${local.path}`);
+            this.syncLogService?.addEntry('conflict-backup', local.path, {
+              snapshotId: conflictBackup?.backupId,
+              hasSnapshot: !!conflictBackup,
+              details: { isText: true },
+            });
           }
 
           const localWins = this._isConflictWinner(local.mtime, remote.mtime, deviceId);

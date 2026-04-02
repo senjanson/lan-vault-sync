@@ -315,6 +315,58 @@ export class LANSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+
+    // ─── Sync Log ───────────────────────────────────────
+    containerEl.createEl("h3", { text: "Sync Log" });
+
+    new Setting(containerEl)
+      .setName("Enable Sync Log")
+      .setDesc("Record all sync operations for review and restoration.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enableSyncLog)
+          .onChange(async (value) => {
+            this.plugin.settings.enableSyncLog = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Max Log Entries")
+      .setDesc("Maximum number of sync log entries to keep.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.maxSyncLogEntries))
+          .onChange(async (value) => {
+            const num = parseInt(value, 10);
+            if (!isNaN(num) && num > 0 && num <= 10000) {
+              this.plugin.settings.maxSyncLogEntries = num;
+              await this.plugin.saveSettings();
+            }
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Open Sync Log")
+      .setDesc("View all sync operations in a side panel.")
+      .addButton((btn) =>
+        btn.setButtonText("Open").onClick(() => {
+          this.plugin.activateSyncLogView();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Clear Sync Log")
+      .setDesc("Delete all sync log entries.")
+      .addButton((btn) =>
+        btn
+          .setButtonText("Clear")
+          .setWarning()
+          .onClick(async () => {
+            await this.plugin.syncLogService?.clearAll();
+            new Notice("Sync log cleared");
+          }),
+      );
   }
 
   private _renderPeerList(container: HTMLElement): void {

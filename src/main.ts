@@ -3,14 +3,18 @@ import { LANSyncSettings, DEFAULT_SETTINGS, SyncState } from "./types";
 import {
   PLUGIN_ID,
   SYNC_VIEW_TYPE,
+  SYNC_LOG_VIEW_TYPE,
   WS_PORT_MIN,
   WS_PORT_MAX,
 } from "./constants";
 import { setDebugEnabled } from "./logger";
 import { SyncCoordinator } from "./sync/sync-coordinator";
+import { ConflictBackupService } from "./conflict/conflict-backup-service";
+import { SyncLogService } from "./sync-log/sync-log-service";
 import { StatusBar } from "./ui/status-bar";
 import { LANSyncSettingTab } from "./ui/settings-tab";
 import { SyncView } from "./ui/sync-view";
+import { SyncLogView } from "./ui/sync-log-view";
 
 function generateDeviceId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -33,6 +37,9 @@ export default class LANSyncPlugin extends Plugin {
   private coordinator: SyncCoordinator | null = null;
   private statusBar: StatusBar | null = null;
   private syncView: SyncView | null = null;
+  private syncLogView: SyncLogView | null = null;
+  private backupService: ConflictBackupService | null = null;
+  syncLogService: SyncLogService | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -57,10 +64,25 @@ export default class LANSyncPlugin extends Plugin {
 
     setDebugEnabled(this.settings.enableDebugLog);
 
+    // Initialize services
+    this.backupService = new ConflictBackupService(this.app.vault);
+    this.syncLogService = new SyncLogService(
+      this.app.vault,
+      this.settings,
+      this.backupService,
+    );
+    await this.syncLogService.loadFromDisk();
+
     // Register view
     this.registerView(SYNC_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
       this.syncView = new SyncView(leaf);
       return this.syncView;
+    });
+
+    // Register sync log view
+    this.registerView(SYNC_LOG_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
+      this.syncLogView = new SyncLogView(leaf, this.syncLogService!);
+      return this.syncLogView;
     });
 
     // Status bar
@@ -91,6 +113,12 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "lan-vault-sync-open-sync-log",
+      name: "Open Sync Log",
+      callback: () => this.activateSyncLogView(),
+    });
+
+    this.addCommand({
       id: "lan-vault-sync-add-peer",
       name: "Add Manual Peer",
       callback: async () => {
@@ -118,6 +146,7 @@ export default class LANSyncPlugin extends Plugin {
 
   async onunload(): Promise<void> {
     await this.stopSync();
+    await this.syncLogService?.flush();
   }
 
   async loadSettings(): Promise<void> {
@@ -180,7 +209,10 @@ export default class LANSyncPlugin extends Plugin {
       await this.stopSync();
     }
 
-    this.coordinator = new SyncCoordinator(this.app.vault, this.settings);
+    this.coordinator = new SyncCoordinator(this.app.vault, this.settings, {
+      backupService: this.backupService!,
+      syncLogService: this.syncLogService!,
+    });
 
     this.coordinator.onStateChange((state: SyncState) => {
       const peerCount = this.coordinator?.getConnectedDevices().length ?? 0;
@@ -224,6 +256,23 @@ export default class LANSyncPlugin extends Plugin {
       if (rightLeaf) {
         leaf = rightLeaf;
         await leaf.setViewState({ type: SYNC_VIEW_TYPE, active: true });
+      }
+    }
+
+    if (leaf) {
+      workspace.revealLeaf(leaf);
+    }
+  }
+
+  async activateSyncLogView(): Promise<void> {
+    const { workspace } = this.app;
+
+    let leaf = workspace.getLeavesOfType(SYNC_LOG_VIEW_TYPE)[0];
+    if (!leaf) {
+      const rightLeaf = workspace.getRightLeaf(false);
+      if (rightLeaf) {
+        leaf = rightLeaf;
+        await leaf.setViewState({ type: SYNC_LOG_VIEW_TYPE, active: true });
       }
     }
 

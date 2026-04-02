@@ -61,3 +61,7 @@ export const RECONNECT_MAX_MS = 30000;
 export const CHUNK_SIZE = 64 * 1024; // 64 KB
 
 export const WS_PING_INTERVAL_MS = 10000;
+
+export const SYNC_LOG_VIEW_TYPE = 'lan-vault-sync-log-view';
+export const MAX_SYNC_LOG_ENTRIES = 500;
+export const SYNC_LOG_FILE_PATH = '.obsidian/plugins/lan-vault-sync/sync-log.json';

@@ -6,6 +6,7 @@ import { ensureParentDirectory } from '../utils/path-utils';
 type ConflictBackupKind = 'text' | 'binary';
 
 export interface ConflictBackupResult {
+  backupId: string;
   backupDir: string;
   contentPath: string;
   metadataPath: string;
@@ -74,6 +75,7 @@ export class ConflictBackupService {
     const backupId = this._nextBackupId(filePath);
     const backupDir = `${CONFLICT_BACKUP_DIR}/${backupId}`;
     return {
+      backupId,
       backupDir,
       contentPath: `${backupDir}/files/${filePath}`,
       metadataPath: `${backupDir}/metadata.json`,
@@ -115,5 +117,29 @@ export class ConflictBackupService {
       content.byteOffset,
       content.byteOffset + content.byteLength,
     ) as ArrayBuffer;
+  }
+
+  async readTextBackup(snapshotId: string, filePath: string): Promise<string | null> {
+    const adapter = (this.vault as any).adapter;
+    if (!adapter?.read) return null;
+
+    const contentPath = `${CONFLICT_BACKUP_DIR}/${snapshotId}/files/${filePath}`;
+    try {
+      return await adapter.read(contentPath);
+    } catch {
+      return null;
+    }
+  }
+
+  async readBinaryBackup(snapshotId: string, filePath: string): Promise<ArrayBuffer | null> {
+    const adapter = (this.vault as any).adapter;
+    if (!adapter?.readBinary) return null;
+
+    const contentPath = `${CONFLICT_BACKUP_DIR}/${snapshotId}/files/${filePath}`;
+    try {
+      return await adapter.readBinary(contentPath);
+    } catch {
+      return null;
+    }
   }
 }
