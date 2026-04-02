@@ -1,5 +1,6 @@
 import { RECONNECT_BASE_MS, RECONNECT_MAX_MS } from "../constants";
 import { logger } from "../logger";
+import { canUseNodeRuntime } from "../utils/runtime";
 import {
   addSocketCloseListener,
   addSocketErrorListener,
@@ -40,10 +41,12 @@ export class WSClient {
 
   private _doConnect(): void {
     try {
-      // Use the native browser WebSocket API available in both Electron (desktop)
-      // and WebKit (mobile). Electron's renderer process provides globalThis.WebSocket
-      // natively. This avoids depending on the bundled ws package for the client side.
-      if (globalThis.WebSocket) {
+      // Desktop: use ws library (bundled by esbuild, correctly resolved to
+      // Node.js entry via wsNodePlugin). Mobile: use native browser WebSocket.
+      if (canUseNodeRuntime()) {
+        const { WebSocket: WsWebSocket } = require("ws");
+        this.ws = new WsWebSocket(this.url) as unknown as SocketLike;
+      } else if (globalThis.WebSocket) {
         this.ws = new globalThis.WebSocket(this.url) as unknown as SocketLike;
       } else {
         throw new Error("No WebSocket implementation available");
