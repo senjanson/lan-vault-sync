@@ -326,6 +326,35 @@ describe('SyncCoordinator text conflict safety', () => {
     expect(renameDoc).toHaveBeenCalledWith('old.md', 'new.md');
   });
 
+  it('redirects stale old-path text updates after a remote rename intent', async () => {
+    const applyRemoteUpdate = vi.fn().mockResolvedValue(undefined);
+    const renameDoc = vi.fn().mockResolvedValue(undefined);
+    const flushPendingLocalTextChange = vi
+      .spyOn(coordinator as any, '_flushPendingLocalTextChange')
+      .mockResolvedValue(false);
+
+    (coordinator as any).docManager = {
+      applyRemoteUpdate,
+      renameDoc,
+      removeDoc: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await (coordinator as any).binarySync.onRemoteFileRenamedCb?.('Untitled.md', 'note.md');
+
+    const payload = decodeMessage(
+      encodeYjsSync(
+        MessageType.YJS_UPDATE,
+        'Untitled.md',
+        new Uint8Array([1, 2, 3]),
+      ),
+    ).payload;
+
+    await (coordinator as any)._handleMessage('peer-1', MessageType.YJS_UPDATE, payload);
+
+    expect(flushPendingLocalTextChange).toHaveBeenCalledWith('note.md');
+    expect(applyRemoteUpdate).toHaveBeenCalledWith('note.md', new Uint8Array([1, 2, 3]));
+  });
+
   it('migrates CRDT state on local text rename instead of deleting it', async () => {
     const renameDoc = vi.fn().mockResolvedValue(undefined);
     const removeDoc = vi.fn().mockResolvedValue(undefined);
@@ -344,6 +373,60 @@ describe('SyncCoordinator text conflict safety', () => {
 
     expect(renameDoc).toHaveBeenCalledWith('old.md', 'new.md');
     expect(removeDoc).not.toHaveBeenCalled();
+  });
+
+  it('serializes local create and rename events to preserve ordering', async () => {
+    let resolveRead!: (value: string) => void;
+    const cachedRead = vi.fn().mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+    const applyLocalChange = vi.fn().mockResolvedValue(undefined);
+    const renameDoc = vi.fn().mockResolvedValue(undefined);
+    const broadcastFileRename = vi.fn();
+
+    vault.setText('Untitled.md', '# title');
+    vault.setText('note-a.md', '# title');
+    (coordinator as any).vault.cachedRead = cachedRead;
+    (coordinator as any).docManager = {
+      applyLocalChange,
+      renameDoc,
+      removeDoc: vi.fn().mockResolvedValue(undefined),
+    };
+    (coordinator as any).binarySync = {
+      broadcastFileRename,
+    };
+
+    const createTask = (coordinator as any)._enqueueLocalFileChange({
+      type: 'create',
+      path: 'Untitled.md',
+      isTextFile: true,
+      timestamp: Date.now(),
+    });
+    const renameTask = (coordinator as any)._enqueueLocalFileChange({
+      type: 'rename',
+      path: 'note-a.md',
+      oldPath: 'Untitled.md',
+      isTextFile: true,
+      timestamp: Date.now(),
+    });
+
+    await Promise.resolve();
+    expect(renameDoc).not.toHaveBeenCalled();
+    expect(broadcastFileRename).not.toHaveBeenCalled();
+
+    resolveRead('# title');
+    await createTask;
+    await renameTask;
+
+    expect(applyLocalChange).toHaveBeenCalledWith('Untitled.md', '# title');
+    expect(renameDoc).toHaveBeenCalledWith('Untitled.md', 'note-a.md');
+    expect(broadcastFileRename).toHaveBeenCalledWith('Untitled.md', 'note-a.md');
+    expect(applyLocalChange.mock.invocationCallOrder[0]).toBeLessThan(
+      renameDoc.mock.invocationCallOrder[0],
+    );
   });
 
   it('only clears conflict-loser guards for the disconnected peer', () => {

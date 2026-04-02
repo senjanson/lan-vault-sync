@@ -274,48 +274,54 @@ export class BinaryFileSyncService {
     if (oldPath === newPath) return;
 
     const file = this.vault.getAbstractFileByPath(oldPath);
-    if (file) {
-      const existingTarget = this.vault.getAbstractFileByPath(newPath);
-      if (existingTarget instanceof TFile) {
-        const currentTargetContent = new Uint8Array(
-          await this.vault.readBinary(existingTarget),
-        );
-        const backup = await this.backupService.backupBinaryFile(
-          newPath,
-          currentTargetContent,
-          "remote-file-rename-overwrite",
-          {
-            oldPath,
-            newPath,
-            size: currentTargetContent.byteLength,
-          },
-        );
-        if (!backup) {
-          logger.error(
-            `Aborting remote rename ${oldPath} -> ${newPath}: target backup unavailable`,
-          );
-          return;
-        }
-        logger.warn(
-          `Backed up rename target before remote rename: ${newPath} -> ${backup.contentPath}`,
-        );
-        this.onBackupCreatedCb?.(
-          newPath,
-          backup.backupId,
-          "remote-file-rename-overwrite",
-        );
-      }
-
-      this.onRemoteFileWrittenCb?.(oldPath);
-      this.onRemoteFileWrittenCb?.(newPath);
-      const adapter = (this.vault as any).adapter;
-      if (adapter) {
-        await ensureParentDirectory(adapter, newPath);
-      }
-      await this.vault.rename(file, newPath);
+    if (!file) {
       await this.onRemoteFileRenamedCb?.(oldPath, newPath);
-      logger.debug(`Renamed file: ${oldPath} → ${newPath}`);
+      logger.debug(
+        `Recorded rename intent without source file: ${oldPath} → ${newPath}`,
+      );
+      return;
     }
+
+    const existingTarget = this.vault.getAbstractFileByPath(newPath);
+    if (existingTarget instanceof TFile) {
+      const currentTargetContent = new Uint8Array(
+        await this.vault.readBinary(existingTarget),
+      );
+      const backup = await this.backupService.backupBinaryFile(
+        newPath,
+        currentTargetContent,
+        "remote-file-rename-overwrite",
+        {
+          oldPath,
+          newPath,
+          size: currentTargetContent.byteLength,
+        },
+      );
+      if (!backup) {
+        logger.error(
+          `Aborting remote rename ${oldPath} -> ${newPath}: target backup unavailable`,
+        );
+        return;
+      }
+      logger.warn(
+        `Backed up rename target before remote rename: ${newPath} -> ${backup.contentPath}`,
+      );
+      this.onBackupCreatedCb?.(
+        newPath,
+        backup.backupId,
+        "remote-file-rename-overwrite",
+      );
+    }
+
+    this.onRemoteFileWrittenCb?.(oldPath);
+    this.onRemoteFileWrittenCb?.(newPath);
+    const adapter = (this.vault as any).adapter;
+    if (adapter) {
+      await ensureParentDirectory(adapter, newPath);
+    }
+    await this.vault.rename(file, newPath);
+    await this.onRemoteFileRenamedCb?.(oldPath, newPath);
+    logger.debug(`Renamed file: ${oldPath} → ${newPath}`);
   }
 
   private _isSameBinary(left: Uint8Array, right: Uint8Array): boolean {

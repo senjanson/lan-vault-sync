@@ -178,4 +178,19 @@ describe('BinaryFileSyncService conflict backups', () => {
     const targetContent = new Uint8Array(await vault.readBinary(vault.getAbstractFileByPath('assets/target.bin')!));
     expect(Array.from(targetContent)).toEqual([7, 8, 9]);
   });
+
+  it('still reports remote rename intent when source file is missing', async () => {
+    const vault = new FakeVault();
+    const onRemoteFileRenamed = vi.fn().mockResolvedValue(undefined);
+    const service = new BinaryFileSyncService(
+      vault as any,
+      { broadcast: vi.fn(), sendTo: vi.fn() } as any,
+      { backupBinaryFile: vi.fn() } as any,
+    );
+    service.onRemoteFileRenamed(onRemoteFileRenamed);
+
+    await (service as any)._renameFile('Untitled.md', 'note.md');
+
+    expect(onRemoteFileRenamed).toHaveBeenCalledWith('Untitled.md', 'note.md');
+  });
 });

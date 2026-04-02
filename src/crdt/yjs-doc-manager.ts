@@ -15,7 +15,9 @@ export class YjsDocManager {
 
   // Callbacks
   private onLocalUpdateCb: ((filePath: string, update: Uint8Array) => void) | null = null;
-  private onRemoteContentCb: ((filePath: string, content: string, previousContent: string) => void) | null = null;
+  private onRemoteContentCb:
+    | ((filePath: string, content: string, previousContent: string) => Promise<void> | void)
+    | null = null;
 
   constructor(private vault: Vault) {
     this.pool = new DocPool();
@@ -32,7 +34,9 @@ export class YjsDocManager {
   }
 
   /** Register callback: fired when a remote update changes doc content → should write to file */
-  onRemoteContent(cb: (filePath: string, content: string, previousContent: string) => void): void {
+  onRemoteContent(
+    cb: (filePath: string, content: string, previousContent: string) => Promise<void> | void,
+  ): void {
     this.onRemoteContentCb = cb;
   }
 
@@ -126,6 +130,10 @@ export class YjsDocManager {
 
   /** Called when receiving a Yjs update from a remote peer */
   async applyRemoteUpdate(filePath: string, update: Uint8Array): Promise<void> {
+    let remoteContentChange:
+      | { content: string; previousContent: string }
+      | null = null;
+
     await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
       const previousContent = doc.getText('content').toString();
@@ -136,9 +144,17 @@ export class YjsDocManager {
       this.lastKnownContent.set(filePath, content);
 
       if (content !== previousContent) {
-        this.onRemoteContentCb?.(filePath, content, previousContent);
+        remoteContentChange = { content, previousContent };
       }
     });
+
+    if (remoteContentChange) {
+      await this.onRemoteContentCb?.(
+        filePath,
+        remoteContentChange.content,
+        remoteContentChange.previousContent,
+      );
+    }
   }
 
   /** Generate sync step 1 (state vector) for initial sync with a new peer */
@@ -167,6 +183,10 @@ export class YjsDocManager {
 
   /** Handle sync step 2 from peer (update diff) */
   async handleSyncStep2(filePath: string, data: Uint8Array): Promise<void> {
+    let remoteContentChange:
+      | { content: string; previousContent: string }
+      | null = null;
+
     await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
       const previousContent = doc.getText('content').toString();
@@ -177,9 +197,17 @@ export class YjsDocManager {
       const content = ytext.toString();
       this.lastKnownContent.set(filePath, content);
       if (content !== previousContent) {
-        this.onRemoteContentCb?.(filePath, content, previousContent);
+        remoteContentChange = { content, previousContent };
       }
     });
+
+    if (remoteContentChange) {
+      await this.onRemoteContentCb?.(
+        filePath,
+        remoteContentChange.content,
+        remoteContentChange.previousContent,
+      );
+    }
   }
 
   /** Initialize a doc with file content (for first-time setup) */

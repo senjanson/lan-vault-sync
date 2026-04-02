@@ -29,6 +29,7 @@ import { ensureParentDirectory } from "../utils/path-utils";
 import { supportsIncomingConnections } from "../utils/runtime";
 
 export class SyncCoordinator {
+  private static readonly REMOTE_TEXT_RENAME_ALIAS_TTL_MS = 10_000;
   private connectionManager: ConnectionManager;
   private docManager: YjsDocManager;
   private binarySync: BinaryFileSyncService;
@@ -50,6 +51,11 @@ export class SyncCoordinator {
    *  initialising it from disk would cause duplication when the update is
    *  applied. */
   private conflictLoserPaths = new Map<string, Set<string>>();
+  private localFileChangeQueue: Promise<void> = Promise.resolve();
+  private recentRemoteTextRenames = new Map<
+    string,
+    { newPath: string; expiresAt: number }
+  >();
   private vaultId: string;
   private syncLogService: SyncLogService | null;
 
@@ -225,8 +231,8 @@ export class SyncCoordinator {
     });
 
     // Vault watcher → local changes
-    this.watcher.onFileChanged(async (event) => {
-      await this._handleLocalFileChange(event);
+    this.watcher.onFileChanged((event) => {
+      void this._enqueueLocalFileChange(event);
     });
 
     // Yjs doc manager → broadcast local updates
@@ -276,6 +282,7 @@ export class SyncCoordinator {
       const newIsText = this.filter.isTextFile(newPath);
 
       if (oldIsText && newIsText) {
+        this._rememberRemoteTextRename(oldPath, newPath);
         await this.docManager.renameDoc(oldPath, newPath);
         this._moveConflictLoserGuard(oldPath, newPath);
         return;
@@ -299,22 +306,23 @@ export class SyncCoordinator {
       case MessageType.YJS_SYNC_STEP1: {
         const msg = decodeYjsSync(payload);
         if (!this._isSafePath(msg.filePath)) break;
-        await this._flushPendingLocalTextChange(msg.filePath);
+        const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
+        await this._flushPendingLocalTextChange(resolvedPath);
         // Ensure the local doc is seeded from disk so we don't respond with an
         // empty state when we have content the remote peer hasn't seen yet.
         // Skip seeding if we are the conflict "loser" for this path — the
         // winner will overwrite our content via YJS_UPDATE and seeding from
         // disk would cause duplication when the two states merge.
-        if (!this._hasConflictLoserGuard(msg.filePath)) {
-          await this._ensureCrdtInitialized(msg.filePath);
+        if (!this._hasConflictLoserGuard(resolvedPath)) {
+          await this._ensureCrdtInitialized(resolvedPath);
         }
         const response = await this.docManager.handleSyncStep1(
-          msg.filePath,
+          resolvedPath,
           msg.data,
         );
         const reply = encodeYjsSync(
           MessageType.YJS_SYNC_STEP2,
-          msg.filePath,
+          resolvedPath,
           response,
         );
         this.connectionManager.sendTo(deviceId, reply);
@@ -322,13 +330,13 @@ export class SyncCoordinator {
         // Complete bidirectional sync: also send our own state vector so the
         // initiator can send back the diff we're missing.  Guard with a
         // per-(peer,file) flag to prevent infinite SYNC_STEP1 ping-pong.
-        const reverseKey = `${deviceId}:${msg.filePath}`;
+        const reverseKey = `${deviceId}:${resolvedPath}`;
         if (!this.reverseSyncSent.has(reverseKey)) {
           this.reverseSyncSent.add(reverseKey);
-          const ourSV = await this.docManager.encodeSyncStep1(msg.filePath);
+          const ourSV = await this.docManager.encodeSyncStep1(resolvedPath);
           const reverseStep1 = encodeYjsSync(
             MessageType.YJS_SYNC_STEP1,
-            msg.filePath,
+            resolvedPath,
             ourSV,
           );
           this.connectionManager.sendTo(deviceId, reverseStep1);
@@ -339,18 +347,20 @@ export class SyncCoordinator {
       case MessageType.YJS_SYNC_STEP2: {
         const msg = decodeYjsSync(payload);
         if (!this._isSafePath(msg.filePath)) break;
-        await this._flushPendingLocalTextChange(msg.filePath);
-        await this.docManager.handleSyncStep2(msg.filePath, msg.data);
+        const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
+        await this._flushPendingLocalTextChange(resolvedPath);
+        await this.docManager.handleSyncStep2(resolvedPath, msg.data);
         // Clear reverse-sync guard so future sync rounds can proceed
-        this.reverseSyncSent.delete(`${deviceId}:${msg.filePath}`);
+        this.reverseSyncSent.delete(`${deviceId}:${resolvedPath}`);
         break;
       }
 
       case MessageType.YJS_UPDATE: {
         const msg = decodeYjsSync(payload);
         if (!this._isSafePath(msg.filePath)) break;
-        await this._flushPendingLocalTextChange(msg.filePath);
-        await this.docManager.applyRemoteUpdate(msg.filePath, msg.data);
+        const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
+        await this._flushPendingLocalTextChange(resolvedPath);
+        await this.docManager.applyRemoteUpdate(resolvedPath, msg.data);
         break;
       }
 
@@ -383,6 +393,21 @@ export class SyncCoordinator {
   }
 
   // ─── Private: Local file changes ────────────────────────
+
+  private _enqueueLocalFileChange(event: FileChangeEvent): Promise<void> {
+    const run = async () => {
+      await this._handleLocalFileChange(event);
+    };
+
+    const queued = this.localFileChangeQueue.then(run, run);
+    this.localFileChangeQueue = queued.then(
+      () => undefined,
+      (err) => {
+        logger.error(`Failed to handle local file event: ${event.type} ${event.path}`, err);
+      },
+    );
+    return queued;
+  }
 
   private async _handleLocalFileChange(event: FileChangeEvent): Promise<void> {
     const { type, path, oldPath, isTextFile } = event;
@@ -868,6 +893,31 @@ export class SyncCoordinator {
   private _emitEvent(msg: string): void {
     logger.info(msg);
     this.onSyncEventCb?.(msg);
+  }
+
+  private _rememberRemoteTextRename(oldPath: string, newPath: string): void {
+    if (oldPath === newPath) return;
+    const expiresAt =
+      Date.now() + SyncCoordinator.REMOTE_TEXT_RENAME_ALIAS_TTL_MS;
+    this.recentRemoteTextRenames.set(oldPath, { newPath, expiresAt });
+  }
+
+  private _resolveRecentRemoteTextRename(filePath: string): string {
+    let resolvedPath = filePath;
+    const visited = new Set<string>();
+
+    while (!visited.has(resolvedPath)) {
+      visited.add(resolvedPath);
+      const alias = this.recentRemoteTextRenames.get(resolvedPath);
+      if (!alias) break;
+      if (alias.expiresAt <= Date.now()) {
+        this.recentRemoteTextRenames.delete(resolvedPath);
+        break;
+      }
+      resolvedPath = alias.newPath;
+    }
+
+    return resolvedPath;
   }
 
   private _shouldBootstrapSharedTextState(deviceId: string): boolean {
