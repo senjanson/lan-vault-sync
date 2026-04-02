@@ -212,6 +212,7 @@ export default class LANSyncPlugin extends Plugin {
     this.coordinator = new SyncCoordinator(this.app.vault, this.settings, {
       backupService: this.backupService!,
       syncLogService: this.syncLogService!,
+      workspace: this.app.workspace,
     });
 
     this.coordinator.onStateChange((state: SyncState) => {

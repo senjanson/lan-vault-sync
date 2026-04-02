@@ -49,6 +49,8 @@ export interface FileChangeEvent {
   oldPath?: string;
   isTextFile: boolean;
   timestamp: number;
+  content?: string;
+  source?: "vault" | "editor";
 }
 
 // ─── File metadata for tree sync ─────────────────────────

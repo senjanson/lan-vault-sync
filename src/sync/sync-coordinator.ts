@@ -1,4 +1,4 @@
-import { Vault, TFile } from "obsidian";
+import { Vault, TFile, Workspace } from "obsidian";
 import * as Y from "yjs";
 import { ConnectionManager } from "../transport/connection-manager";
 import {
@@ -68,6 +68,7 @@ export class SyncCoordinator {
     options?: {
       backupService?: ConflictBackupService;
       syncLogService?: SyncLogService;
+      workspace?: Workspace;
     },
   ) {
     // Generate a vault ID from the vault name
@@ -85,7 +86,11 @@ export class SyncCoordinator {
       this.connectionManager,
       this.backupService,
     );
-    this.watcher = new VaultWatcher(vault, settings.ignoredPaths);
+    this.watcher = new VaultWatcher(
+      vault,
+      settings.ignoredPaths,
+      options?.workspace,
+    );
 
     const localDevice: DeviceInfo = {
       deviceId: settings.deviceId,
@@ -416,9 +421,11 @@ export class SyncCoordinator {
       case "create":
       case "modify": {
         if (isTextFile) {
-          const file = this.vault.getAbstractFileByPath(path);
-          if (file instanceof TFile) {
-            const content = await this.vault.cachedRead(file);
+          const content =
+            typeof event.content === "string"
+              ? event.content
+              : await this._readTextFile(path);
+          if (content !== null) {
             await this.docManager.applyLocalChange(path, content);
           }
         } else {
@@ -785,12 +792,11 @@ export class SyncCoordinator {
       return false;
     }
 
-    const file = this.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof TFile)) {
+    const content = await this._readTextFile(filePath);
+    if (content === null) {
       return false;
     }
 
-    const content = await this.vault.cachedRead(file);
     await this.docManager.applyLocalChange(filePath, content);
     return true;
   }
@@ -893,6 +899,15 @@ export class SyncCoordinator {
   private _emitEvent(msg: string): void {
     logger.info(msg);
     this.onSyncEventCb?.(msg);
+  }
+
+  private async _readTextFile(path: string): Promise<string | null> {
+    const file = this.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      return null;
+    }
+
+    return this.vault.cachedRead(file);
   }
 
   private _rememberRemoteTextRename(oldPath: string, newPath: string): void {

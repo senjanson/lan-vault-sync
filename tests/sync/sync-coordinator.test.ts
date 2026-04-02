@@ -97,6 +97,31 @@ describe('SyncCoordinator text conflict safety', () => {
     );
   });
 
+  it('prefers watcher-provided text content for local modify events', async () => {
+    const applyLocalChange = vi.fn().mockResolvedValue(undefined);
+    const cachedRead = vi.fn().mockRejectedValue(new Error('should not read vault'));
+
+    (coordinator as any).vault.cachedRead = cachedRead;
+    (coordinator as any).docManager = {
+      applyLocalChange,
+    };
+    (coordinator as any).binarySync = {
+      broadcastFileChange: vi.fn(),
+    };
+
+    await (coordinator as any)._handleLocalFileChange({
+      type: 'modify',
+      path: 'note.md',
+      isTextFile: true,
+      timestamp: Date.now(),
+      content: 'edited on iphone',
+      source: 'editor',
+    });
+
+    expect(applyLocalChange).toHaveBeenCalledWith('note.md', 'edited on iphone');
+    expect(cachedRead).not.toHaveBeenCalled();
+  });
+
   it('writes the latest merged doc content after flushing pending local text', async () => {
     const applyLocalChange = vi.fn().mockResolvedValue(undefined);
     const getContent = vi.fn().mockResolvedValue('merged content');
