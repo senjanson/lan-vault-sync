@@ -28,7 +28,7 @@ export class UdpBroadcast {
   }
 
   start(): Promise<void> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       try {
         const require = getDynamicRequire();
         if (!require) {
@@ -39,13 +39,21 @@ export class UdpBroadcast {
         const dgram = require('dgram') as {
           createSocket(options: { type: 'udp4'; reuseAddr: boolean }): typeof this.socket;
         };
-        this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+        const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+        this.socket = socket;
+        let settled = false;
 
-        this.socket.on('error', (err) => {
+        socket.on('error', (err: Error) => {
           logger.error('UDP socket error:', err);
+          if (!settled) {
+            settled = true;
+            socket.close();
+            this.socket = null;
+            resolve();
+          }
         });
 
-        this.socket.on('message', (msg: Uint8Array, rinfo: { address: string }) => {
+        socket.on('message', (msg: Uint8Array, rinfo: { address: string }) => {
           try {
             const data = JSON.parse(new TextDecoder().decode(msg)) as DeviceInfo;
             // Ignore our own broadcasts
@@ -59,8 +67,12 @@ export class UdpBroadcast {
           }
         });
 
-        this.socket.bind(DISCOVERY_PORT, () => {
-          this.socket!.setBroadcast(true);
+        socket.bind(DISCOVERY_PORT, () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          socket.setBroadcast(true);
           this._startBroadcasting();
           logger.info(`UDP discovery started on port ${DISCOVERY_PORT}`);
           resolve();

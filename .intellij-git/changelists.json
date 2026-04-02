@@ -4,7 +4,13 @@
     "name": "Changes",
     "files": [
       ".intellij-git/changelists.json",
-      "src/ui/sync-log-view.ts"
+      "src/discovery/udp-broadcast.ts",
+      "src/transport/socket.ts",
+      "src/transport/protocol.ts",
+      "tsconfig.json",
+      "tests/discovery/",
+      "tests/transport/protocol.test.ts",
+      "src/transport/ws-server.ts"
     ],
     "isDefault": true
   }

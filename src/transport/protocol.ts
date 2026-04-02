@@ -23,9 +23,15 @@ export function encodeMessage(type: MessageType, payload: Uint8Array): Uint8Arra
 }
 
 export function decodeMessage(data: Uint8Array): { type: MessageType; payload: Uint8Array } {
+  if (data.byteLength < 5) {
+    throw new Error('Malformed message: incomplete header');
+  }
   const type = data[0] as MessageType;
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const len = view.getUint32(1, false);
+  if (data.byteLength < 5 + len) {
+    throw new Error(`Malformed message: expected ${len} payload bytes, got ${data.byteLength - 5}`);
+  }
   const payload = data.slice(5, 5 + len);
   return { type, payload };
 }
@@ -67,8 +73,14 @@ export function encodeYjsSync(type: MessageType.YJS_SYNC_STEP1 | MessageType.YJS
 }
 
 export function decodeYjsSync(payload: Uint8Array): YjsSyncMessage {
+  if (payload.byteLength < 2) {
+    throw new Error('Malformed Yjs sync payload: missing path length');
+  }
   const pv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const pathLen = pv.getUint16(0, false);
+  if (payload.byteLength < 2 + pathLen) {
+    throw new Error('Malformed Yjs sync payload: truncated path');
+  }
   const filePath = decoder.decode(payload.slice(2, 2 + pathLen));
   const data = payload.slice(2 + pathLen);
   return { filePath, data };
@@ -102,8 +114,14 @@ export function encodeFileData(payload: FileDataPayload): Uint8Array {
 }
 
 export function decodeFileData(payload: Uint8Array): FileDataPayload {
+  if (payload.byteLength < 2) {
+    throw new Error('Malformed file payload: missing path length');
+  }
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const pathLen = view.getUint16(0, false);
+  if (payload.byteLength < 2 + pathLen + 8) {
+    throw new Error('Malformed file payload: truncated metadata');
+  }
   const path = decoder.decode(payload.slice(2, 2 + pathLen));
   const mtime = view.getFloat64(2 + pathLen, false);
   const content = payload.slice(2 + pathLen + 8);

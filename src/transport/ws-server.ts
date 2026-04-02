@@ -41,7 +41,7 @@ export class WSServer {
       this.wss.on('connection', (ws: WsWebSocket, req: IncomingMessage) => {
         const ip = req.socket.remoteAddress || 'unknown';
         logger.info(`Incoming WS connection from ${ip}`);
-        this.onConnectionCb?.(ws, ip);
+        this.onConnectionCb?.(ws as unknown as SocketLike, ip);
       });
     });
   }

@@ -1,6 +1,8 @@
+type SocketBinaryType = BinaryType | 'nodebuffer' | 'fragments';
+
 export interface SocketLike {
   readyState: number;
-  binaryType?: BinaryType;
+  binaryType?: SocketBinaryType;
   send(data: Uint8Array): void;
   close(): void;
   addEventListener?(event: string, listener: EventListenerOrEventListenerObject): void;
