@@ -4,7 +4,7 @@
     "name": "Changes",
     "files": [
       ".intellij-git/changelists.json",
-      "src/transport/ws-client.ts"
+      "src/ui/sync-log-view.ts"
     ],
     "isDefault": true
   }

@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, Notice, setIcon } from "obsidian";
+import { ItemView, WorkspaceLeaf, Notice, setIcon, TFile } from "obsidian";
 import { SYNC_LOG_VIEW_TYPE } from "../constants";
 import { SyncLogEntry, SyncLogEntryType } from "../types";
 import { SyncLogService } from "../sync-log/sync-log-service";
@@ -174,6 +174,36 @@ export class SyncLogView extends ItemView {
         e.stopPropagation();
         this._copyEntryContent(entry);
       });
+    } else {
+      const viewBtn = actions.createEl("button", {
+        cls: "sync-log-action-btn",
+        title: "打开文件",
+      });
+      setIcon(viewBtn, "eye");
+      viewBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this._openFile(entry.path);
+      });
+
+      const copyPathBtn = actions.createEl("button", {
+        cls: "sync-log-action-btn",
+        title: "复制路径",
+      });
+      setIcon(copyPathBtn, "copy");
+      copyPathBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(entry.path);
+        new Notice("已复制路径到剪贴板");
+      });
+    }
+  }
+
+  private _openFile(path: string): void {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile) {
+      this.app.workspace.getLeaf(false).openFile(file);
+    } else {
+      new Notice(`文件不存在: ${path}`);
     }
   }
 
