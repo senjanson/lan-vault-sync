@@ -1,7 +1,7 @@
 {
   "id": "lan-vault-sync",
   "name": "LAN Vault Sync",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.4.0",
   "description": "Real-time vault synchronization over LAN using Yjs CRDT for conflict-free merging.",
   "author": "senjanson",
