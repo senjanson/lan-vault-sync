@@ -33,7 +33,9 @@ export class Modal {
   contentEl: any = {};
   titleEl: any = { setText() {} };
   modalEl: any = { addClass() {} };
-  constructor(app: any) { this.app = app; }
+  constructor(app: any) {
+    this.app = app;
+  }
   open() {}
   close() {}
 }

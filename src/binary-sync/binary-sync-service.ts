@@ -1,6 +1,6 @@
-import { Vault, TFile } from 'obsidian';
-import { ConnectionManager } from '../transport/connection-manager';
-import { ConflictBackupService } from '../conflict/conflict-backup-service';
+import { Vault, TFile } from "obsidian";
+import { ConnectionManager } from "../transport/connection-manager";
+import { ConflictBackupService } from "../conflict/conflict-backup-service";
 import {
   encodeFileData,
   encodeFileDelete,
@@ -9,17 +9,28 @@ import {
   decodeFileData,
   decodeFileRequest,
   decodeJSON,
-} from '../transport/protocol';
-import { FileDeletePayload, FileRenamePayload, FileMeta, MessageType } from '../types';
-import { computeFileHash } from './file-hash';
-import { logger } from '../logger';
-import { ensureParentDirectory } from '../utils/path-utils';
+} from "../transport/protocol";
+import {
+  FileDeletePayload,
+  FileRenamePayload,
+  FileMeta,
+  MessageType,
+} from "../types";
+import { computeFileHash } from "./file-hash";
+import { logger } from "../logger";
+import { ensureParentDirectory } from "../utils/path-utils";
 
 export class BinaryFileSyncService {
   private onRemoteFileWrittenCb: ((path: string) => void) | null = null;
-  private onRemoteFileDeletedCb: ((path: string) => Promise<void> | void) | null = null;
-  private onRemoteFileRenamedCb: ((oldPath: string, newPath: string) => Promise<void> | void) | null = null;
-  private onBackupCreatedCb: ((path: string, backupId: string, reason: string) => void) | null = null;
+  private onRemoteFileDeletedCb:
+    | ((path: string) => Promise<void> | void)
+    | null = null;
+  private onRemoteFileRenamedCb:
+    | ((oldPath: string, newPath: string) => Promise<void> | void)
+    | null = null;
+  private onBackupCreatedCb:
+    | ((path: string, backupId: string, reason: string) => void)
+    | null = null;
 
   constructor(
     private vault: Vault,
@@ -35,16 +46,24 @@ export class BinaryFileSyncService {
     this.onRemoteFileDeletedCb = cb;
   }
 
-  onRemoteFileRenamed(cb: (oldPath: string, newPath: string) => Promise<void> | void): void {
+  onRemoteFileRenamed(
+    cb: (oldPath: string, newPath: string) => Promise<void> | void,
+  ): void {
     this.onRemoteFileRenamedCb = cb;
   }
 
-  onBackupCreated(cb: (path: string, backupId: string, reason: string) => void): void {
+  onBackupCreated(
+    cb: (path: string, backupId: string, reason: string) => void,
+  ): void {
     this.onBackupCreatedCb = cb;
   }
 
   /** Handle incoming protocol messages for binary file operations */
-  async handleMessage(deviceId: string, type: MessageType, payload: Uint8Array): Promise<void> {
+  async handleMessage(
+    deviceId: string,
+    type: MessageType,
+    payload: Uint8Array,
+  ): Promise<void> {
     switch (type) {
       case MessageType.FILE_REQUEST: {
         const path = decodeFileRequest(payload);
@@ -66,7 +85,8 @@ export class BinaryFileSyncService {
       }
       case MessageType.FILE_RENAME: {
         const ren = decodeJSON<FileRenamePayload>(payload);
-        if (!this._isSafePath(ren.oldPath) || !this._isSafePath(ren.newPath)) break;
+        if (!this._isSafePath(ren.oldPath) || !this._isSafePath(ren.newPath))
+          break;
         await this._renameFile(ren.oldPath, ren.newPath);
         break;
       }
@@ -143,9 +163,9 @@ export class BinaryFileSyncService {
 
   private _isSafePath(filePath: string): boolean {
     if (!filePath) return false;
-    if (filePath.startsWith('/') || filePath.startsWith('\\')) return false;
-    if (filePath.includes('..')) return false;
-    if (filePath.includes('\0')) return false;
+    if (filePath.startsWith("/") || filePath.startsWith("\\")) return false;
+    if (filePath.includes("..")) return false;
+    if (filePath.includes("\0")) return false;
     return true;
   }
 
@@ -165,29 +185,43 @@ export class BinaryFileSyncService {
     this.connectionManager.sendTo(deviceId, msg);
   }
 
-  private async _receiveFile(path: string, content: Uint8Array, _mtime: number): Promise<void> {
+  private async _receiveFile(
+    path: string,
+    content: Uint8Array,
+    _mtime: number,
+  ): Promise<void> {
     try {
       // Mark remote write BEFORE modifying vault to prevent echo-back
       this.onRemoteFileWrittenCb?.(path);
       const existing = this.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) {
-        const currentContent = new Uint8Array(await this.vault.readBinary(existing));
+        const currentContent = new Uint8Array(
+          await this.vault.readBinary(existing),
+        );
         if (!this._isSameBinary(currentContent, content)) {
           const backup = await this.backupService.backupBinaryFile(
             path,
             currentContent,
-            'remote-file-overwrite',
+            "remote-file-overwrite",
             {
               incomingSize: content.byteLength,
               existingSize: currentContent.byteLength,
             },
           );
           if (!backup) {
-            logger.error(`Aborting remote overwrite for ${path}: conflict backup unavailable`);
+            logger.error(
+              `Aborting remote overwrite for ${path}: conflict backup unavailable`,
+            );
             return;
           }
-          logger.warn(`Backed up file before remote overwrite: ${path} -> ${backup.contentPath}`);
-          this.onBackupCreatedCb?.(path, backup.backupId, 'remote-file-overwrite');
+          logger.warn(
+            `Backed up file before remote overwrite: ${path} -> ${backup.contentPath}`,
+          );
+          this.onBackupCreatedCb?.(
+            path,
+            backup.backupId,
+            "remote-file-overwrite",
+          );
         }
         await this.vault.modifyBinary(existing, content.buffer as ArrayBuffer);
       } else {
@@ -207,21 +241,27 @@ export class BinaryFileSyncService {
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
       if (file instanceof TFile) {
-        const currentContent = new Uint8Array(await this.vault.readBinary(file));
+        const currentContent = new Uint8Array(
+          await this.vault.readBinary(file),
+        );
         const backup = await this.backupService.backupBinaryFile(
           path,
           currentContent,
-          'remote-file-delete',
+          "remote-file-delete",
           {
             size: currentContent.byteLength,
           },
         );
         if (!backup) {
-          logger.error(`Aborting remote delete for ${path}: conflict backup unavailable`);
+          logger.error(
+            `Aborting remote delete for ${path}: conflict backup unavailable`,
+          );
           return;
         }
-        logger.warn(`Backed up file before remote delete: ${path} -> ${backup.contentPath}`);
-        this.onBackupCreatedCb?.(path, backup.backupId, 'remote-file-delete');
+        logger.warn(
+          `Backed up file before remote delete: ${path} -> ${backup.contentPath}`,
+        );
+        this.onBackupCreatedCb?.(path, backup.backupId, "remote-file-delete");
       }
       this.onRemoteFileWrittenCb?.(path);
       await this.vault.delete(file);
@@ -237,11 +277,13 @@ export class BinaryFileSyncService {
     if (file) {
       const existingTarget = this.vault.getAbstractFileByPath(newPath);
       if (existingTarget instanceof TFile) {
-        const currentTargetContent = new Uint8Array(await this.vault.readBinary(existingTarget));
+        const currentTargetContent = new Uint8Array(
+          await this.vault.readBinary(existingTarget),
+        );
         const backup = await this.backupService.backupBinaryFile(
           newPath,
           currentTargetContent,
-          'remote-file-rename-overwrite',
+          "remote-file-rename-overwrite",
           {
             oldPath,
             newPath,
@@ -249,11 +291,19 @@ export class BinaryFileSyncService {
           },
         );
         if (!backup) {
-          logger.error(`Aborting remote rename ${oldPath} -> ${newPath}: target backup unavailable`);
+          logger.error(
+            `Aborting remote rename ${oldPath} -> ${newPath}: target backup unavailable`,
+          );
           return;
         }
-        logger.warn(`Backed up rename target before remote rename: ${newPath} -> ${backup.contentPath}`);
-        this.onBackupCreatedCb?.(newPath, backup.backupId, 'remote-file-rename-overwrite');
+        logger.warn(
+          `Backed up rename target before remote rename: ${newPath} -> ${backup.contentPath}`,
+        );
+        this.onBackupCreatedCb?.(
+          newPath,
+          backup.backupId,
+          "remote-file-rename-overwrite",
+        );
       }
 
       this.onRemoteFileWrittenCb?.(oldPath);

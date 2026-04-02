@@ -3,24 +3,24 @@
     "id": "default",
     "name": "Changes",
     "files": [
-      "package-lock.json",
       "src/binary-sync/binary-sync-service.ts",
       "src/conflict/conflict-backup-service.ts",
       "src/constants.ts",
-      "src/main.ts",
       "src/sync/sync-coordinator.ts",
       "src/types.ts",
       "src/ui/index.ts",
-      "src/ui/settings-tab.ts",
       "styles.css",
       "tests/mocks/obsidian.ts",
-      "src/sync-log/",
       "src/ui/sync-log-modal.ts",
       "src/ui/sync-log-view.ts",
-      "tests/sync-log/",
-      "esbuild.config.mjs",
-      ".intellij-git/",
-      "src/transport/ws-client.ts"
+      "src/transport/ws-client.ts",
+      ".intellij-git/changelists.json",
+      "src/sync-log/index.ts",
+      "src/sync-log/sync-log-service.ts",
+      "tests/sync-log/sync-log-service.test.ts",
+      "src/sync-log/index.ts",
+      "src/sync-log/sync-log-service.ts",
+      "tests/sync-log/sync-log-service.test.ts"
     ],
     "isDefault": true
   }

@@ -1,21 +1,21 @@
-import { Vault, TFile } from 'obsidian';
-import * as Y from 'yjs';
-import { ConnectionManager } from '../transport/connection-manager';
+import { Vault, TFile } from "obsidian";
+import * as Y from "yjs";
+import { ConnectionManager } from "../transport/connection-manager";
 import {
   encodeYjsSync,
   decodeYjsSync,
   encodeFileMetaSync,
   decodeJSON,
-} from '../transport/protocol';
-import { YjsDocManager } from '../crdt/yjs-doc-manager';
-import { ConflictBackupService } from '../conflict/conflict-backup-service';
-import { BinaryFileSyncService } from '../binary-sync/binary-sync-service';
-import { VaultWatcher } from '../watcher/vault-watcher';
-import { DiscoveryService } from '../discovery/discovery-service';
-import { FileFilter } from '../watcher/file-filter';
-import { SyncStateMachine } from './sync-state';
-import { buildFileTree, diffFileTrees } from './file-tree';
-import { SyncLogService } from '../sync-log/sync-log-service';
+} from "../transport/protocol";
+import { YjsDocManager } from "../crdt/yjs-doc-manager";
+import { ConflictBackupService } from "../conflict/conflict-backup-service";
+import { BinaryFileSyncService } from "../binary-sync/binary-sync-service";
+import { VaultWatcher } from "../watcher/vault-watcher";
+import { DiscoveryService } from "../discovery/discovery-service";
+import { FileFilter } from "../watcher/file-filter";
+import { SyncStateMachine } from "./sync-state";
+import { buildFileTree, diffFileTrees } from "./file-tree";
+import { SyncLogService } from "../sync-log/sync-log-service";
 import {
   DeviceInfo,
   FileChangeEvent,
@@ -23,10 +23,10 @@ import {
   LANSyncSettings,
   MessageType,
   SyncState,
-} from '../types';
-import { logger } from '../logger';
-import { ensureParentDirectory } from '../utils/path-utils';
-import { supportsIncomingConnections } from '../utils/runtime';
+} from "../types";
+import { logger } from "../logger";
+import { ensureParentDirectory } from "../utils/path-utils";
+import { supportsIncomingConnections } from "../utils/runtime";
 
 export class SyncCoordinator {
   private connectionManager: ConnectionManager;
@@ -71,15 +71,20 @@ export class SyncCoordinator {
     this.stateMachine = new SyncStateMachine();
     this.connectionManager = new ConnectionManager(settings, this.vaultId);
     this.docManager = new YjsDocManager(vault);
-    this.backupService = options?.backupService ?? new ConflictBackupService(vault);
+    this.backupService =
+      options?.backupService ?? new ConflictBackupService(vault);
     this.syncLogService = options?.syncLogService ?? null;
-    this.binarySync = new BinaryFileSyncService(vault, this.connectionManager, this.backupService);
+    this.binarySync = new BinaryFileSyncService(
+      vault,
+      this.connectionManager,
+      this.backupService,
+    );
     this.watcher = new VaultWatcher(vault, settings.ignoredPaths);
 
     const localDevice: DeviceInfo = {
       deviceId: settings.deviceId,
       deviceName: settings.deviceName,
-      ip: '',
+      ip: "",
       port: settings.port,
       vaultId: this.vaultId,
       lastSeen: Date.now(),
@@ -114,7 +119,7 @@ export class SyncCoordinator {
     if (!this.settings.enabled) return;
 
     try {
-      this.stateMachine.transition('discovering');
+      this.stateMachine.transition("discovering");
 
       // Start WebSocket server
       await this.connectionManager.start();
@@ -144,11 +149,11 @@ export class SyncCoordinator {
         60000, // every 60 seconds
       );
 
-      this.stateMachine.transition('watching');
-      this._emitEvent('Sync service started');
+      this.stateMachine.transition("watching");
+      this._emitEvent("Sync service started");
     } catch (err) {
-      logger.error('Failed to start sync:', err);
-      this.stateMachine.transition('error');
+      logger.error("Failed to start sync:", err);
+      this.stateMachine.transition("error");
     }
   }
 
@@ -169,8 +174,8 @@ export class SyncCoordinator {
     await this.docManager.destroy();
     await this.syncLogService?.flush();
 
-    this.stateMachine.transition('idle');
-    this._emitEvent('Sync service stopped');
+    this.stateMachine.transition("idle");
+    this._emitEvent("Sync service stopped");
   }
 
   addManualPeer(address: string): void {
@@ -206,7 +211,7 @@ export class SyncCoordinator {
       this.pendingInitialBootstrapPeers.delete(deviceId);
       // Clear reverse-sync tracking for this peer
       for (const key of this.reverseSyncSent) {
-        if (key.startsWith(deviceId + ':')) this.reverseSyncSent.delete(key);
+        if (key.startsWith(deviceId + ":")) this.reverseSyncSent.delete(key);
       }
       // Clear only guards associated with the disconnected peer — unrelated
       // peers may still be mid-conflict on their own paths.
@@ -231,9 +236,11 @@ export class SyncCoordinator {
     });
 
     // Yjs doc manager → remote content changed, write to file
-    this.docManager.onRemoteContent(async (filePath, content, previousContent) => {
-      await this._writeFileFromRemote(filePath, content, previousContent);
-    });
+    this.docManager.onRemoteContent(
+      async (filePath, content, previousContent) => {
+        await this._writeFileFromRemote(filePath, content, previousContent);
+      },
+    );
 
     // Binary sync → mark remote writes
     this.binarySync.onRemoteFileWritten((path) => {
@@ -249,14 +256,14 @@ export class SyncCoordinator {
     // Binary sync → backup created → sync log entry
     this.binarySync.onBackupCreated((path, backupId, reason) => {
       if (!this.syncLogService) return;
-      if (reason.includes('delete')) {
-        this.syncLogService.addEntry('remote-delete', path, {
+      if (reason.includes("delete")) {
+        this.syncLogService.addEntry("remote-delete", path, {
           snapshotId: backupId,
           hasSnapshot: true,
           details: { isText: false },
         });
       } else {
-        this.syncLogService.addEntry('remote-overwrite', path, {
+        this.syncLogService.addEntry("remote-overwrite", path, {
           snapshotId: backupId,
           hasSnapshot: true,
           details: { isText: false },
@@ -283,7 +290,11 @@ export class SyncCoordinator {
 
   // ─── Private: Message handling ──────────────────────────
 
-  private async _handleMessage(deviceId: string, type: MessageType, payload: Uint8Array): Promise<void> {
+  private async _handleMessage(
+    deviceId: string,
+    type: MessageType,
+    payload: Uint8Array,
+  ): Promise<void> {
     switch (type) {
       case MessageType.YJS_SYNC_STEP1: {
         const msg = decodeYjsSync(payload);
@@ -297,8 +308,15 @@ export class SyncCoordinator {
         if (!this._hasConflictLoserGuard(msg.filePath)) {
           await this._ensureCrdtInitialized(msg.filePath);
         }
-        const response = await this.docManager.handleSyncStep1(msg.filePath, msg.data);
-        const reply = encodeYjsSync(MessageType.YJS_SYNC_STEP2, msg.filePath, response);
+        const response = await this.docManager.handleSyncStep1(
+          msg.filePath,
+          msg.data,
+        );
+        const reply = encodeYjsSync(
+          MessageType.YJS_SYNC_STEP2,
+          msg.filePath,
+          response,
+        );
         this.connectionManager.sendTo(deviceId, reply);
 
         // Complete bidirectional sync: also send our own state vector so the
@@ -308,7 +326,11 @@ export class SyncCoordinator {
         if (!this.reverseSyncSent.has(reverseKey)) {
           this.reverseSyncSent.add(reverseKey);
           const ourSV = await this.docManager.encodeSyncStep1(msg.filePath);
-          const reverseStep1 = encodeYjsSync(MessageType.YJS_SYNC_STEP1, msg.filePath, ourSV);
+          const reverseStep1 = encodeYjsSync(
+            MessageType.YJS_SYNC_STEP1,
+            msg.filePath,
+            ourSV,
+          );
           this.connectionManager.sendTo(deviceId, reverseStep1);
         }
         break;
@@ -342,7 +364,10 @@ export class SyncCoordinator {
         if (!meta.isResponse) {
           const tree = await buildFileTree(this.vault, this.filter);
           const metaList = Array.from(tree.files.values());
-          const reply = encodeFileMetaSync({ files: metaList, isResponse: true });
+          const reply = encodeFileMetaSync({
+            files: metaList,
+            isResponse: true,
+          });
           this.connectionManager.sendTo(deviceId, reply);
         }
         break;
@@ -363,8 +388,8 @@ export class SyncCoordinator {
     const { type, path, oldPath, isTextFile } = event;
 
     switch (type) {
-      case 'create':
-      case 'modify': {
+      case "create":
+      case "modify": {
         if (isTextFile) {
           const file = this.vault.getAbstractFileByPath(path);
           if (file instanceof TFile) {
@@ -374,27 +399,27 @@ export class SyncCoordinator {
         } else {
           await this.binarySync.broadcastFileChange(path);
         }
-        this.syncLogService?.addEntry('local-send', path, {
+        this.syncLogService?.addEntry("local-send", path, {
           hasSnapshot: false,
           details: { isText: isTextFile },
         });
         break;
       }
 
-      case 'delete': {
+      case "delete": {
         if (isTextFile) {
           await this.docManager.removeDoc(path);
           this._clearConflictLoserGuard(path);
         }
         this.binarySync.broadcastFileDelete(path);
-        this.syncLogService?.addEntry('local-send', path, {
+        this.syncLogService?.addEntry("local-send", path, {
           hasSnapshot: false,
-          details: { isText: isTextFile, reason: 'delete' },
+          details: { isText: isTextFile, reason: "delete" },
         });
         break;
       }
 
-      case 'rename': {
+      case "rename": {
         if (oldPath) {
           const oldIsText = this.filter.isTextFile(oldPath);
           if (oldIsText && isTextFile) {
@@ -426,7 +451,9 @@ export class SyncCoordinator {
         return;
       }
       await this._flushPendingLocalTextChange(filePath);
-      const latestContent = await this.docManager.getContent(filePath).catch(() => content);
+      const latestContent = await this.docManager
+        .getContent(filePath)
+        .catch(() => content);
       const file = this.vault.getAbstractFileByPath(filePath);
       const isExistingFile = file instanceof TFile;
       let backupId: string | undefined;
@@ -439,26 +466,33 @@ export class SyncCoordinator {
         const diskContent = await this.vault.cachedRead(file);
         if (diskContent !== latestContent) {
           contentChanged = true;
-          const needsBackup = typeof previousContent === 'string'
-            ? (diskContent !== previousContent)
-            : true; // previousContent unknown → always back up to be safe
+          const needsBackup =
+            typeof previousContent === "string"
+              ? diskContent !== previousContent
+              : true; // previousContent unknown → always back up to be safe
           if (needsBackup) {
             const backup = await this.backupService.backupTextFile(
               filePath,
               diskContent,
-              'text-remote-overwrite',
+              "text-remote-overwrite",
               {
-                previousContent: previousContent ?? '(unknown)',
+                previousContent: previousContent ?? "(unknown)",
                 mergedContent: latestContent,
               },
             );
             if (!backup) {
-              logger.error(`Aborting remote text overwrite for ${filePath}: conflict backup unavailable`);
-              this._emitEvent(`Skipped remote overwrite for ${filePath} because backup failed`);
+              logger.error(
+                `Aborting remote text overwrite for ${filePath}: conflict backup unavailable`,
+              );
+              this._emitEvent(
+                `Skipped remote overwrite for ${filePath} because backup failed`,
+              );
               return;
             }
             backupId = backup.backupId;
-            logger.warn(`Backed up divergent text file before remote write: ${filePath} -> ${backup.contentPath}`);
+            logger.warn(
+              `Backed up divergent text file before remote write: ${filePath} -> ${backup.contentPath}`,
+            );
             this._emitEvent(`Conflict backup created for ${filePath}`);
           }
         }
@@ -480,7 +514,7 @@ export class SyncCoordinator {
       // Sync log entry
       if (this.syncLogService && contentChanged) {
         this.syncLogService.addEntry(
-          isExistingFile ? 'remote-overwrite' : 'initial-sync-receive',
+          isExistingFile ? "remote-overwrite" : "initial-sync-receive",
           filePath,
           {
             snapshotId: backupId,
@@ -502,7 +536,7 @@ export class SyncCoordinator {
   // ─── Private: Initial sync ──────────────────────────────
 
   private async _initialSyncWith(deviceId: string): Promise<void> {
-    this.stateMachine.transition('initial-sync');
+    this.stateMachine.transition("initial-sync");
     this._emitEvent(`Starting initial sync with ${deviceId}`);
 
     try {
@@ -516,20 +550,23 @@ export class SyncCoordinator {
       const msg = encodeFileMetaSync({ files: metaList });
       this.connectionManager.sendTo(deviceId, msg);
 
-      this.stateMachine.transition('watching');
+      this.stateMachine.transition("watching");
       this._emitEvent(`File tree sent to ${deviceId}, waiting for remote tree`);
     } catch (err) {
-      logger.error('Initial sync failed:', err);
-      this.stateMachine.transition('error');
+      logger.error("Initial sync failed:", err);
+      this.stateMachine.transition("error");
     }
   }
 
   // ─── Private: Handle remote file tree ───────────────────
 
-  private async _handleRemoteFileTree(deviceId: string, meta: FileMetaSyncPayload): Promise<void> {
+  private async _handleRemoteFileTree(
+    deviceId: string,
+    meta: FileMetaSyncPayload,
+  ): Promise<void> {
     const localTree = await buildFileTree(this.vault, this.filter);
     const isInitialBootstrap = this.pendingInitialBootstrapPeers.has(deviceId);
-    const remoteFiles = new Map<string, typeof meta.files[number]>();
+    const remoteFiles = new Map<string, (typeof meta.files)[number]>();
     for (const f of meta.files) {
       remoteFiles.set(f.path, f);
     }
@@ -544,7 +581,11 @@ export class SyncCoordinator {
         // received content.  Sending SYNC_STEP1 with an empty state vector
         // correctly fetches all remote content regardless of local state.
         const emptyState = Y.encodeStateVector(new Y.Doc());
-        const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, file.path, emptyState);
+        const msg = encodeYjsSync(
+          MessageType.YJS_SYNC_STEP1,
+          file.path,
+          emptyState,
+        );
         this.connectionManager.sendTo(deviceId, msg);
         this._emitEvent(`Requesting text state: ${file.path}`);
       } else {
@@ -556,7 +597,11 @@ export class SyncCoordinator {
     // Files only locally — send them to the specific peer
     for (const file of treeDiff.localOnly) {
       if (file.isTextFile) {
-        await this._sendFullTextState(deviceId, file.path, 'Sending text state');
+        await this._sendFullTextState(
+          deviceId,
+          file.path,
+          "Sending text state",
+        );
       } else {
         await this.binarySync.sendFileToPeer(deviceId, file.path);
         this._emitEvent(`Sending: ${file.path}`);
@@ -581,7 +626,11 @@ export class SyncCoordinator {
           // Shared CRDT history exists — safe to merge via Yjs sync protocol.
           await this._ensureCrdtInitialized(local.path);
           const stateVector = await this.docManager.encodeSyncStep1(local.path);
-          const msg = encodeYjsSync(MessageType.YJS_SYNC_STEP1, local.path, stateVector);
+          const msg = encodeYjsSync(
+            MessageType.YJS_SYNC_STEP1,
+            local.path,
+            stateVector,
+          );
           this.connectionManager.sendTo(deviceId, msg);
           this._emitEvent(`CRDT merge conflict: ${local.path}`);
         } else {
@@ -593,24 +642,32 @@ export class SyncCoordinator {
             const conflictBackup = await this.backupService.backupTextFile(
               local.path,
               content,
-              'text-conflict-no-history',
+              "text-conflict-no-history",
               { localMtime: local.mtime, remoteMtime: remote.mtime },
             );
             this._emitEvent(`Conflict backup created: ${local.path}`);
-            this.syncLogService?.addEntry('conflict-backup', local.path, {
+            this.syncLogService?.addEntry("conflict-backup", local.path, {
               snapshotId: conflictBackup?.backupId,
               hasSnapshot: !!conflictBackup,
               details: { isText: true },
             });
           }
 
-          const localWins = this._isConflictWinner(local.mtime, remote.mtime, deviceId);
+          const localWins = this._isConflictWinner(
+            local.mtime,
+            remote.mtime,
+            deviceId,
+          );
 
           if (localWins) {
             // We are the winner — send our full content.  The losing side
             // will receive it as a YJS_UPDATE on an empty doc so no
             // duplication can occur.
-            await this._sendFullTextState(deviceId, local.path, 'Sending conflict winner');
+            await this._sendFullTextState(
+              deviceId,
+              local.path,
+              "Sending conflict winner",
+            );
           } else {
             // We are the loser — discard any queued local change and do NOT
             // initialise the CRDT doc.  The winner's YJS_UPDATE will create
@@ -642,13 +699,19 @@ export class SyncCoordinator {
         if (local.hash !== remote.hash) continue;
         if (!this._shouldBootstrapSharedTextState(deviceId)) continue;
 
-        await this._sendFullTextState(deviceId, path, 'Bootstrapping shared text state');
+        await this._sendFullTextState(
+          deviceId,
+          path,
+          "Bootstrapping shared text state",
+        );
       }
 
       this.pendingInitialBootstrapPeers.delete(deviceId);
     }
 
-    this._emitEvent(`Tree sync with ${deviceId}: +${treeDiff.remoteOnly.length} -0 ~${treeDiff.conflicting.length}`);
+    this._emitEvent(
+      `Tree sync with ${deviceId}: +${treeDiff.remoteOnly.length} -0 ~${treeDiff.conflicting.length}`,
+    );
   }
 
   // ─── Private: CRDT initialization helper ─────────────────
@@ -673,7 +736,11 @@ export class SyncCoordinator {
     await this.docManager.initDocFromContentSilent(filePath, diskContent);
   }
 
-  private async _sendFullTextState(deviceId: string, filePath: string, eventPrefix: string): Promise<void> {
+  private async _sendFullTextState(
+    deviceId: string,
+    filePath: string,
+    eventPrefix: string,
+  ): Promise<void> {
     await this._flushPendingLocalTextChange(filePath);
     await this._ensureCrdtInitialized(filePath);
     const update = await this.docManager.encodeFullState(filePath);
@@ -686,7 +753,9 @@ export class SyncCoordinator {
    * If a local modify is still sitting in the debounce queue, ingest the
    * current on-disk content into Yjs before we process a remote update.
    */
-  private async _flushPendingLocalTextChange(filePath: string): Promise<boolean> {
+  private async _flushPendingLocalTextChange(
+    filePath: string,
+  ): Promise<boolean> {
     if (!this.watcher.consumePendingModify(filePath)) {
       return false;
     }
@@ -708,14 +777,17 @@ export class SyncCoordinator {
   ): Promise<void> {
     const peers = this.connectionManager.getConnectedPeerIds();
     if (peers.length === 0) {
-      onProgress(100, 'No connected peers');
+      onProgress(100, "No connected peers");
       return;
     }
 
-    onProgress(5, 'Building file tree...');
+    onProgress(5, "Building file tree...");
     const tree = await buildFileTree(this.vault, this.filter);
     const metaList = Array.from(tree.files.values());
-    onProgress(15, `Found ${metaList.length} files, syncing with ${peers.length} peer(s)...`);
+    onProgress(
+      15,
+      `Found ${metaList.length} files, syncing with ${peers.length} peer(s)...`,
+    );
 
     const totalPeers = peers.length;
     for (let i = 0; i < peers.length; i++) {
@@ -727,12 +799,12 @@ export class SyncCoordinator {
       onProgress(peerPercent, `Sent file tree to peer ${i + 1}/${totalPeers}`);
 
       if (i < peers.length - 1) {
-        await new Promise<void>(r => setTimeout(r, 500));
+        await new Promise<void>((r) => setTimeout(r, 500));
       }
     }
 
     // Wait for sync events to settle (no new events for 2s, max 30s)
-    onProgress(75, 'Waiting for sync responses...');
+    onProgress(75, "Waiting for sync responses...");
     let lastEventTime = Date.now();
     const origCb = this.onSyncEventCb;
     this.onSyncEventCb = (msg: string) => {
@@ -744,19 +816,25 @@ export class SyncCoordinator {
     const idleThreshold = 2_000;
     const startWait = Date.now();
 
-    while (Date.now() - lastEventTime < idleThreshold && Date.now() - startWait < maxWait) {
-      await new Promise<void>(r => setTimeout(r, 500));
+    while (
+      Date.now() - lastEventTime < idleThreshold &&
+      Date.now() - startWait < maxWait
+    ) {
+      await new Promise<void>((r) => setTimeout(r, 500));
       const elapsed = Date.now() - startWait;
       const waitPercent = Math.min(95, 78 + (elapsed / maxWait) * 17);
-      onProgress(waitPercent, 'Processing sync...');
+      onProgress(waitPercent, "Processing sync...");
     }
 
     this.onSyncEventCb = origCb;
 
-    onProgress(96, 'Persisting state...');
+    onProgress(96, "Persisting state...");
     await this.docManager.persistAll();
 
-    onProgress(100, `Sync complete — ${metaList.length} files checked with ${totalPeers} peer(s)`);
+    onProgress(
+      100,
+      `Sync complete — ${metaList.length} files checked with ${totalPeers} peer(s)`,
+    );
   }
 
   // ─── Private: Periodic full sync ────────────────────────
@@ -781,10 +859,10 @@ export class SyncCoordinator {
     let hash = 0;
     for (let i = 0; i < name.length; i++) {
       const char = name.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
+      hash = (hash << 5) - hash + char;
       hash |= 0;
     }
-    return 'vault-' + Math.abs(hash).toString(36);
+    return "vault-" + Math.abs(hash).toString(36);
   }
 
   private _emitEvent(msg: string): void {
@@ -844,7 +922,11 @@ export class SyncCoordinator {
    * Winner: the side with the more-recent mtime.  On tie: the side whose
    * deviceId is lexicographically smaller.
    */
-  private _isConflictWinner(localMtime: number, remoteMtime: number, remoteDeviceId: string): boolean {
+  private _isConflictWinner(
+    localMtime: number,
+    remoteMtime: number,
+    remoteDeviceId: string,
+  ): boolean {
     if (localMtime !== remoteMtime) {
       return localMtime > remoteMtime;
     }
@@ -855,9 +937,9 @@ export class SyncCoordinator {
   private _isSafePath(filePath: string): boolean {
     if (!filePath) return false;
     // Reject absolute paths, traversal, and null bytes
-    if (filePath.startsWith('/') || filePath.startsWith('\\')) return false;
-    if (filePath.includes('..')) return false;
-    if (filePath.includes('\0')) return false;
+    if (filePath.startsWith("/") || filePath.startsWith("\\")) return false;
+    if (filePath.includes("..")) return false;
+    if (filePath.includes("\0")) return false;
     return true;
   }
 }

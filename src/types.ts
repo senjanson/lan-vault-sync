@@ -125,11 +125,11 @@ export interface FileRenamePayload {
 
 // ─── Sync Log ────────────────────────────────────────────
 export type SyncLogEntryType =
-  | 'remote-overwrite'
-  | 'remote-delete'
-  | 'local-send'
-  | 'initial-sync-receive'
-  | 'conflict-backup';
+  | "remote-overwrite"
+  | "remote-delete"
+  | "local-send"
+  | "initial-sync-receive"
+  | "conflict-backup";
 
 export interface SyncLogEntry {
   id: string;

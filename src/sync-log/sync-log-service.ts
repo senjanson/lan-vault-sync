@@ -1,9 +1,9 @@
-import { Vault, TFile } from 'obsidian';
-import { ConflictBackupService } from '../conflict/conflict-backup-service';
-import { SyncLogEntry, SyncLogEntryType, LANSyncSettings } from '../types';
-import { SYNC_LOG_FILE_PATH, MAX_SYNC_LOG_ENTRIES } from '../constants';
-import { logger } from '../logger';
-import { ensureParentDirectory } from '../utils/path-utils';
+import { Vault, TFile } from "obsidian";
+import { ConflictBackupService } from "../conflict/conflict-backup-service";
+import { SyncLogEntry, SyncLogEntryType, LANSyncSettings } from "../types";
+import { SYNC_LOG_FILE_PATH, MAX_SYNC_LOG_ENTRIES } from "../constants";
+import { logger } from "../logger";
+import { ensureParentDirectory } from "../utils/path-utils";
 
 export class SyncLogService {
   private entries: SyncLogEntry[] = [];
@@ -33,13 +33,13 @@ export class SyncLogService {
       deviceName?: string;
       snapshotId?: string;
       hasSnapshot?: boolean;
-      details?: SyncLogEntry['details'];
+      details?: SyncLogEntry["details"];
     } = {},
   ): SyncLogEntry | null {
     if (!this.settings.enableSyncLog) return null;
 
     // Dedup local-send for same path within 10s to avoid flooding
-    if (type === 'local-send') {
+    if (type === "local-send") {
       const last = this.lastLocalSendTime.get(path);
       if (last && Date.now() - last < 10000) return null;
       this.lastLocalSendTime.set(path, Date.now());
@@ -79,7 +79,10 @@ export class SyncLogService {
       const isText = entry.details?.isText ?? true;
 
       if (isText) {
-        const content = await this.backupService.readTextBackup(entry.snapshotId, entry.path);
+        const content = await this.backupService.readTextBackup(
+          entry.snapshotId,
+          entry.path,
+        );
         if (content === null) return false;
 
         const file = this.vault.getAbstractFileByPath(entry.path);
@@ -91,7 +94,10 @@ export class SyncLogService {
           await this.vault.create(entry.path, content);
         }
       } else {
-        const content = await this.backupService.readBinaryBackup(entry.snapshotId, entry.path);
+        const content = await this.backupService.readBinaryBackup(
+          entry.snapshotId,
+          entry.path,
+        );
         if (content === null) return false;
 
         const file = this.vault.getAbstractFileByPath(entry.path);
@@ -134,7 +140,7 @@ export class SyncLogService {
       await ensureParentDirectory(adapter, SYNC_LOG_FILE_PATH);
       await adapter.write(SYNC_LOG_FILE_PATH, JSON.stringify(this.entries));
     } catch (err) {
-      logger.error('Failed to save sync log:', err);
+      logger.error("Failed to save sync log:", err);
     }
   }
 

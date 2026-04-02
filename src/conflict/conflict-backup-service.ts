@@ -1,9 +1,9 @@
-import { Vault } from 'obsidian';
-import { CONFLICT_BACKUP_DIR } from '../constants';
-import { logger } from '../logger';
-import { ensureParentDirectory } from '../utils/path-utils';
+import { Vault } from "obsidian";
+import { CONFLICT_BACKUP_DIR } from "../constants";
+import { logger } from "../logger";
+import { ensureParentDirectory } from "../utils/path-utils";
 
-type ConflictBackupKind = 'text' | 'binary';
+type ConflictBackupKind = "text" | "binary";
 
 export interface ConflictBackupResult {
   backupId: string;
@@ -25,21 +25,29 @@ export class ConflictBackupService {
   ): Promise<ConflictBackupResult | null> {
     const adapter = (this.vault as any).adapter;
     if (!adapter?.write) {
-      logger.warn(`Conflict backup skipped for ${filePath}: adapter.write unavailable`);
+      logger.warn(
+        `Conflict backup skipped for ${filePath}: adapter.write unavailable`,
+      );
       return null;
     }
 
     try {
       const snapshot = this._buildSnapshotPaths(filePath);
-      const metadata = this._buildMetadata(filePath, reason, 'text', details);
+      const metadata = this._buildMetadata(filePath, reason, "text", details);
 
       await ensureParentDirectory(adapter, snapshot.contentPath);
       await ensureParentDirectory(adapter, snapshot.metadataPath);
       await adapter.write(snapshot.contentPath, content);
-      await adapter.write(snapshot.metadataPath, JSON.stringify(metadata, null, 2));
+      await adapter.write(
+        snapshot.metadataPath,
+        JSON.stringify(metadata, null, 2),
+      );
       return snapshot;
     } catch (err) {
-      logger.error(`Failed to create text conflict backup for ${filePath}:`, err);
+      logger.error(
+        `Failed to create text conflict backup for ${filePath}:`,
+        err,
+      );
       return null;
     }
   }
@@ -52,21 +60,32 @@ export class ConflictBackupService {
   ): Promise<ConflictBackupResult | null> {
     const adapter = (this.vault as any).adapter;
     if (!adapter?.writeBinary || !adapter?.write) {
-      logger.warn(`Conflict backup skipped for ${filePath}: adapter write methods unavailable`);
+      logger.warn(
+        `Conflict backup skipped for ${filePath}: adapter write methods unavailable`,
+      );
       return null;
     }
 
     try {
       const snapshot = this._buildSnapshotPaths(filePath);
-      const metadata = this._buildMetadata(filePath, reason, 'binary', details);
+      const metadata = this._buildMetadata(filePath, reason, "binary", details);
 
       await ensureParentDirectory(adapter, snapshot.contentPath);
       await ensureParentDirectory(adapter, snapshot.metadataPath);
-      await adapter.writeBinary(snapshot.contentPath, this._toArrayBuffer(content));
-      await adapter.write(snapshot.metadataPath, JSON.stringify(metadata, null, 2));
+      await adapter.writeBinary(
+        snapshot.contentPath,
+        this._toArrayBuffer(content),
+      );
+      await adapter.write(
+        snapshot.metadataPath,
+        JSON.stringify(metadata, null, 2),
+      );
       return snapshot;
     } catch (err) {
-      logger.error(`Failed to create binary conflict backup for ${filePath}:`, err);
+      logger.error(
+        `Failed to create binary conflict backup for ${filePath}:`,
+        err,
+      );
       return null;
     }
   }
@@ -99,17 +118,20 @@ export class ConflictBackupService {
 
   private _nextBackupId(filePath: string): string {
     this.sequence += 1;
-    const safeTime = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeTime = new Date().toISOString().replace(/[:.]/g, "-");
     return `${safeTime}-${this.sequence}-${this._keyForPath(filePath)}`;
   }
 
   private _keyForPath(filePath: string): string {
     const bytes = new TextEncoder().encode(filePath);
-    let binary = '';
+    let binary = "";
     for (const byte of bytes) {
       binary += String.fromCharCode(byte);
     }
-    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return btoa(binary)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
   }
 
   private _toArrayBuffer(content: Uint8Array): ArrayBuffer {
@@ -119,7 +141,10 @@ export class ConflictBackupService {
     ) as ArrayBuffer;
   }
 
-  async readTextBackup(snapshotId: string, filePath: string): Promise<string | null> {
+  async readTextBackup(
+    snapshotId: string,
+    filePath: string,
+  ): Promise<string | null> {
     const adapter = (this.vault as any).adapter;
     if (!adapter?.read) return null;
 
@@ -131,7 +156,10 @@ export class ConflictBackupService {
     }
   }
 
-  async readBinaryBackup(snapshotId: string, filePath: string): Promise<ArrayBuffer | null> {
+  async readBinaryBackup(
+    snapshotId: string,
+    filePath: string,
+  ): Promise<ArrayBuffer | null> {
     const adapter = (this.vault as any).adapter;
     if (!adapter?.readBinary) return null;
 

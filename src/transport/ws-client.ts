@@ -1,5 +1,5 @@
-import { RECONNECT_BASE_MS, RECONNECT_MAX_MS } from '../constants';
-import { logger } from '../logger';
+import { RECONNECT_BASE_MS, RECONNECT_MAX_MS } from "../constants";
+import { logger } from "../logger";
 import {
   addSocketCloseListener,
   addSocketErrorListener,
@@ -9,7 +9,7 @@ import {
   SOCKET_OPEN,
   SocketLike,
   toUint8Array,
-} from './socket';
+} from "./socket";
 
 export class WSClient {
   private ws: SocketLike | null = null;
@@ -23,9 +23,15 @@ export class WSClient {
 
   constructor(private url: string) {}
 
-  onOpen(cb: (ws: SocketLike) => void): void { this.onOpenCb = cb; }
-  onMessage(cb: (data: Uint8Array) => void): void { this.onMessageCb = cb; }
-  onClose(cb: () => void): void { this.onCloseCb = cb; }
+  onOpen(cb: (ws: SocketLike) => void): void {
+    this.onOpenCb = cb;
+  }
+  onMessage(cb: (data: Uint8Array) => void): void {
+    this.onMessageCb = cb;
+  }
+  onClose(cb: () => void): void {
+    this.onCloseCb = cb;
+  }
 
   connect(): void {
     this.intentionallyClosed = false;
@@ -40,7 +46,7 @@ export class WSClient {
       if (globalThis.WebSocket) {
         this.ws = new globalThis.WebSocket(this.url) as unknown as SocketLike;
       } else {
-        throw new Error('No WebSocket implementation available');
+        throw new Error("No WebSocket implementation available");
       }
       setSocketBinaryType(this.ws);
 
