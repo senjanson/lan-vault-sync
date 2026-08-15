@@ -168,11 +168,36 @@ Open the command palette (`Cmd/Ctrl + P`) and search for:
 
 ---
 
+## Troubleshooting
+
+### Peer shows in the device list, but "Connected Devices" stays at 0 and nothing syncs
+
+This almost always means the two vaults have **different names**. UDP
+discovery announces any device running the plugin on the subnet regardless of
+vault, but the WebSocket handshake afterward checks a sync ID derived from
+`vault.getName()` and silently closes the connection (logged only as
+`Rejected peer <id>: invalid handshake` when Debug Logging is on) if the two
+vaults aren't named identically.
+
+Fix: on the device with the mismatched name, open the vault switcher → manage
+that vault → rename it to match the other device's vault name exactly
+(case-sensitive). Renaming only changes Obsidian's stored display name — it
+does not move or touch any files. Then fully restart Obsidian (or toggle
+**Enable Sync** off/on) so the plugin recomputes its sync ID.
+
+---
+
 ## Requirements
 
 - Obsidian **v1.4.0** or later
 - All devices on the **same local network** (same Wi-Fi or Ethernet segment)
 - For mobile sync: at least one **desktop device** must be running and reachable on the LAN
+- **Vault names must match exactly (case-sensitive) across all devices.** The
+  sync ID used during the handshake is derived from the vault's name, so a
+  device with a differently-named vault (e.g. a freshly created mobile vault
+  still called `null-vault` or similar) will show up in the discovered-peer
+  list but will never actually connect. See
+  [Troubleshooting](#troubleshooting) below.
 
 ---
 
