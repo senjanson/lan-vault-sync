@@ -8,6 +8,7 @@ import {
   WS_PORT_MAX,
 } from "./constants";
 import { setDebugEnabled } from "./logger";
+import { parsePeerAddress } from "./discovery/manual-peers";
 import { SyncCoordinator } from "./sync/sync-coordinator";
 import { ConflictBackupService } from "./conflict/conflict-backup-service";
 import { SyncLogService } from "./sync-log/sync-log-service";
@@ -159,10 +160,11 @@ export default class LANSyncPlugin extends Plugin {
   }
 
   async addManualPeer(address: string): Promise<boolean> {
-    const normalized = address.trim();
-    if (!normalized || !normalized.includes(":")) {
+    const parsed = parsePeerAddress(address);
+    if (!parsed) {
       return false;
     }
+    const normalized = `${parsed.ip}:${parsed.port}`;
 
     if (!this.settings.manualPeers.includes(normalized)) {
       this.settings.manualPeers.push(normalized);

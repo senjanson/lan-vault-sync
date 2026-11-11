@@ -72,3 +72,18 @@ describe('e2e connections', { timeout: 30000 }, () => {
     expect(B.vault.text('after-stop.md')).toBeNull();
   });
 });
+
+describe('e2e settings', { timeout: 30000 }, () => {
+  it('starts and syncs even when a saved manual peer address is invalid', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'n.md': 'hi' });
+    const pa = ports(), pb = pa + 1;
+    track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pb, [], {
+      manualPeers: ['192.168.1.5:abc', `127.0.0.1:${pa}`],
+    }));
+    await sleep(1500);
+    expect(B.coord.getState()).toBe('watching');
+    expect(B.vault.text('n.md')).toBe('hi');
+  });
+});

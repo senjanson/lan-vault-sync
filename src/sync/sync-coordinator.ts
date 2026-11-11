@@ -138,9 +138,14 @@ export class SyncCoordinator {
       // Start device discovery
       await this.discovery.start();
 
-      // Connect to manual peers
+      // Connect to manual peers. One bad saved address must not stop sync.
       for (const addr of this.settings.manualPeers) {
-        this.discovery.addManualPeer(addr, this.vaultId);
+        try {
+          this.discovery.addManualPeer(addr, this.vaultId);
+        } catch (err) {
+          logger.warn(`Skipping invalid manual peer ${addr}:`, err);
+          this._emitEvent(`Skipped invalid peer address: ${addr}`);
+        }
       }
 
       // Start watching vault
