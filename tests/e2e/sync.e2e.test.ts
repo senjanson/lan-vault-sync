@@ -473,6 +473,28 @@ describe('e2e offline deletes', { timeout: 30000 }, () => {
     expect(B.vault.text('edited.md')).toBe('v1 edited on A');
   });
 
+  it('applies an attachment deletion made while sync was not running', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports();
+    let { A, B } = await pair(ra, rb, pa);
+    await sleep(1500);
+    await A.vault.writeBin('gone.png', Buffer.from([1, 2, 3]));
+    await A.vault.writeBin('changed.png', Buffer.from([4, 5]));
+    await sleep(1000);
+    expect(B.vault.bin('gone.png')?.length).toBe(3);
+    await B.coord.stop();
+    nodes = nodes.filter((n) => n !== B);
+    fs.rmSync(path.join(rb, 'gone.png'));
+    fs.rmSync(path.join(rb, 'changed.png'));
+    await A.vault.writeBin('changed.png', Buffer.from([4, 5, 6]));
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(2500);
+    expect(A.vault.exists('gone.png')).toBe(false);
+    expect(B.vault.exists('gone.png')).toBe(false);
+    // Changed on the other device after the deletion: the change wins.
+    expect(B.vault.bin('changed.png')?.length).toBe(3);
+  });
+
   it('keeps an offline edit when the deleting peer restarted before deleting', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     const pa = ports();

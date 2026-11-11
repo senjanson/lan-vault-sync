@@ -32,6 +32,7 @@ import {
   SyncState,
 } from "../types";
 import { logger } from "../logger";
+import { FILE_INDEX_FILE } from "../constants";
 import { ensureParentDirectory, isSafeSyncPath } from "../utils/path-utils";
 import { supportsIncomingConnections } from "../utils/runtime";
 import { parsePeerAddress } from "../discovery/manual-peers";
@@ -72,6 +73,8 @@ export class SyncCoordinator {
   private tombstones: TombstoneStore;
   /** Last seen content hash per path, recorded in a deletion record. */
   private knownHashes = new Map<string, string>();
+  /** Files and hashes saved when sync last ran; see _deletedWhileStopped. */
+  private lastRunFiles = new Map<string, string>();
   /** Folders a peer deleted, removed here once they hold no files (path → expiry). */
   private pendingFolderDeletes = new Map<string, number>();
   private vaultId: string;
@@ -160,6 +163,7 @@ export class SyncCoordinator {
     try {
       this.stateMachine.transition("discovering");
       await this.tombstones.load();
+      await this._loadFileIndex();
 
       // Start WebSocket server
       await this.connectionManager.start();
@@ -192,10 +196,10 @@ export class SyncCoordinator {
       }
 
       // Periodically persist CRDT state
-      this.persistTimer = setInterval(
-        () => this.docManager.persistAll(),
-        60000, // every 60 seconds
-      );
+      this.persistTimer = setInterval(() => {
+        void this.docManager.persistAll();
+        void this._saveFileIndex();
+      }, 60000); // every 60 seconds
 
       this.stateMachine.transition("watching");
       this._emitEvent("Sync service started");
@@ -222,6 +226,7 @@ export class SyncCoordinator {
     await this.docManager.destroy();
     await this.syncLogService?.flush();
     await this.tombstones.flush();
+    await this._saveFileIndex();
 
     this.stateMachine.transition("idle");
     this._emitEvent("Sync service stopped");
@@ -333,6 +338,9 @@ export class SyncCoordinator {
       if (kind !== "delete") this.tombstones.clear(path);
     });
 
+    this.binarySync.setDeletedCheck(
+      (path, hash) => this.tombstones.get(path)?.hash === hash,
+    );
     this.binarySync.onRemoteFileStored((path, hash) => {
       this.knownHashes.set(path, hash);
     });
@@ -851,9 +859,9 @@ export class SyncCoordinator {
         this._emitEvent(`Skipping deleted file: ${file.path}`);
         continue;
       }
-      // Synced here before (its CRDT state is kept) but the file is gone:
+      // Here, unchanged, when sync last ran, but the file is gone now:
       // it was deleted while sync was not running, e.g. with the app closed.
-      if (file.isTextFile && !ownTombstone && (await this._wasDeletedWhileStopped(file))) {
+      if (!ownTombstone && (await this._wasDeletedWhileStopped(file))) {
         this.connectionManager.sendTo(deviceId, encodeFileDelete({ path: file.path }));
         this._emitEvent(`Deleted while sync was off: ${file.path}`);
         continue;
@@ -1272,15 +1280,43 @@ export class SyncCoordinator {
    * was not running, with the peer's copy unchanged since. Records the
    * deletion if so. A peer copy edited since is fetched again instead.
    */
+  /**
+   * A file that was here, unchanged, when sync last ran and is gone now was
+   * deleted while sync was not running, e.g. with the app closed.
+   */
   private async _wasDeletedWhileStopped(file: FileMeta): Promise<boolean> {
     if (this.vault.getAbstractFileByPath(file.path)) return false;
-    if (!(await this.docManager.hasDocState(file.path))) return false;
-    const content = await this.docManager.getContent(file.path);
-    const hash = await this._hashText(content);
-    if (hash !== file.hash) return false;
-    this.tombstones.add(file.path, hash);
-    await this.docManager.removeDoc(file.path);
+    if (this.lastRunFiles.get(file.path) !== file.hash) return false;
+    this.lastRunFiles.delete(file.path);
+    this.tombstones.add(file.path, file.hash);
+    if (file.isTextFile) await this.docManager.removeDoc(file.path);
     return true;
+  }
+
+  private async _loadFileIndex(): Promise<void> {
+    const adapter = (this.vault as any).adapter;
+    try {
+      if (!adapter || !(await adapter.exists(FILE_INDEX_FILE))) return;
+      const saved = JSON.parse(await adapter.read(FILE_INDEX_FILE)) as Record<string, string>;
+      for (const [path, hash] of Object.entries(saved)) {
+        if (typeof hash === "string") this.lastRunFiles.set(path, hash);
+      }
+    } catch (err) {
+      logger.warn("Could not read the list of synced files:", err);
+    }
+  }
+
+  private async _saveFileIndex(): Promise<void> {
+    const adapter = (this.vault as any).adapter;
+    if (!adapter) return;
+    const index: Record<string, string> = {};
+    for (const [path, hash] of this.knownHashes) index[path] = hash;
+    try {
+      await ensureParentDirectory(adapter, FILE_INDEX_FILE);
+      await adapter.write(FILE_INDEX_FILE, JSON.stringify(index));
+    } catch (err) {
+      logger.warn("Could not save the list of synced files:", err);
+    }
   }
 
   private async _primeKnownHashes(): Promise<void> {

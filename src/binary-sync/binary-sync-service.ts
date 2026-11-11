@@ -37,6 +37,7 @@ interface IncomingFile {
 export class BinaryFileSyncService {
   /** Chunked files being received, keyed by `${deviceId}\n${path}`. */
   private incoming = new Map<string, IncomingFile>();
+  private isDeletedCb: ((path: string, hash: string) => boolean) | null = null;
   private onRemoteFileStoredCb: ((path: string, hash: string) => void) | null =
     null;
   private onRemoteFileWrittenCb:
@@ -61,6 +62,11 @@ export class BinaryFileSyncService {
   ) {}
 
   /** Called with the content hash once a peer's file has been written. */
+  /** Tells whether this exact file (path and hash) was deleted here. */
+  setDeletedCheck(cb: (path: string, hash: string) => boolean): void {
+    this.isDeletedCb = cb;
+  }
+
   onRemoteFileStored(cb: (path: string, hash: string) => void): void {
     this.onRemoteFileStoredCb = cb;
   }
@@ -281,6 +287,14 @@ export class BinaryFileSyncService {
       // note has no CRDT content to send). An existing note's content is
       // synced through its CRDT document, never overwritten here.
       if (existing instanceof TFile && this.isTextPath(path)) return;
+      // A peer that has not yet seen our deletion may still send the file
+      // as it was when we deleted it; that must not bring it back.
+      if (
+        !existing &&
+        this.isDeletedCb?.(path, await computeFileHash(toExactArrayBuffer(content)))
+      ) {
+        return;
+      }
       // Mark remote write BEFORE modifying vault to prevent echo-back
       this.onRemoteFileWrittenCb?.(path);
       if (existing instanceof TFile) {
