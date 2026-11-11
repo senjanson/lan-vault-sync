@@ -371,13 +371,25 @@ export class ConnectionManager {
       ws.close();
       return false;
     }
-    if (this.peers.has(device.deviceId)) {
-      // Already connected — close the duplicate. A duplicate outbound client
-      // would only keep reconnecting into the same rejection, so retire it;
-      // the existing connection has its own reconnect path.
-      ws.close();
-      if (client) this._retireClient(client);
-      return false;
+    const existing = this.peers.get(device.deviceId);
+    if (existing) {
+      // Both devices may dial each other at the same moment (a manual
+      // address on one side, discovery on the other). Each side would then
+      // keep its own outgoing socket and close the other one, dropping both.
+      // Both sides keep the connection opened by the smaller device ID.
+      if (!this._isPreferred(direction, device.deviceId) || this._isPreferred(existing.direction, device.deviceId)) {
+        // Close the duplicate. A duplicate outbound client would only keep
+        // reconnecting into the same rejection, so retire it; the kept
+        // connection has its own reconnect path.
+        ws.close();
+        if (client) this._retireClient(client);
+        return false;
+      }
+      if (existing.pingTimer) clearInterval(existing.pingTimer);
+      this.peers.delete(device.deviceId);
+      existing.ws.close();
+      if (existing.client) this._retireClient(existing.client);
+      this.onPeerDisconnectedCb?.(device.deviceId);
     }
 
     const peer: PeerConnection = {
@@ -454,6 +466,11 @@ export class ConnectionManager {
     for (const [url, c] of this.clients) {
       if (c === client) this.clients.delete(url);
     }
+  }
+
+  /** Whether a connection in this direction is the one both sides keep. */
+  private _isPreferred(direction: 'inbound' | 'outbound', remoteId: string): boolean {
+    return (direction === 'outbound') === (this.settings.deviceId < remoteId);
   }
 
   private _shouldInitiateConnection(device: DeviceInfo): boolean {

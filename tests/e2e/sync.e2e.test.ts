@@ -65,6 +65,24 @@ describe('e2e connections', { timeout: 30000 }, () => {
     expect(count(A, 'Disconnected')).toBe(0);
   });
 
+  it('settles on one connection when both devices dial each other at once', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports(), pb = pa + 1;
+    const [A, B] = await Promise.all([
+      startNode(ra, 'aaaa', pa, [pb]),
+      startNode(rb, 'bbbb', pb, [pa]),
+    ]);
+    track(A); track(B);
+    await sleep(4000);
+    expect(A.coord.getConnectedDevices()).toEqual(['bbbb']);
+    expect(B.coord.getConnectedDevices()).toEqual(['aaaa']);
+    // No endless reconnecting: at most the one duplicate was dropped.
+    expect(count(A, 'Connected to')).toBeLessThanOrEqual(2);
+    await A.vault.write('n.md', 'hello');
+    await sleep(800);
+    expect(B.vault.text('n.md')).toBe('hello');
+  });
+
   it('stops reconnecting after the sync service is stopped', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     seed(ra, { 'after-stop.md': 'must not sync after stop' });
