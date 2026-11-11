@@ -46,6 +46,7 @@ export default class LANSyncPlugin extends Plugin {
   syncLogService: SyncLogService | null = null;
   /** Last notice time per refused address, so retries don't spam notices. */
   private authNoticeAt = new Map<string, number>();
+  private startTimer: ReturnType<typeof setTimeout> | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -153,11 +154,20 @@ export default class LANSyncPlugin extends Plugin {
     // Auto-start if enabled
     if (this.settings.enabled) {
       // Delay to let Obsidian finish loading
-      setTimeout(() => this.startSync(), 2000);
+      // Cleared on unload, so disabling the plugin right after enabling it
+      // does not leave a sync server running.
+      this.startTimer = setTimeout(() => {
+        this.startTimer = null;
+        void this.startSync();
+      }, 2000);
     }
   }
 
   async onunload(): Promise<void> {
+    if (this.startTimer) {
+      clearTimeout(this.startTimer);
+      this.startTimer = null;
+    }
     await this.stopSync();
     await this.syncLogService?.flush();
   }
