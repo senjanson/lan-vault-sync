@@ -194,3 +194,28 @@ describe('BinaryFileSyncService conflict backups', () => {
     expect(onRemoteFileRenamed).toHaveBeenCalledWith('Untitled.md', 'note.md');
   });
 });
+
+describe('BinaryFileSyncService received bytes', () => {
+  it('writes only the file bytes when the message is a view into a larger buffer', async () => {
+    const { encodeFileData, decodeMessage } = await import('../../src/transport/protocol');
+    const { toUint8Array } = await import('../../src/transport/socket');
+    const { MessageType } = await import('../../src/types');
+
+    // ws hands out Node Buffers that are views into one shared chunk buffer.
+    const frame = encodeFileData({ path: 'img/图.png', content: new Uint8Array([1, 2, 0, 255]), mtime: 1 });
+    const chunk = Buffer.concat([Buffer.from('other-message-bytes'), Buffer.from(frame), Buffer.from('tail')]);
+    const view = chunk.subarray(19, 19 + frame.length);
+
+    const vault = new FakeVault();
+    const service = new BinaryFileSyncService(
+      vault as any,
+      { broadcast: vi.fn(), sendTo: vi.fn() } as any,
+      { backupBinaryFile: vi.fn() } as any,
+    );
+    const msg = decodeMessage(await toUint8Array(view));
+    await service.handleMessage('peer', MessageType.FILE_DATA, msg.payload);
+
+    const file = vault.getAbstractFileByPath('img/图.png')!;
+    expect(Array.from(new Uint8Array(await vault.readBinary(file)))).toEqual([1, 2, 0, 255]);
+  });
+});

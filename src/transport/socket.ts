@@ -58,7 +58,11 @@ export function addSocketMessageListener(
 
 export async function toUint8Array(data: unknown): Promise<Uint8Array> {
   if (data instanceof Uint8Array) {
-    return data;
+    // Node Buffers are Uint8Arrays whose slice() shares memory; normalise to a
+    // plain view so later slice() calls copy as callers expect.
+    return data.constructor === Uint8Array
+      ? data
+      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   }
 
   if (data instanceof ArrayBuffer) {

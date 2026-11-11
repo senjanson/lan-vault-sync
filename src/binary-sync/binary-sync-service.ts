@@ -223,13 +223,13 @@ export class BinaryFileSyncService {
             "remote-file-overwrite",
           );
         }
-        await this.vault.modifyBinary(existing, content.buffer as ArrayBuffer);
+        await this.vault.modifyBinary(existing, toExactArrayBuffer(content));
       } else {
         const adapter = (this.vault as any).adapter;
         if (adapter) {
           await ensureParentDirectory(adapter, path);
         }
-        await this.vault.createBinary(path, content.buffer as ArrayBuffer);
+        await this.vault.createBinary(path, toExactArrayBuffer(content));
       }
       logger.debug(`Received binary file: ${path}`);
     } catch (err) {
@@ -331,4 +331,15 @@ export class BinaryFileSyncService {
     }
     return true;
   }
+}
+
+/**
+ * Copy exactly the bytes of a view. `view.buffer` alone may be a larger shared
+ * buffer (Node's ws hands out Buffers that are slices of one chunk).
+ */
+function toExactArrayBuffer(view: Uint8Array): ArrayBuffer {
+  return view.buffer.slice(
+    view.byteOffset,
+    view.byteOffset + view.byteLength,
+  ) as ArrayBuffer;
 }
