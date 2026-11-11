@@ -458,4 +458,18 @@ describe('e2e pairing key', { timeout: 30000 }, () => {
     await sleep(800);
     expect(A.vault.text('empty-live.md')).toBe('now with text');
   });
+
+  it('reports the peer count again when a peer connects or disconnects', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const counts: number[] = [];
+    A.coord.onStateChange(() => counts.push(A.coord.getConnectedDevices().length));
+    const B = await startNode(rb, 'bbbb', pa + 1, [pa]);
+    await sleep(1500);
+    expect(counts.at(-1)).toBe(1);
+    await B.coord.stop();
+    await sleep(800);
+    expect(counts.at(-1)).toBe(0);
+  });
 });

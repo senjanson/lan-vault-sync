@@ -263,6 +263,8 @@ export class SyncCoordinator {
 
     this.connectionManager.onPeerConnected(async (device) => {
       this._emitEvent(`Connected to ${device.deviceId}`);
+      // The peer count shown to the user changes even when the state does not.
+      this.onStateChangeCb?.(this.stateMachine.getState());
       this.pendingInitialBootstrapPeers.add(device.deviceId);
       await this._initialSyncWith(device.deviceId);
     });
@@ -274,6 +276,7 @@ export class SyncCoordinator {
       // peers may still be mid-conflict on their own paths.
       this._clearConflictLoserGuardsForDevice(deviceId);
       this._emitEvent(`Disconnected: ${deviceId}`);
+      this.onStateChangeCb?.(this.stateMachine.getState());
     });
 
     // Incoming protocol messages
