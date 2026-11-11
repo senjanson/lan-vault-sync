@@ -161,11 +161,9 @@ export class YjsDocManager {
 
   /** Called when receiving a Yjs update from a remote peer */
   async applyRemoteUpdate(filePath: string, update: Uint8Array, fromDeviceId?: string): Promise<void> {
-    let remoteContentChange:
-      | { content: string; previousContent: string }
-      | null = null;
-
-    await this._enqueueForPath(filePath, async () => {
+    // The change is returned from the queued operation (not assigned to an
+    // outer variable) so the callback runs after the queue is released.
+    const remoteContentChange = await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
       const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, update, remoteOrigin(fromDeviceId));
@@ -174,9 +172,7 @@ export class YjsDocManager {
       const content = ytext.toString();
       this.lastKnownContent.set(filePath, content);
 
-      if (content !== previousContent) {
-        remoteContentChange = { content, previousContent };
-      }
+      return content !== previousContent ? { content, previousContent } : null;
     });
 
     if (remoteContentChange) {
@@ -303,11 +299,9 @@ export class YjsDocManager {
 
   /** Handle sync step 2 from peer (update diff) */
   async handleSyncStep2(filePath: string, data: Uint8Array, fromDeviceId?: string): Promise<void> {
-    let remoteContentChange:
-      | { content: string; previousContent: string }
-      | null = null;
-
-    await this._enqueueForPath(filePath, async () => {
+    // The change is returned from the queued operation (not assigned to an
+    // outer variable) so the callback runs after the queue is released.
+    const remoteContentChange = await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
       const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, data, remoteOrigin(fromDeviceId));
@@ -316,9 +310,7 @@ export class YjsDocManager {
       const ytext = doc.getText('content');
       const content = ytext.toString();
       this.lastKnownContent.set(filePath, content);
-      if (content !== previousContent) {
-        remoteContentChange = { content, previousContent };
-      }
+      return content !== previousContent ? { content, previousContent } : null;
     });
 
     if (remoteContentChange) {
