@@ -61,6 +61,7 @@ export class SyncCoordinator {
    *  The winner will send us their content via YJS_UPDATE on an empty doc —
    *  initialising it from disk would cause duplication when the update is
    *  applied. */
+  private renameFollowQueue: Promise<unknown> = Promise.resolve();
   private conflictLoserPaths = new Map<string, Set<string>>();
   private localFileChangeQueue: Promise<void> = Promise.resolve();
   private recentRemoteTextRenames = new Map<
@@ -1466,17 +1467,29 @@ export class SyncCoordinator {
    * edits into it. Only done when both copies share sync history, so the
    * merge is exact. Returns false (both names are kept) otherwise.
    */
-  private async _followRemoteRename(
+  private _followRemoteRename(deviceId: string, oldPath: string, newPath: string): Promise<boolean> {
+    // One at a time: tree syncs with several peers can lead to following the
+    // same rename at once, and Obsidian moves the very file object, so a
+    // second follow would see the moved file as the new name's note.
+    const run = this.renameFollowQueue.then(() =>
+      this._followRemoteRenameNow(deviceId, oldPath, newPath),
+    );
+    this.renameFollowQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async _followRemoteRenameNow(
     deviceId: string,
     oldPath: string,
     newPath: string,
   ): Promise<boolean> {
     const isText = this.filter.isTextFile(oldPath);
     if (!this._isAllowedPath(newPath) || this.filter.isTextFile(newPath) !== isText) return false;
+    const file = this.vault.getAbstractFileByPath(oldPath);
+    // Already followed, e.g. for another peer a moment ago.
+    if (!(file instanceof TFile)) return this.tombstones.get(oldPath)?.movedTo === newPath;
     // We deleted the new name ourselves; don't bring it back.
     if (this.tombstones.get(newPath)) return false;
-    const file = this.vault.getAbstractFileByPath(oldPath);
-    if (!(file instanceof TFile)) return false;
     if (isText) {
       if (!(await this.docManager.hasDocState(oldPath))) return false;
       await this._flushPendingLocalTextChange(oldPath);
@@ -1510,7 +1523,7 @@ export class SyncCoordinator {
       this.tombstones.add(oldPath, oldHash, undefined, newPath);
       this.knownHashes.delete(oldPath);
     } else {
-      if (!(target instanceof TFile)) return false;
+      if (!(target instanceof TFile) || target === file) return false;
       await this._flushPendingLocalTextChange(newPath);
       await this._ensureCrdtInitialized(newPath);
       const merged = await this.docManager.absorbDoc(oldPath, newPath);

@@ -707,6 +707,26 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     walk(''); return out.sort();
   };
 
+  it('keeps the renamed note when two peers lead to following the same rename at once', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'f.md': 'one\nfrom B\n' });
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const dm = (B.coord as any).docManager;
+    await (B.coord as any)._ensureCrdtInitialized('f.md');
+    // The peer's text for the new name has been received but not written yet.
+    Y.applyUpdate(await dm.getOrCreateDoc('sub/g.md'), await dm.encodeFullState('f.md'));
+    // Recording the rename takes a while (it hashes the file), so the other
+    // call gets ahead of it.
+    const record = (B.coord as any)._recordRename.bind(B.coord);
+    (B.coord as any)._recordRename = async (a: string, b: string) => { await sleep(300); return record(a, b); };
+    const follow = () => (B.coord as any)._followRemoteRename('aaaa', 'f.md', 'sub/g.md');
+    await Promise.all([follow(), follow()]);
+    await sleep(500);
+    expect(B.vault.exists('f.md')).toBe(false);
+    expect(B.vault.text('sub/g.md')).toBe('one\nfrom B\n');
+    expect((B.coord as any).tombstones.get('sub/g.md')).toBeUndefined();
+  });
+
   it('does not pass an old-name edit around forever between three devices', async () => {
     const ids = ['aaaa', 'bbbb', 'cccc'];
     const roots = ids.map((id) => tmpRoot(id));

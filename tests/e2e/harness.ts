@@ -85,7 +85,14 @@ export class DiskVault {
   async modifyBinary(f: TFile, c: ArrayBuffer) { fs.writeFileSync(this.abs(f.path), Buffer.from(c)); this.track(f.path); this.trigger('modify', this.files.get(f.path)); }
   async delete(f: any, _force?: boolean) { if (f instanceof TFolder) return this.deleteFolder(f.path); return this.deleteFile(f); }
   async deleteFile(f: TFile) { fs.rmSync(this.abs(f.path)); this.files.delete(f.path); this.trigger('delete', f); }
-  async rename(f: TFile, np: string) { const old = f.path; this.parentOk(np); fs.renameSync(this.abs(old), this.abs(np)); this.files.delete(old); const nf = this.track(np); this.trigger('rename', nf, old); }
+  // Like Obsidian: the same TFile object moves to the new path.
+  async rename(f: TFile, np: string) {
+    const old = f.path; this.parentOk(np);
+    if (this.files.has(np)) throw new Error('Destination file already exists!');
+    fs.renameSync(this.abs(old), this.abs(np)); this.files.delete(old);
+    f.path = np; const st = fs.statSync(this.abs(np)); f.stat = { mtime: st.mtimeMs, size: st.size }; this.files.set(np, f);
+    this.trigger('rename', f, old);
+  }
   // ── "user" helpers (go through the vault API like the editor would)
   async write(p: string, c: string) { const f = this.files.get(p); if (f) return this.modify(f, c); fs.mkdirSync(path.dirname(this.abs(p)), { recursive: true }); return this.create(p, c); }
   async writeBin(p: string, c: Uint8Array) { const f = this.files.get(p); const ab = c.buffer.slice(c.byteOffset, c.byteOffset + c.byteLength) as ArrayBuffer; if (f) return this.modifyBinary(f, ab); fs.mkdirSync(path.dirname(this.abs(p)), { recursive: true }); return this.createBinary(p, ab); }
