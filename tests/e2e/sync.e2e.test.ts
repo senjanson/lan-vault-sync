@@ -181,3 +181,28 @@ describe('e2e settings changes', { timeout: 30000 }, () => {
     expect(A.coord.getConnectedDevices()).toEqual([]);
   });
 });
+
+describe('e2e long names', { timeout: 30000 }, () => {
+  it('merges offline edits of a note with a long Chinese name', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const long = '读书笔记/' + '这是一个比较长的中文文件名用于测试同步插件'.repeat(3) + '.md';
+    seed(ra, { [long]: 'L1\nL2\nL3\n' });
+    const pa = ports(), pb = pa + 1;
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pb, [pa]));
+    await sleep(1200);
+    await A.vault.write(long, 'L1\nL2\nL3\nL4\n');
+    await sleep(800);
+    await A.coord.stop();
+    await B.coord.stop();
+    nodes = [];
+    // Both sides edit a different line while disconnected.
+    seed(ra, { [long]: 'L1 A\nL2\nL3\nL4\n' });
+    seed(rb, { [long]: 'L1\nL2\nL3 B\nL4\n' });
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    B = track(await startNode(rb, 'bbbb', pb, [pa]));
+    await sleep(2000);
+    expect(A.vault.text(long)).toBe('L1 A\nL2\nL3 B\nL4\n');
+    expect(B.vault.text(long)).toBe('L1 A\nL2\nL3 B\nL4\n');
+  });
+});
