@@ -75,7 +75,7 @@ export function tmpRoot(tag: string) { return fs.mkdtempSync(path.join(os.tmpdir
 
 export async function startNode(root: string, deviceId: string, port: number, peers: number[], extra: Partial<LANSyncSettings> = {}): Promise<Node> {
   const vault = new DiskVault(root);
-  const settings: LANSyncSettings = { ...DEFAULT_SETTINGS, ignoredPaths: [...DEFAULT_SETTINGS.ignoredPaths], deviceId, deviceName: deviceId, port, manualPeers: peers.map((p) => `127.0.0.1:${p}`), syncIntervalMs: 0, ...extra };
+  const settings: LANSyncSettings = { ...DEFAULT_SETTINGS, ignoredPaths: [...DEFAULT_SETTINGS.ignoredPaths], deviceId, deviceName: deviceId, port, manualPeers: peers.map((p) => `127.0.0.1:${p}`), syncIntervalMs: 0, syncKey: 'TEST-KEY', ...extra };
   const coord = new SyncCoordinator(vault as any, settings);
   const events: string[] = [];
   coord.onSyncEvent((m) => events.push(m));
@@ -99,17 +99,29 @@ export function seed(root: string, files: Record<string, string | Buffer>) {
 
 export const count = (n: Node, prefix: string) => n.events.filter((e) => e.startsWith(prefix)).length;
 
-/** A raw protocol client, used to act as an untrusted device on the LAN. */
-export async function connectRaw(port: number, handshake: Record<string, unknown>) {
-  const { encodeHandshake, decodeMessage } = await import('../../src/transport/protocol');
+/**
+ * A raw protocol client, used to act as an untrusted device on the LAN. With
+ * a key it completes the pairing check (a device that knows the key).
+ */
+export async function connectRaw(port: number, handshake: Record<string, unknown>, key?: string) {
+  const { encodeHandshake, encodeAuth, decodeMessage, decodeJSON } = await import('../../src/transport/protocol');
+  const { authProof, authMessage, randomNonce } = await import('../../src/transport/auth');
   const WS = (globalThis as any).require('ws');
   const ws = new WS(`ws://127.0.0.1:${port}`);
   const received: Array<{ type: number; payload: Uint8Array }> = [];
   let closed = false;
-  ws.on('message', (raw: Buffer) => received.push(decodeMessage(new Uint8Array(raw))));
+  const nonce = randomNonce();
+  ws.on('message', async (raw: Buffer) => {
+    const msg = decodeMessage(new Uint8Array(raw));
+    received.push(msg);
+    if (key && msg.type === 0x01) {
+      const ack = decodeJSON<{ nonce?: string }>(msg.payload);
+      if (ack.nonce) ws.send(encodeAuth({ proof: await authProof(key, authMessage(ack.nonce, nonce, String(handshake.deviceId))) }));
+    }
+  });
   ws.on('close', () => { closed = true; });
   await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
-  ws.send(encodeHandshake({ deviceName: 'rogue', port: 1, ...handshake } as any));
+  ws.send(encodeHandshake({ deviceName: 'rogue', port: 1, nonce, ...handshake } as any));
   await sleep(300);
   return { ws, received, isClosed: () => closed, send: (data: Uint8Array) => ws.send(data) };
 }

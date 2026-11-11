@@ -90,9 +90,13 @@ The easiest way to connect a phone or tablet — no typing required:
 
 1. On the **desktop (Mac / Windows / Linux)**: open **Settings → LAN Vault Sync** and find the **QR Code Pairing** section. A QR code is displayed automatically.
 2. On your **phone / tablet**: scan the QR code with the system camera (or any QR scanner).
-3. The camera will prompt you to open Obsidian. Confirm — the plugin automatically adds the desktop's IP:port as a peer and shows a notification.
+3. The camera will prompt you to open Obsidian, and the plugin asks whether to pair with that device. Confirm, and it adds the desktop's IP:port as a peer and takes over the **sync key** from the QR code.
 
 > **Tip:** If your desktop has multiple network interfaces (e.g. Wi-Fi + Ethernet), use the dropdown above the QR code to select the correct IP before scanning.
+
+### Sync Key
+
+Only devices with the **same sync key** can connect to each other. Each device creates a random key on first start (**Settings → LAN Vault Sync → Sync Key**). QR pairing copies the key; when adding a peer by hand, enter the same key on both devices. A notice appears when keys don't match. All devices need a plugin version with sync keys.
 
 ### Manual Peer Connection
 
@@ -163,7 +167,8 @@ Open the command palette (`Cmd/Ctrl + P`) and search for:
 ### Privacy & Security
 
 - All traffic is **LAN-only**. No data is sent to any external server.
-- Communication is plain WebSocket (`ws://`) within your local network. Do not enable this plugin on public or untrusted networks.
+- Only devices that know the sync key can connect; the key itself is never sent over the network.
+- Synced data is still sent as plain, unencrypted WebSocket (`ws://`) traffic within your local network. Do not enable this plugin on public or untrusted networks.
 - No analytics, telemetry, or account required.
 
 ---

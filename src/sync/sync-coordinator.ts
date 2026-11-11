@@ -1,6 +1,6 @@
 import { Vault, TFile, Workspace } from "obsidian";
 import * as Y from "yjs";
-import { ConnectionManager } from "../transport/connection-manager";
+import { AuthFailure, ConnectionManager } from "../transport/connection-manager";
 import {
   encodeYjsSync,
   decodeYjsSync,
@@ -68,6 +68,7 @@ export class SyncCoordinator {
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
   private onSyncEventCb: ((msg: string) => void) | null = null;
+  private onAuthFailedCb: ((failure: AuthFailure) => void) | null = null;
 
   constructor(
     private vault: Vault,
@@ -121,6 +122,11 @@ export class SyncCoordinator {
 
   onSyncEvent(cb: (msg: string) => void): void {
     this.onSyncEventCb = cb;
+  }
+
+  /** Called when a device is refused because its sync key differs. */
+  onAuthFailed(cb: (failure: AuthFailure) => void): void {
+    this.onAuthFailedCb = cb;
   }
 
   getState(): SyncState {
@@ -242,6 +248,15 @@ export class SyncCoordinator {
     });
 
     // Peer connected → initial sync
+    this.connectionManager.onAuthFailed((failure) => {
+      this._emitEvent(
+        failure.reason === "outdated"
+          ? `Refused ${failure.deviceName} (${failure.address}): plugin version too old`
+          : `Refused ${failure.deviceName} (${failure.address}): sync key does not match`,
+      );
+      this.onAuthFailedCb?.(failure);
+    });
+
     this.connectionManager.onPeerConnected(async (device) => {
       this._emitEvent(`Connected to ${device.deviceId}`);
       this.pendingInitialBootstrapPeers.add(device.deviceId);

@@ -124,7 +124,7 @@ describe('e2e paths', { timeout: 30000 }, () => {
     const ra = tmpRoot('a');
     const pa = ports();
     const A = track(await startNode(ra, 'aaaa', pa, []));
-    const rogue = await connectRaw(pa, { deviceId: 'rogue', vaultId: (A.coord as any).vaultId });
+    const rogue = await connectRaw(pa, { deviceId: 'rogue', vaultId: (A.coord as any).vaultId }, 'TEST-KEY');
     const doc = new Y.Doc();
     doc.getText('content').insert(0, 'console.log("pwned")');
     rogue.send(encodeYjsSync(MessageType.YJS_UPDATE, '.obsidian/plugins/evil/main.js', Y.encodeStateAsUpdate(doc)));
@@ -150,7 +150,7 @@ describe('e2e ignored paths', { timeout: 30000 }, () => {
     expect(A.vault.exists('private/p.png')).toBe(false);
 
     // A peer that asks for ignored files directly gets nothing.
-    const rogue = await connectRaw(pa, { deviceId: 'rogue', vaultId: (A.coord as any).vaultId });
+    const rogue = await connectRaw(pa, { deviceId: 'rogue', vaultId: (A.coord as any).vaultId }, 'TEST-KEY');
     rogue.send(encodeFileRequest('private/mine.png'));
     rogue.send(encodeYjsSync(MessageType.YJS_SYNC_STEP1, 'private/mine.md', Y.encodeStateVector(new Y.Doc())));
     await sleep(800);
@@ -389,5 +389,55 @@ describe('e2e hub devices', { timeout: 30000 }, () => {
     await sleep(1000);
     expect(A.vault.text('n.md')).toBe('L1 A\nL2 C\n');
     expect(B.vault.text('n.md')).toBe('L1 A\nL2 C\n');
+  });
+});
+
+describe('e2e pairing key', { timeout: 30000 }, () => {
+  it('serves nothing to a device that does not know the sync key', async () => {
+    const ra = tmpRoot('a');
+    seed(ra, { 'secret.md': 'private', 'p.png': Buffer.from([7]) });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const rogue = await connectRaw(pa, { deviceId: 'rogue', vaultId: (A.coord as any).vaultId }, 'WRONG-KEY');
+    rogue.send(encodeFileRequest('p.png'));
+    rogue.send(encodeYjsSync(MessageType.YJS_SYNC_STEP1, 'secret.md', Y.encodeStateVector(new Y.Doc())));
+    rogue.send(encodeFileData({ path: 'planted.md', content: new TextEncoder().encode('x'), mtime: Date.now() }));
+    await sleep(800);
+    const served = rogue.received.filter((m) => m.type !== MessageType.HANDSHAKE_ACK);
+    expect(served).toEqual([]);
+    expect(rogue.isClosed()).toBe(true);
+    expect(A.vault.exists('planted.md')).toBe(false);
+    expect(A.coord.getConnectedDevices()).toEqual([]);
+  });
+
+  it('does not sync devices with different keys and reports the mismatch', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'n.md': 'hello' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, [], { syncKey: 'KEY-ONE' }));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa], { syncKey: 'KEY-TWO' }));
+    await sleep(1500);
+    expect(B.vault.exists('n.md')).toBe(false);
+    expect(count(B, 'Refused')).toBeGreaterThan(0);
+  });
+
+  it('tells the user when a device runs a version without pairing keys', async () => {
+    const ra = tmpRoot('a');
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const old = await connectRaw(pa, { deviceId: 'old', vaultId: (A.coord as any).vaultId, nonce: undefined });
+    expect(old.isClosed()).toBe(true);
+    expect(count(A, 'Refused')).toBe(1);
+    expect(A.events.some((e) => e.includes('version too old'))).toBe(true);
+  });
+
+  it('accepts the same key typed with other case and spacing', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'n.md': 'hello' });
+    const pa = ports();
+    track(await startNode(ra, 'aaaa', pa, [], { syncKey: 'ABCD-EFGH' }));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa], { syncKey: 'abcd efgh' }));
+    await sleep(1500);
+    expect(B.vault.text('n.md')).toBe('hello');
   });
 });

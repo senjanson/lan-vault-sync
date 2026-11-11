@@ -3,6 +3,7 @@ import type LANSyncPlugin from "../main";
 import { getLocalIPv4Addresses } from "../utils/network";
 import { supportsIncomingConnections } from "../utils/runtime";
 import { buildPeerURI, renderQRCode } from "./qr-code";
+import { generateSyncKey } from "../transport/auth";
 
 function makeCopyable(el: HTMLElement, getText: () => string): void {
   el.addClass("lan-sync-copyable");
@@ -96,6 +97,44 @@ export class LANSyncSettingTab extends PluginSettingTab {
           }),
       );
 
+    // ─── Sync key ───────────────────────────────────────
+    containerEl.createEl("h3", { text: "Sync Key" });
+    containerEl.createEl("p", {
+      text: "Only devices with the same sync key can connect to each other. Scanning this device's QR code copies the key; otherwise enter the same key on every device. Note that synced data is still sent unencrypted on your network.",
+      cls: "setting-item-description",
+    });
+    let keyInput: { setValue(v: string): unknown } | null = null;
+    new Setting(containerEl)
+      .setName("Sync key")
+      .setDesc("Changing it reconnects with the new key when you leave the field.")
+      .addText((text) => {
+        keyInput = text;
+        text.setValue(this.plugin.settings.syncKey);
+        text.inputEl.addEventListener("change", async () => {
+          const ok = await this.plugin.setSyncKey(text.getValue());
+          if (!ok) {
+            new Notice("LAN Sync: the sync key needs at least 8 letters or digits");
+            text.setValue(this.plugin.settings.syncKey);
+          } else {
+            this.display();
+          }
+        });
+      })
+      .addButton((button) =>
+        button.setButtonText("Copy").onClick(async () => {
+          await navigator.clipboard.writeText(this.plugin.settings.syncKey);
+          new Notice("LAN Sync: sync key copied");
+        }),
+      )
+      .addButton((button) =>
+        button.setButtonText("New key").onClick(async () => {
+          await this.plugin.setSyncKey(generateSyncKey());
+          keyInput?.setValue(this.plugin.settings.syncKey);
+          new Notice("LAN Sync: new sync key set. Pair your other devices again.");
+          this.display();
+        }),
+      );
+
     // ─── QR Code (Share This Device) ───────────────────
     containerEl.createEl("h3", { text: "QR Code Pairing" });
     if (!canAcceptIncoming) {
@@ -129,7 +168,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
           selectedIP = ip;
           // Always read the current port from settings (may have changed on this page)
           const currentPort = this.plugin.settings.port;
-          const uri = buildPeerURI(ip, currentPort);
+          const uri = buildPeerURI(ip, currentPort, this.plugin.settings.syncKey);
           qrInfo.empty();
           const addrEl = qrInfo.createEl("p", {
             text: `Address: ${ip}:${currentPort}`,

@@ -13,10 +13,19 @@ import {
   decodeJSON,
   encodeHandshake,
   encodeHandshakeAck,
+  encodeAuth,
   encodePing,
   encodePong,
 } from './protocol';
 import {
+  ackMessage,
+  authMessage,
+  authProof,
+  proofsMatch,
+  randomNonce,
+} from './auth';
+import {
+  AuthPayload,
   DeviceInfo,
   HandshakePayload,
   MessageType,
@@ -42,6 +51,19 @@ interface PeerConnection {
 
 type DecodedMessage = ReturnType<typeof decodeMessage>;
 
+/** Result of one handshake step: the peer, a rejection, or "wait for more". */
+type HandshakeStep = DeviceInfo | null | 'continue';
+
+export interface AuthFailure {
+  deviceName: string;
+  address: string;
+  /** 'outdated' when the peer runs a version without pairing keys. */
+  reason: 'key-mismatch' | 'outdated';
+}
+
+/** Unauthenticated sockets are closed after this long. */
+const HANDSHAKE_TIMEOUT_MS = 10_000;
+
 type MessageHandler = (deviceId: string, type: MessageType, payload: Uint8Array) => void | Promise<void>;
 
 export class ConnectionManager {
@@ -54,6 +76,7 @@ export class ConnectionManager {
   private localInfo: HandshakePayload;
   private onPeerConnectedCb: ((device: DeviceInfo) => void) | null = null;
   private onPeerDisconnectedCb: ((deviceId: string) => void) | null = null;
+  private onAuthFailedCb: ((failure: AuthFailure) => void) | null = null;
   private readonly acceptsIncomingConnections: boolean;
 
   constructor(private settings: LANSyncSettings, private vaultId: string) {
@@ -78,6 +101,11 @@ export class ConnectionManager {
 
   onPeerDisconnected(cb: (deviceId: string) => void): void {
     this.onPeerDisconnectedCb = cb;
+  }
+
+  /** Called when a device fails the sync key check. */
+  onAuthFailed(cb: (failure: AuthFailure) => void): void {
+    this.onAuthFailedCb = cb;
   }
 
   async start(): Promise<void> {
@@ -122,7 +150,9 @@ export class ConnectionManager {
     this.clients.set(url, client);
 
     client.onOpen((ws) => {
-      this._routeSocket(ws, 'outbound', (msg) => {
+      const nonce = randomNonce();
+      const address = `${device.ip}:${device.port}`;
+      this._routeSocket(ws, 'outbound', async (msg) => {
         if (msg.type !== MessageType.HANDSHAKE_ACK) {
           logger.warn(`Expected handshake ack from ${url}, got: ${msg.type}`);
           return null;
@@ -134,6 +164,26 @@ export class ConnectionManager {
           return null;
         }
 
+        // The listening side must prove it knows the sync key before we
+        // send it anything.
+        const key = this.settings.syncKey;
+        if (typeof payload.nonce !== 'string' || typeof payload.proof !== 'string') {
+          this._authFailed(payload.deviceName, address, 'outdated');
+          return null;
+        }
+        const expected = key
+          ? await authProof(key, ackMessage(nonce, payload.nonce, payload.deviceId))
+          : '';
+        if (!key || !proofsMatch(payload.proof, expected)) {
+          this._authFailed(payload.deviceName, address, 'key-mismatch');
+          return null;
+        }
+        ws.send(
+          encodeAuth({
+            proof: await authProof(key, authMessage(payload.nonce, nonce, this.settings.deviceId)),
+          }),
+        );
+
         return {
           deviceId: payload.deviceId,
           deviceName: payload.deviceName,
@@ -144,7 +194,7 @@ export class ConnectionManager {
           acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
         };
       }, client);
-      ws.send(encodeHandshake(this.localInfo));
+      ws.send(encodeHandshake({ ...this.localInfo, nonce }));
     });
 
     client.connect();
@@ -189,29 +239,68 @@ export class ConnectionManager {
   // ─── Private ────────────────────────────────────────────
 
   private _handleInbound(ws: SocketLike, ip: string): void {
-    this._routeSocket(ws, 'inbound', (msg) => {
-      if (msg.type !== MessageType.HANDSHAKE) {
-        logger.warn('Expected handshake, got:', msg.type);
-        return null;
+    let pending: { device: DeviceInfo; clientNonce: string; serverNonce: string } | null = null;
+
+    this._routeSocket(ws, 'inbound', async (msg): Promise<HandshakeStep> => {
+      const key = this.settings.syncKey;
+
+      if (!pending) {
+        if (msg.type !== MessageType.HANDSHAKE) {
+          logger.warn('Expected handshake, got:', msg.type);
+          return null;
+        }
+
+        const payload = decodeJSON<HandshakePayload>(msg.payload);
+        if (!this._isValidPeer(payload)) {
+          logger.warn(`Rejected peer ${payload.deviceId}: invalid handshake`);
+          return null;
+        }
+        if (typeof payload.nonce !== 'string' || payload.nonce.length < 16) {
+          this._authFailed(payload.deviceName, ip, 'outdated');
+          return null;
+        }
+        if (!key) return null;
+
+        // Prove we know the key, then wait for the peer to do the same.
+        const serverNonce = randomNonce();
+        const proof = await authProof(key, ackMessage(payload.nonce, serverNonce, this.settings.deviceId));
+        ws.send(encodeHandshakeAck({ ...this.localInfo, nonce: serverNonce, proof }));
+        pending = {
+          clientNonce: payload.nonce,
+          serverNonce,
+          device: {
+            deviceId: payload.deviceId,
+            deviceName: payload.deviceName,
+            ip,
+            port: payload.port,
+            vaultId: payload.vaultId,
+            lastSeen: Date.now(),
+            acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
+          },
+        };
+        return 'continue';
       }
 
-      const payload = decodeJSON<HandshakePayload>(msg.payload);
-      if (!this._isValidPeer(payload)) {
-        logger.warn(`Rejected peer ${payload.deviceId}: invalid handshake`);
+      if (msg.type !== MessageType.AUTH) {
+        logger.warn(`Expected auth from ${pending.device.deviceId}, got:`, msg.type);
         return null;
       }
-
-      ws.send(encodeHandshakeAck(this.localInfo));
-      return {
-        deviceId: payload.deviceId,
-        deviceName: payload.deviceName,
-        ip,
-        port: payload.port,
-        vaultId: payload.vaultId,
-        lastSeen: Date.now(),
-        acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
-      };
+      const auth = decodeJSON<AuthPayload>(msg.payload);
+      const expected = await authProof(
+        key,
+        authMessage(pending.serverNonce, pending.clientNonce, pending.device.deviceId),
+      );
+      if (!proofsMatch(auth.proof, expected)) {
+        this._authFailed(pending.device.deviceName, ip, 'key-mismatch');
+        return null;
+      }
+      return pending.device;
     });
+  }
+
+  private _authFailed(deviceName: string, address: string, reason: AuthFailure['reason']): void {
+    logger.warn(`Rejected ${deviceName} (${address}): ${reason}`);
+    this.onAuthFailedCb?.({ deviceName: String(deviceName ?? ''), address, reason });
   }
 
   /**
@@ -227,24 +316,36 @@ export class ConnectionManager {
   private _routeSocket(
     ws: SocketLike,
     direction: 'inbound' | 'outbound',
-    handshake: (msg: DecodedMessage) => DeviceInfo | null,
+    handshake: (msg: DecodedMessage) => HandshakeStep | Promise<HandshakeStep>,
     client?: WSClient,
   ): void {
     let deviceId: string | null = null;
+    let rejected = false;
     let chain: Promise<void> = Promise.resolve();
+
+    const timeout = setTimeout(() => {
+      if (deviceId === null) ws.close();
+    }, HANDSHAKE_TIMEOUT_MS);
+    addSocketCloseListener(ws, () => clearTimeout(timeout));
 
     addSocketMessageListener(ws, (raw) => {
       chain = chain
         .then(async () => {
+          if (rejected) return;
           const msg = decodeMessage(await toUint8Array(raw));
           if (deviceId === null) {
-            const device = handshake(msg);
-            if (!device) {
+            const step = await handshake(msg);
+            if (step === 'continue') return;
+            if (!step) {
+              rejected = true;
               ws.close();
               return;
             }
-            if (this._setupWs(ws, device, direction, client)) {
-              deviceId = device.deviceId;
+            clearTimeout(timeout);
+            if (this._setupWs(ws, step, direction, client)) {
+              deviceId = step.deviceId;
+            } else {
+              rejected = true;
             }
             return;
           }
@@ -252,6 +353,10 @@ export class ConnectionManager {
         })
         .catch((err) => {
           logger.error(`Error handling message (${direction}):`, err);
+          if (deviceId === null) {
+            rejected = true;
+            ws.close();
+          }
         });
     });
   }

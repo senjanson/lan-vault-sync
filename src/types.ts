@@ -11,6 +11,8 @@ export interface LANSyncSettings {
   ignoredPaths: string[];
   conflictStrategy: "crdt-auto" | "last-write-wins" | "keep-both";
   manualPeers: string[]; // "ip:port" list
+  /** Shared pairing key; only devices with the same key can connect. */
+  syncKey: string;
   enableDebugLog: boolean;
   enableSyncLog: boolean;
   maxSyncLogEntries: number;
@@ -26,6 +28,7 @@ export const DEFAULT_SETTINGS: LANSyncSettings = {
   ignoredPaths: [".obsidian/", ".trash/"],
   conflictStrategy: "crdt-auto",
   manualPeers: [],
+  syncKey: "",
   enableDebugLog: false,
   enableSyncLog: true,
   maxSyncLogEntries: 500,
@@ -75,6 +78,8 @@ export type SyncState =
 export enum MessageType {
   HANDSHAKE = 0x00,
   HANDSHAKE_ACK = 0x01,
+  /** Connecting side's proof that it knows the sync key. */
+  AUTH = 0x02,
 
   YJS_SYNC_STEP1 = 0x10,
   YJS_SYNC_STEP2 = 0x11,
@@ -99,6 +104,14 @@ export interface HandshakePayload {
   vaultId: string;
   port: number;
   acceptsIncomingConnections?: boolean;
+  /** Random challenge for the other side to sign. */
+  nonce?: string;
+  /** HMAC over the other side's nonce (handshake ack only). */
+  proof?: string;
+}
+
+export interface AuthPayload {
+  proof: string;
 }
 
 export interface YjsSyncMessage {

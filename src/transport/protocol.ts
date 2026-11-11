@@ -1,6 +1,7 @@
 import {
   MessageType,
   HandshakePayload,
+  AuthPayload,
   YjsSyncMessage,
   FileMetaSyncPayload,
   FileDataPayload,
@@ -58,6 +59,10 @@ export function encodeHandshake(payload: HandshakePayload): Uint8Array {
 
 export function encodeHandshakeAck(payload: HandshakePayload): Uint8Array {
   return encodeMessage(MessageType.HANDSHAKE_ACK, encodeJSON(payload));
+}
+
+export function encodeAuth(payload: AuthPayload): Uint8Array {
+  return encodeMessage(MessageType.AUTH, encodeJSON(payload));
 }
 
 // ─── Yjs sync messages ──────────────────────────────────

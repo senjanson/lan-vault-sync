@@ -1,10 +1,12 @@
 import { PLUGIN_ID } from '../constants';
 
 /**
- * Build the obsidian:// URI that, when opened, adds a manual peer.
+ * Build the obsidian:// URI that, when opened, adds a manual peer and (after
+ * the user confirms) takes over this device's sync key.
  */
-export function buildPeerURI(ip: string, port: number): string {
-  return `obsidian://${PLUGIN_ID}?address=${ip}:${port}`;
+export function buildPeerURI(ip: string, port: number, syncKey?: string): string {
+  const base = `obsidian://${PLUGIN_ID}?address=${ip}:${port}`;
+  return syncKey ? `${base}&key=${encodeURIComponent(syncKey)}` : base;
 }
 
 /**
