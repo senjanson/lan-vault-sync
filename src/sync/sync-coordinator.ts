@@ -901,12 +901,10 @@ export class SyncCoordinator {
       }
       // The peer renamed this note while we edited it: move our edits to
       // the new name instead of keeping the old name as a second note.
-      const renamedTo = this._renameTarget(peerTombstone, remoteFiles, remoteDeleted);
-      if (
-        renamedTo &&
-        file.isTextFile &&
-        (await this._followRemoteRename(deviceId, file.path, renamedTo))
-      ) {
+      const renamedTo =
+        this._renameTarget(peerTombstone, remoteFiles, remoteDeleted) ??
+        this._laterRenameOfSameFile(file.path, remoteFiles, remoteDeleted);
+      if (renamedTo && (await this._followRemoteRename(deviceId, file.path, renamedTo))) {
         continue;
       }
       if (file.isTextFile) {
@@ -1384,6 +1382,30 @@ export class SyncCoordinator {
   }
 
   /**
+   * When we renamed a file to `path` and the peer renamed the same file to
+   * another name, the later rename wins (ties go to the smaller name), so
+   * one copy is kept instead of one under each name.
+   */
+  private _laterRenameOfSameFile(
+    path: string,
+    remoteFiles: Map<string, FileMeta>,
+    remoteDeleted: Map<string, Tombstone>,
+  ): string | null {
+    const ours = this.tombstones.list().find((t) => t.movedTo === path);
+    if (!ours) return null;
+    const theirs = remoteDeleted.get(ours.path);
+    if (!theirs?.movedTo || theirs.movedTo === path) return null;
+    // The same file: both records name the content that was renamed.
+    if (!ours.hash || ours.hash !== theirs.hash) return null;
+    const target = this._renameTarget(theirs, remoteFiles, remoteDeleted);
+    if (!target || target === path) return null;
+    const theirsWins =
+      theirs.deletedAt > ours.deletedAt ||
+      (theirs.deletedAt === ours.deletedAt && target < path);
+    return theirsWins ? target : null;
+  }
+
+  /**
    * Move this device's edited copy of a note that a peer renamed to the new
    * name: rename it here, or, when the new name already arrived, merge our
    * edits into it. Only done when both copies share sync history, so the
@@ -1394,14 +1416,17 @@ export class SyncCoordinator {
     oldPath: string,
     newPath: string,
   ): Promise<boolean> {
-    if (!this._isAllowedPath(newPath) || !this.filter.isTextFile(newPath)) return false;
+    const isText = this.filter.isTextFile(oldPath);
+    if (!this._isAllowedPath(newPath) || this.filter.isTextFile(newPath) !== isText) return false;
     // We deleted the new name ourselves; don't bring it back.
     if (this.tombstones.get(newPath)) return false;
     const file = this.vault.getAbstractFileByPath(oldPath);
     if (!(file instanceof TFile)) return false;
-    if (!(await this.docManager.hasDocState(oldPath))) return false;
-    await this._flushPendingLocalTextChange(oldPath);
-    await this._ensureCrdtInitialized(oldPath);
+    if (isText) {
+      if (!(await this.docManager.hasDocState(oldPath))) return false;
+      await this._flushPendingLocalTextChange(oldPath);
+      await this._ensureCrdtInitialized(oldPath);
+    }
     const oldHash = await computeFileHash(await this.vault.readBinary(file));
 
     const target = this.vault.getAbstractFileByPath(newPath);
@@ -1412,13 +1437,23 @@ export class SyncCoordinator {
       await this.vault.rename(file, newPath);
       this.knownHashes.set(oldPath, oldHash);
       await this._recordRename(oldPath, newPath);
-      await this.docManager.renameDoc(oldPath, newPath);
-      // Fetch the peer's changes to the renamed note.
-      const ourState = await this.docManager.encodeSyncStep1(newPath);
-      this.connectionManager.sendTo(
-        deviceId,
-        encodeYjsSync(MessageType.YJS_SYNC_STEP1, newPath, ourState),
-      );
+      if (isText) {
+        await this.docManager.renameDoc(oldPath, newPath);
+        // Fetch the peer's changes to the renamed note.
+        const ourState = await this.docManager.encodeSyncStep1(newPath);
+        this.connectionManager.sendTo(
+          deviceId,
+          encodeYjsSync(MessageType.YJS_SYNC_STEP1, newPath, ourState),
+        );
+      }
+    } else if (!isText) {
+      // An attachment is only dropped when the new name holds the same file.
+      if (!(target instanceof TFile)) return false;
+      if ((await computeFileHash(await this.vault.readBinary(target))) !== oldHash) return false;
+      this.watcher.markRemoteWrite(oldPath, "delete");
+      await this.vault.delete(file);
+      this.tombstones.add(oldPath, oldHash, undefined, newPath);
+      this.knownHashes.delete(oldPath);
     } else {
       if (!(target instanceof TFile)) return false;
       await this._flushPendingLocalTextChange(newPath);

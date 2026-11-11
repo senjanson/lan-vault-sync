@@ -727,6 +727,30 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     }
   });
 
+  it('keeps one copy when two devices renamed the same file to different names', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports(), ids = ['aaaa', 'bbbb'];
+    seed(ra, { 'r.md': 'r\n', 'p.png': Buffer.from([1, 2, 3]) });
+    let [A, B] = await phase([ra, rb], ids, pa, true);
+    await sleep(2000);
+    expect(B.vault.text('r.md')).toBe('r\n');
+    [A, B] = await phase([ra, rb], ids, pa, false);
+    await A.vault.mv('r.md', 'r-a.md');
+    await A.vault.mv('p.png', 'p-a.png');
+    await sleep(20);
+    // B renames later, so its names win.
+    await B.vault.mv('r.md', 'r-b.md');
+    await B.vault.write('r-b.md', 'r\nedited on B\n');
+    await B.vault.mv('p.png', 'p-b.png');
+    await sleep(800);
+    [A, B] = await phase([ra, rb], ids, pa, true);
+    await sleep(4000);
+    for (const [r, n] of [[ra, A], [rb, B]] as const) {
+      expect(notes(r)).toEqual(['p-b.png', 'r-b.md']);
+      expect(n.vault.text('r-b.md')).toBe('r\nedited on B\n');
+    }
+  });
+
   it('moves offline edits from two devices to the new name, with three devices', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
     const pa = ports(), ids = ['aaaa', 'bbbb', 'cccc'];
