@@ -203,6 +203,7 @@ describe('SyncCoordinator text conflict safety', () => {
     (coordinator as any).connectionManager = { sendTo };
     (coordinator as any).docManager = {
       removeDoc: vi.fn().mockResolvedValue(undefined),
+      hasDocState: vi.fn().mockResolvedValue(false),
     };
     buildSpy.mockResolvedValueOnce({
       files: new Map([

@@ -395,6 +395,28 @@ describe('e2e offline deletes', { timeout: 30000 }, () => {
     expect(B.vault.bin('b.png')?.toString('hex')).toBe('040506');
   });
 
+  it('applies a note deletion made while sync was not running', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports();
+    let { A, B } = await pair(ra, rb, pa);
+    await sleep(1500);
+    await A.vault.write('gone.md', 'delete me');
+    await A.vault.write('edited.md', 'v1');
+    await sleep(800);
+    expect(B.vault.text('gone.md')).toBe('delete me');
+    await B.coord.stop();
+    nodes = nodes.filter((n) => n !== B);
+    // Deleted outside the plugin, e.g. while the app was closed.
+    fs.rmSync(path.join(rb, 'gone.md'));
+    fs.rmSync(path.join(rb, 'edited.md'));
+    await A.vault.write('edited.md', 'v1 edited on A');
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(2500);
+    expect(A.vault.exists('gone.md')).toBe(false);
+    expect(B.vault.exists('gone.md')).toBe(false);
+    expect(B.vault.text('edited.md')).toBe('v1 edited on A');
+  });
+
   it('keeps an offline edit when the deleting peer restarted before deleting', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     const pa = ports();

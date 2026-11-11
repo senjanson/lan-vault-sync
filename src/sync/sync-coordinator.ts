@@ -7,6 +7,7 @@ import {
   decodeYjsSync,
   encodeFileMetaSync,
   encodeFolderOp,
+  encodeFileDelete,
   decodeJSON,
 } from "../transport/protocol";
 import { YjsDocManager } from "../crdt/yjs-doc-manager";
@@ -633,6 +634,18 @@ export class SyncCoordinator {
       const file = this.vault.getAbstractFileByPath(filePath);
       const isExistingFile = file instanceof TFile;
 
+      // A peer that has not yet seen our deletion may still send the note
+      // as it was when we deleted it; that must not bring it back.
+      const tombstone = this.tombstones.get(filePath);
+      if (
+        !isExistingFile &&
+        tombstone?.hash &&
+        tombstone.hash === (await this._hashText(latestContent))
+      ) {
+        logger.debug(`Not restoring deleted note: ${filePath}`);
+        return;
+      }
+
       // A file open in an editor is updated in the editor, which Obsidian
       // then saves. Writing the file underneath a dirty editor made Obsidian
       // merge the disk change into the editor a second time, duplicating the
@@ -843,6 +856,13 @@ export class SyncCoordinator {
       const ownTombstone = this.tombstones.get(file.path);
       if (ownTombstone && TombstoneStore.covers(ownTombstone, file)) {
         this._emitEvent(`Skipping deleted file: ${file.path}`);
+        continue;
+      }
+      // Synced here before (its CRDT state is kept) but the file is gone:
+      // it was deleted while sync was not running, e.g. with the app closed.
+      if (file.isTextFile && !ownTombstone && (await this._wasDeletedWhileStopped(file))) {
+        this.connectionManager.sendTo(deviceId, encodeFileDelete({ path: file.path }));
+        this._emitEvent(`Deleted while sync was off: ${file.path}`);
         continue;
       }
       if (file.isTextFile && file.size === 0) {
@@ -1242,6 +1262,22 @@ export class SyncCoordinator {
     return folder.children.some((c) =>
       c instanceof TFolder ? this._holdsFiles(c) : true,
     );
+  }
+
+  /**
+   * Whether a note the peer has was synced here and then deleted while sync
+   * was not running, with the peer's copy unchanged since. Records the
+   * deletion if so. A peer copy edited since is fetched again instead.
+   */
+  private async _wasDeletedWhileStopped(file: FileMeta): Promise<boolean> {
+    if (this.vault.getAbstractFileByPath(file.path)) return false;
+    if (!(await this.docManager.hasDocState(file.path))) return false;
+    const content = await this.docManager.getContent(file.path);
+    const hash = await this._hashText(content);
+    if (hash !== file.hash) return false;
+    this.tombstones.add(file.path, hash);
+    await this.docManager.removeDoc(file.path);
+    return true;
   }
 
   private async _primeKnownHashes(): Promise<void> {
