@@ -969,6 +969,14 @@ export class SyncCoordinator {
             // content before overwriting.
             this.watcher.consumePendingModify(local.path);
             this._addConflictLoserGuard(local.path, deviceId);
+            // Keep our version as a visible copy next to it, which then
+            // syncs like any new note, so neither side's note disappears.
+            if (localFile instanceof TFile) {
+              await this._createConflictCopy(
+                local.path,
+                await this.vault.cachedRead(localFile),
+              );
+            }
             this._emitEvent(`Waiting for conflict winner: ${local.path}`);
           }
         }
@@ -1407,17 +1415,44 @@ export class SyncCoordinator {
     filePath: string,
     update: Uint8Array,
   ): Promise<void> {
+    const file = this.vault.getAbstractFileByPath(filePath);
+    const before = file instanceof TFile ? await this.vault.read(file) : "";
     const result = await this.docManager.applyFullState(filePath, update, deviceId);
     if (result === "kept-local") {
       // Our doc wins; send it so the peer adopts it.
       await this._sendFullTextState(deviceId, filePath, "Resolving unrelated history");
     } else if (result === "adopted") {
+      // The note we had came from another history and is now replaced.
+      if (before !== (await this.docManager.getContent(filePath))) {
+        await this._createConflictCopy(filePath, before);
+      }
       // Other peers may still hold the history we just dropped.
       for (const peerId of this.connectionManager.getConnectedPeerIds()) {
         if (peerId !== deviceId) {
           await this._sendFullTextState(peerId, filePath, "Sharing adopted history");
         }
       }
+    }
+  }
+
+  /**
+   * Keep a version of a note that lost a conflict as "name (conflict 1a2b3c).ext".
+   * The suffix comes from the content, so devices that keep the same version
+   * create the same file instead of one copy each.
+   */
+  private async _createConflictCopy(filePath: string, content: string): Promise<void> {
+    if (!content) return;
+    const slash = filePath.lastIndexOf("/");
+    const dot = filePath.lastIndexOf(".");
+    const extAt = dot > slash ? dot : filePath.length;
+    const hash = await computeFileHash(new TextEncoder().encode(content).buffer as ArrayBuffer);
+    const copyPath = `${filePath.slice(0, extAt)} (conflict ${hash.slice(0, 6)})${filePath.slice(extAt)}`;
+    if (this.vault.getAbstractFileByPath(copyPath)) return;
+    try {
+      await this.vault.create(copyPath, content);
+      this._emitEvent(`Kept the other version as ${copyPath}`);
+    } catch (err) {
+      logger.warn(`Could not create conflict copy for ${filePath}:`, err);
     }
   }
 

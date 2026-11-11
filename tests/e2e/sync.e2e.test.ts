@@ -320,6 +320,42 @@ describe('e2e unrelated histories', { timeout: 30000 }, () => {
     await sleep(1500);
     for (const n of all) expect(n.vault.text('base.md')).toBe('same\nfrom C\n');
   });
+
+  it('keeps both versions when two devices created the same note apart', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'plan.md': 'from A\n' });
+    seed(rb, { 'plan.md': 'from B\n' });
+    const pa = ports(), pb = pa + 1;
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pb, [pa]));
+    await sleep(3500);
+    const notes = (root: string) => fs.readdirSync(root).filter((f) => f.endsWith('.md')).sort();
+    expect(notes(ra)).toEqual(notes(rb));
+    expect(notes(ra)).toHaveLength(2);
+    const texts = notes(ra).map((f) => A.vault.text(f)).sort();
+    expect(texts).toEqual(['from A\n', 'from B\n']);
+    for (const f of notes(ra)) expect(B.vault.text(f)).toBe(A.vault.text(f));
+  });
+
+  it('keeps both versions of a note created apart on two of three devices', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+    seed(ra, { 'plan.md': 'from A\n' });
+    seed(rb, { 'plan.md': 'from B\n' });
+    const pa = ports(), pb = pa + 1, pc = pa + 2;
+    const all = await Promise.all([
+      startNode(ra, 'aaaa', pa, [pb, pc]),
+      startNode(rb, 'bbbb', pb, [pa, pc]),
+      startNode(rc, 'cccc', pc, [pa, pb]),
+    ]);
+    all.forEach(track);
+    await sleep(5000);
+    const roots = [ra, rb, rc];
+    const notes = (root: string) => fs.readdirSync(root).filter((f) => f.endsWith('.md')).sort();
+    for (const r of roots) expect(notes(r)).toEqual(notes(ra));
+    const texts = new Set(notes(ra).map((f) => all[0].vault.text(f)));
+    expect([...texts].sort()).toEqual(['from A\n', 'from B\n']);
+    for (const n of all) expect(n.vault.text('plan.md')).toBe(all[0].vault.text('plan.md'));
+  });
 });
 
 describe('e2e offline deletes', { timeout: 30000 }, () => {
