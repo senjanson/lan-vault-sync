@@ -375,6 +375,29 @@ describe('e2e offline deletes', { timeout: 30000 }, () => {
     expect(B.vault.text('n.md')).toBe('v1 edited on A');
     expect(B.vault.bin('b.png')?.toString('hex')).toBe('040506');
   });
+
+  it('keeps an offline edit when the deleting peer restarted before deleting', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports();
+    let { A, B } = await pair(ra, rb, pa);
+    await sleep(1500);
+    await A.vault.write('n.md', 'v1');
+    await sleep(800);
+    expect(B.vault.text('n.md')).toBe('v1');
+    await A.coord.stop();
+    await B.coord.stop();
+    nodes = [];
+    // B restarts while A is away, then deletes; A had edited before that.
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    seed(ra, { 'n.md': 'v1 edited on A' });
+    await sleep(500);
+    await B.vault.rm('n.md');
+    await sleep(300);
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    await sleep(2500);
+    expect(A.vault.text('n.md')).toBe('v1 edited on A');
+    expect(B.vault.text('n.md')).toBe('v1 edited on A');
+  });
 });
 
 describe('e2e idle traffic', { timeout: 30000 }, () => {

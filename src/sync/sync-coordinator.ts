@@ -170,6 +170,9 @@ export class SyncCoordinator {
 
       // Start watching vault
       this.watcher.start();
+      // Learn every file's hash in the background, so a deletion made
+      // before the first connection still records what was deleted.
+      void this._primeKnownHashes();
 
       // Start periodic full sync
       if (this.settings.syncIntervalMs > 0) {
@@ -1114,6 +1117,18 @@ export class SyncCoordinator {
     const tree = await buildFileTree(this.vault, this.filter);
     for (const [path, meta] of tree.files) this.knownHashes.set(path, meta.hash);
     return tree;
+  }
+
+  private async _primeKnownHashes(): Promise<void> {
+    try {
+      const tree = await buildFileTree(this.vault, this.filter);
+      for (const [path, meta] of tree.files) {
+        // A change seen meanwhile already recorded a newer hash.
+        if (!this.knownHashes.has(path)) this.knownHashes.set(path, meta.hash);
+      }
+    } catch (err) {
+      logger.warn("Could not read file hashes at start:", err);
+    }
   }
 
   private _encodeTree(files: FileMeta[], isResponse?: boolean): Uint8Array {
