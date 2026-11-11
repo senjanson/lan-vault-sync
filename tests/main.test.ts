@@ -11,10 +11,11 @@ vi.mock('../src/conflict/conflict-backup-service', () => ({ ConflictBackupServic
 
 import LANSyncPlugin from '../src/main';
 
-function createPlugin(): LANSyncPlugin {
+function createPlugin(layoutReady: Array<() => void> | null = null): LANSyncPlugin {
   const plugin = new (LANSyncPlugin as any)() as LANSyncPlugin;
+  const onLayoutReady = (cb: () => void) => (layoutReady ? layoutReady.push(cb) : cb());
   Object.assign(plugin as any, {
-    app: { vault: {}, workspace: {} },
+    app: { vault: {}, workspace: { onLayoutReady } },
     loadData: async () => ({}),
     saveData: async () => undefined,
     registerView: () => undefined,
@@ -35,5 +36,19 @@ describe('plugin lifecycle', () => {
     vi.advanceTimersByTime(5000);
     vi.useRealTimers();
     expect(startSync).not.toHaveBeenCalled();
+  });
+
+  it('starts sync only after Obsidian has finished loading the vault', async () => {
+    vi.useFakeTimers();
+    const ready: Array<() => void> = [];
+    const plugin = createPlugin(ready);
+    const startSync = vi.spyOn(plugin, 'startSync').mockResolvedValue(undefined);
+    await plugin.onload();
+    vi.advanceTimersByTime(5000);
+    expect(startSync).not.toHaveBeenCalled();
+    ready.forEach((cb) => cb());
+    vi.advanceTimersByTime(2500);
+    vi.useRealTimers();
+    expect(startSync).toHaveBeenCalledTimes(1);
   });
 });

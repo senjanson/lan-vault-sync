@@ -47,6 +47,7 @@ export default class LANSyncPlugin extends Plugin {
   /** Last notice time per refused address, so retries don't spam notices. */
   private authNoticeAt = new Map<string, number>();
   private startTimer: ReturnType<typeof setTimeout> | null = null;
+  private unloaded = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -156,14 +157,20 @@ export default class LANSyncPlugin extends Plugin {
       // Delay to let Obsidian finish loading
       // Cleared on unload, so disabling the plugin right after enabling it
       // does not leave a sync server running.
-      this.startTimer = setTimeout(() => {
-        this.startTimer = null;
-        void this.startSync();
-      }, 2000);
+      // Wait for the layout: until then Obsidian reports every existing file
+      // as newly created, which would be taken for local changes.
+      this.app.workspace.onLayoutReady(() => {
+        if (this.unloaded) return;
+        this.startTimer = setTimeout(() => {
+          this.startTimer = null;
+          void this.startSync();
+        }, 2000);
+      });
     }
   }
 
   async onunload(): Promise<void> {
+    this.unloaded = true;
     if (this.startTimer) {
       clearTimeout(this.startTimer);
       this.startTimer = null;
