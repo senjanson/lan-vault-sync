@@ -57,6 +57,8 @@ export class SyncCoordinator {
     string,
     { newPath: string; expiresAt: number }
   >();
+  /** Text we last wrote to disk for a remote change, to recognise its echo. */
+  private remoteWrittenText = new Map<string, string>();
   private vaultId: string;
   private syncLogService: SyncLogService | null;
 
@@ -446,9 +448,10 @@ export class SyncCoordinator {
             typeof event.content === "string"
               ? event.content
               : await this._readTextFile(path);
-          if (content !== null) {
-            await this.docManager.applyLocalChange(path, content);
+          if (content === null || this._isEchoOfRemoteWrite(path, content)) {
+            break;
           }
+          await this.docManager.applyLocalChange(path, content);
         } else {
           await this.binarySync.broadcastFileChange(path);
         }
@@ -560,6 +563,7 @@ export class SyncCoordinator {
       }
 
       this.watcher.markRemoteWrite(filePath);
+      this.remoteWrittenText.set(filePath, latestContent);
 
       if (file instanceof TFile) {
         await this.vault.modify(file, latestContent);
@@ -819,12 +823,17 @@ export class SyncCoordinator {
   private async _flushPendingLocalTextChange(
     filePath: string,
   ): Promise<boolean> {
-    if (!this.watcher.consumePendingModify(filePath)) {
+    const pending = this.watcher.takePendingModify(filePath);
+    if (!pending) {
       return false;
     }
 
-    const content = await this._readTextFile(filePath);
-    if (content === null) {
+    // Prefer the editor's content: it may not have been saved to disk yet.
+    const content =
+      typeof pending.content === "string"
+        ? pending.content
+        : await this._readTextFile(filePath);
+    if (content === null || this._isEchoOfRemoteWrite(filePath, content)) {
       return false;
     }
 
@@ -939,6 +948,19 @@ export class SyncCoordinator {
     }
 
     return this.vault.cachedRead(file);
+  }
+
+  /**
+   * True when `content` is what we last wrote for a remote change, i.e. the
+   * modify event is our own write coming back. Any other content is a real
+   * local edit; from then on the remembered write no longer applies.
+   */
+  private _isEchoOfRemoteWrite(path: string, content: string): boolean {
+    const written = this.remoteWrittenText.get(path);
+    if (written === undefined) return false;
+    if (written === content) return true;
+    this.remoteWrittenText.delete(path);
+    return false;
   }
 
   private _rememberRemoteTextRename(oldPath: string, newPath: string): void {

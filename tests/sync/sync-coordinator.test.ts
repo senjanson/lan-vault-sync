@@ -132,6 +132,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     (coordinator as any).watcher = {
       consumePendingModify: vi.fn().mockReturnValue(true),
+      takePendingModify: vi.fn().mockReturnValue({}),
       markRemoteWrite,
     };
     (coordinator as any).docManager = {
@@ -171,6 +172,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     (coordinator as any).watcher = {
       consumePendingModify: vi.fn().mockReturnValue(true),
+      takePendingModify: vi.fn().mockReturnValue({}),
       markRemoteWrite,
     };
     (coordinator as any).docManager = {
@@ -303,6 +305,7 @@ describe('SyncCoordinator text conflict safety', () => {
     (coordinator as any).connectionManager = { sendTo };
     (coordinator as any).watcher = {
       consumePendingModify,
+      takePendingModify: vi.fn().mockReturnValue(null),
       markRemoteWrite: vi.fn(),
     };
     (coordinator as any).backupService = {

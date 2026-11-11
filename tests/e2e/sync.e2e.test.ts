@@ -206,3 +206,22 @@ describe('e2e long names', { timeout: 30000 }, () => {
     expect(B.vault.text(long)).toBe('L1 A\nL2\nL3 B\nL4\n');
   });
 });
+
+describe('e2e edits right after a remote write', { timeout: 30000 }, () => {
+  it('syncs a local edit made within seconds of receiving a remote change', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'n.md': 'L1\nL2\nL3\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(1500);
+    await A.vault.write('n.md', 'L1 A\nL2\nL3\n');
+    await sleep(500); // B has just written A's change
+    await B.vault.write('n.md', 'L1 A\nL2\nL3 B\n');
+    await sleep(1000);
+    expect(A.vault.text('n.md')).toBe('L1 A\nL2\nL3 B\n');
+    await A.vault.write('n.md', 'L1 A\nL2 A\nL3 B\n');
+    await sleep(800);
+    expect(B.vault.text('n.md')).toBe('L1 A\nL2 A\nL3 B\n');
+  });
+});

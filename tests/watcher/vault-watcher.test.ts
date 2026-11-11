@@ -95,15 +95,28 @@ describe("VaultWatcher", () => {
     });
   });
 
-  it("suppresses both editor and vault events for remote writes", () => {
+  it("lets text edits through after a remote write", () => {
+    // The coordinator recognises echoes of its own writes by content, so a
+    // real edit typed right after a remote write must still reach it.
     const file = createFile("note.md");
     const editor = {
-      getValue: () => "remote content",
+      getValue: () => "typed after remote write",
     };
 
     watcher.markRemoteWrite("note.md");
     workspace.trigger("editor-change", editor, { file });
+    vi.advanceTimersByTime(DEBOUNCE_MS);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].content).toBe("typed after remote write");
+  });
+
+  it("still suppresses non-text events for remote writes", () => {
+    const file = createFile("image.png");
+
+    watcher.markRemoteWrite("image.png");
     vault.trigger("modify", file);
+    vault.trigger("create", file);
     vi.advanceTimersByTime(DEBOUNCE_MS);
 
     expect(events).toHaveLength(0);

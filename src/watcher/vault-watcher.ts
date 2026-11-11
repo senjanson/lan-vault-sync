@@ -61,12 +61,22 @@ export class VaultWatcher {
    * on-disk content immediately before applying a remote change.
    */
   consumePendingModify(filePath: string): boolean {
+    return this.takePendingModify(filePath) !== null;
+  }
+
+  /**
+   * Like consumePendingModify, but also returns the pending event's editor
+   * content (when the change came from the editor and may not be saved yet).
+   */
+  takePendingModify(filePath: string): { content?: string } | null {
     const timer = this.debounceTimers.get(filePath);
-    if (!timer) return false;
+    if (!timer) return null;
 
     clearTimeout(timer);
     this.debounceTimers.delete(filePath);
-    return true;
+    const pending = this.pendingModifyEvents.get(filePath);
+    this.pendingModifyEvents.delete(filePath);
+    return { content: pending?.content };
   }
 
   start(): void {
@@ -117,8 +127,11 @@ export class VaultWatcher {
     if (this.filter.shouldIgnore(path)) return;
     if (oldPath && this.filter.shouldIgnore(oldPath)) return;
 
-    // Check if this is a remote write
-    if (this._isRemoteWrite(path)) {
+    // Skip events caused by our own remote writes. Text modifications are
+    // let through: the coordinator recognises its own writes by content, so
+    // a real edit made right after a remote write is not lost.
+    const isTextModify = type === "modify" && this.filter.isTextFile(path);
+    if (!isTextModify && this._isRemoteWrite(path)) {
       logger.debug(`Skipping remote write event: ${path}`);
       return;
     }
@@ -140,11 +153,6 @@ export class VaultWatcher {
 
     const path = file.path;
     if (this.filter.shouldIgnore(path) || !this.filter.isTextFile(path)) return;
-
-    if (this._isRemoteWrite(path)) {
-      logger.debug(`Skipping remote editor change: ${path}`);
-      return;
-    }
 
     this._queueModify(path, undefined, editor.getValue(), "editor");
   }
