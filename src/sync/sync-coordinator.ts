@@ -1501,7 +1501,30 @@ export class SyncCoordinator {
     const oldHash = await computeFileHash(await this.vault.readBinary(file));
 
     const target = this.vault.getAbstractFileByPath(newPath);
-    if (!target) {
+    // The peer's text for the new name may have arrived before its file is
+    // written. Our file must not take that name then: the pending write
+    // would put the peer's text over it, without our edits.
+    const peerDocArrived = isText && !target && (await this.docManager.hasDocState(newPath));
+    if (isText && (target || peerDocArrived)) {
+      if (target && (!(target instanceof TFile) || target === file)) return false;
+      if (target) {
+        await this._flushPendingLocalTextChange(newPath);
+        await this._ensureCrdtInitialized(newPath);
+      }
+      const merged = await this.docManager.absorbDoc(oldPath, newPath);
+      if (!merged) return false;
+      if (!target) {
+        const slash = newPath.lastIndexOf("/");
+        if (slash > 0) await this._createFolderFromRemote(newPath.slice(0, slash));
+      }
+      await this._writeFileFromRemote(newPath, merged.content, merged.previousContent);
+      if (file.path !== oldPath) return false;
+      this.watcher.markRemoteWrite(oldPath, "delete");
+      await this.vault.delete(file);
+      this.tombstones.add(oldPath, oldHash, undefined, newPath);
+      this.knownHashes.delete(oldPath);
+      await this.docManager.removeDoc(oldPath);
+    } else if (!target) {
       const slash = newPath.lastIndexOf("/");
       if (slash > 0) await this._createFolderFromRemote(newPath.slice(0, slash));
       if (file.path !== oldPath) return false;
@@ -1518,7 +1541,7 @@ export class SyncCoordinator {
           encodeYjsSync(MessageType.YJS_SYNC_STEP1, newPath, ourState),
         );
       }
-    } else if (!isText) {
+    } else {
       // An attachment is only dropped when the new name holds the same file.
       if (!(target instanceof TFile)) return false;
       if ((await computeFileHash(await this.vault.readBinary(target))) !== oldHash) return false;
@@ -1527,19 +1550,6 @@ export class SyncCoordinator {
       await this.vault.delete(file);
       this.tombstones.add(oldPath, oldHash, undefined, newPath);
       this.knownHashes.delete(oldPath);
-    } else {
-      if (!(target instanceof TFile) || target === file) return false;
-      await this._flushPendingLocalTextChange(newPath);
-      await this._ensureCrdtInitialized(newPath);
-      const merged = await this.docManager.absorbDoc(oldPath, newPath);
-      if (!merged) return false;
-      await this._writeFileFromRemote(newPath, merged.content, merged.previousContent);
-      if (file.path !== oldPath) return false;
-      this.watcher.markRemoteWrite(oldPath, "delete");
-      await this.vault.delete(file);
-      this.tombstones.add(oldPath, oldHash, undefined, newPath);
-      this.knownHashes.delete(oldPath);
-      await this.docManager.removeDoc(oldPath);
     }
     // Peers may already have fetched our copy under the old name. Only that
     // exact copy is removed; another device's edited copy is kept and moved
