@@ -219,6 +219,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
               .map((s) => s.trim())
               .filter(Boolean);
             await this.plugin.saveSettings();
+            this.plugin.applyIgnoredPaths();
           }),
       );
 

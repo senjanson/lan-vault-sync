@@ -27,6 +27,7 @@ import {
 import { logger } from "../logger";
 import { ensureParentDirectory, isSafeSyncPath } from "../utils/path-utils";
 import { supportsIncomingConnections } from "../utils/runtime";
+import { parsePeerAddress } from "../discovery/manual-peers";
 
 export class SyncCoordinator {
   private static readonly REMOTE_TEXT_RENAME_ALIAS_TTL_MS = 10_000;
@@ -197,6 +198,20 @@ export class SyncCoordinator {
 
   addManualPeer(address: string): void {
     this.discovery.addManualPeer(address, this.vaultId);
+  }
+
+  /** Forget a manual peer and drop its connection right away. */
+  removeManualPeer(address: string): void {
+    const parsed = parsePeerAddress(address);
+    if (!parsed) return;
+    this.discovery.removeManualPeer(address);
+    this.connectionManager.disconnectAddress(parsed.ip, parsed.port);
+  }
+
+  /** Apply edited ignored paths without restarting sync. */
+  updateIgnoredPaths(paths: string[]): void {
+    this.filter.updateIgnoredPaths(paths);
+    this.watcher.updateIgnoredPaths(paths);
   }
 
   // ─── Private: Wire up callbacks ─────────────────────────

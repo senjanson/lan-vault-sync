@@ -160,3 +160,24 @@ describe('e2e ignored paths', { timeout: 30000 }, () => {
     expect(types).not.toContain(MessageType.YJS_SYNC_STEP2);
   });
 });
+
+describe('e2e settings changes', { timeout: 30000 }, () => {
+  it('applies new ignored paths and peer removal without a restart', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports(), pb = pa + 1;
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pb, [pa]));
+    await sleep(1200);
+    A.coord.updateIgnoredPaths(['.obsidian/', '.trash/', 'drafts/']);
+    await B.vault.write('drafts/d.md', 'draft');
+    await B.vault.write('ok.md', 'ok');
+    await sleep(800);
+    expect(A.vault.text('ok.md')).toBe('ok');
+    expect(A.vault.text('drafts/d.md')).toBeNull();
+
+    B.coord.removeManualPeer(`127.0.0.1:${pa}`);
+    await sleep(2500);
+    expect(B.coord.getConnectedDevices()).toEqual([]);
+    expect(A.coord.getConnectedDevices()).toEqual([]);
+  });
+});

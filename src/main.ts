@@ -204,6 +204,12 @@ export default class LANSyncPlugin extends Plugin {
 
     this.settings.manualPeers = nextPeers;
     await this.saveSettings();
+    this.coordinator?.removeManualPeer(normalized);
+  }
+
+  /** Push edited ignored paths to the running sync service. */
+  applyIgnoredPaths(): void {
+    this.coordinator?.updateIgnoredPaths(this.settings.ignoredPaths);
   }
 
   async startSync(): Promise<void> {

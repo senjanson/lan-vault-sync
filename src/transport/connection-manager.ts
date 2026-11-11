@@ -150,6 +150,17 @@ export class ConnectionManager {
     client.connect();
   }
 
+  /** Stop connecting to an address and close outbound connections to it. */
+  disconnectAddress(ip: string, port: number): void {
+    const client = this.clients.get(`ws://${ip}:${port}`);
+    if (client) this._retireClient(client);
+    for (const peer of this.peers.values()) {
+      if (peer.direction === 'outbound' && peer.ip === ip && peer.port === port) {
+        peer.ws.close();
+      }
+    }
+  }
+
   /** Send raw bytes to a specific peer */
   sendTo(deviceId: string, data: Uint8Array): void {
     const peer = this.peers.get(deviceId);

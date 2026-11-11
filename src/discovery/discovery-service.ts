@@ -1,7 +1,7 @@
 import { DeviceInfo, LANSyncSettings } from '../types';
 import { DEVICE_TIMEOUT_MS } from '../constants';
 import { UdpBroadcast } from './udp-broadcast';
-import { ManualPeers } from './manual-peers';
+import { ManualPeers, parsePeerAddress } from './manual-peers';
 import { logger } from '../logger';
 
 export class DiscoveryService {
@@ -58,7 +58,9 @@ export class DiscoveryService {
   }
 
   removeManualPeer(address: string): void {
+    const parsed = parsePeerAddress(address);
     this.manual.removePeer(address);
+    if (parsed) this.devices.delete(`manual-${parsed.ip}-${parsed.port}`);
   }
 
   private _handleDeviceSeen(device: DeviceInfo): void {
