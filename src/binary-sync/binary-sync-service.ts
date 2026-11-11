@@ -37,6 +37,8 @@ interface IncomingFile {
 export class BinaryFileSyncService {
   /** Chunked files being received, keyed by `${deviceId}\n${path}`. */
   private incoming = new Map<string, IncomingFile>();
+  private onRemoteFileStoredCb: ((path: string, hash: string) => void) | null =
+    null;
   private onRemoteFileWrittenCb:
     | ((path: string, kind?: "write" | "delete" | "rename") => void)
     | null = null;
@@ -57,6 +59,11 @@ export class BinaryFileSyncService {
     private isAllowedPath: (path: string) => boolean = isSafeSyncPath,
     private isTextPath: (path: string) => boolean = () => false,
   ) {}
+
+  /** Called with the content hash once a peer's file has been written. */
+  onRemoteFileStored(cb: (path: string, hash: string) => void): void {
+    this.onRemoteFileStoredCb = cb;
+  }
 
   onRemoteFileWritten(
     cb: (path: string, kind?: "write" | "delete" | "rename") => void,
@@ -313,6 +320,7 @@ export class BinaryFileSyncService {
         }
         await this.vault.createBinary(path, toExactArrayBuffer(content));
       }
+      this.onRemoteFileStoredCb?.(path, await computeFileHash(toExactArrayBuffer(content)));
       logger.debug(`Received binary file: ${path}`);
     } catch (err) {
       logger.error(`Failed to write binary file ${path}:`, err);

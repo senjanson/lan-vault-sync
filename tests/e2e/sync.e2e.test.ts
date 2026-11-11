@@ -350,6 +350,31 @@ describe('e2e offline deletes', { timeout: 30000 }, () => {
     expect(A.vault.text('n.md')).toBe('v1 edited later');
     expect(B.vault.text('n.md')).toBe('v1 edited later');
   });
+
+  it('keeps an offline edit made before a peer deleted its synced copy', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports();
+    let { A, B } = await pair(ra, rb, pa);
+    await sleep(1500);
+    // Created while connected, so B only knows these from the live updates.
+    await A.vault.write('n.md', 'v1');
+    await A.vault.writeBin('b.png', Buffer.from([1, 2, 3]));
+    await sleep(800);
+    expect(B.vault.text('n.md')).toBe('v1');
+    await A.coord.stop();
+    nodes = nodes.filter((n) => n !== A);
+    // A edits while apart; B deletes the copies it received, a bit later.
+    seed(ra, { 'n.md': 'v1 edited on A', 'b.png': Buffer.from([4, 5, 6]) });
+    await sleep(50);
+    await B.vault.rm('n.md');
+    await B.vault.rm('b.png');
+    await sleep(300);
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    await sleep(2500);
+    expect(A.vault.text('n.md')).toBe('v1 edited on A');
+    expect(B.vault.text('n.md')).toBe('v1 edited on A');
+    expect(B.vault.bin('b.png')?.toString('hex')).toBe('040506');
+  });
 });
 
 describe('e2e idle traffic', { timeout: 30000 }, () => {

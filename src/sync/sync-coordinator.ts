@@ -320,6 +320,10 @@ export class SyncCoordinator {
       if (kind !== "delete") this.tombstones.clear(path);
     });
 
+    this.binarySync.onRemoteFileStored((path, hash) => {
+      this.knownHashes.set(path, hash);
+    });
+
     this.binarySync.onRemoteFileDeleted(async (path) => {
       // Remember the deletion too, for peers that are offline right now.
       this.tombstones.add(path, this.knownHashes.get(path));
@@ -654,7 +658,7 @@ export class SyncCoordinator {
         // Disk already has this content (e.g. bootstrapping shared CRDT state
         // for identical files). Rewriting would only bump the mtime, which
         // conflict resolution relies on.
-        this.docManager.markWritten(filePath, latestContent);
+        await this._markWritten(filePath, latestContent);
         this._clearConflictLoserGuard(filePath);
         return;
       }
@@ -672,7 +676,7 @@ export class SyncCoordinator {
         await this.vault.create(filePath, latestContent);
         this.watcher.markRemoteWrite(filePath);
       }
-      this.docManager.markWritten(filePath, latestContent);
+      await this._markWritten(filePath, latestContent);
 
       // Sync log entry
       if (this.syncLogService && contentChanged) {
@@ -752,7 +756,7 @@ export class SyncCoordinator {
         }
         editor.transaction({ changes });
       }
-      this.docManager.markWritten(filePath, latest);
+      await this._markWritten(filePath, latest);
       return true;
     }
     logger.warn(`Editor for ${filePath} kept changing; writing to disk instead`);
@@ -1117,6 +1121,16 @@ export class SyncCoordinator {
     return encodeFileMetaSync(
       isResponse ? { files, deleted, isResponse: true } : { files, deleted },
     );
+  }
+
+  /**
+   * Record text written from a peer: the editor baseline for local edits,
+   * and the hash a later deletion records so offline peers can tell an
+   * unchanged copy (delete it) from one edited meanwhile (keep it).
+   */
+  private async _markWritten(filePath: string, content: string): Promise<void> {
+    this.docManager.markWritten(filePath, content);
+    this.knownHashes.set(filePath, await this._hashText(content));
   }
 
   private async _hashText(content: string): Promise<string> {
