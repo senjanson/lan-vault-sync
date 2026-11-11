@@ -3,12 +3,17 @@ import * as Y from 'yjs';
 import diff from 'fast-diff';
 import { DocPool } from './doc-pool';
 import { StatePersistence } from './state-persistence';
-import { applyDiffToYText } from './text-diff';
+import { applyDiffToYText, applyRebasedEdit } from './text-diff';
 import { logger } from '../logger';
 
 export class YjsDocManager {
   private pool: DocPool;
   private persistence: StatePersistence;
+  /**
+   * The text the file on disk (or its open editor) is known to hold. Local
+   * edits are diffed against this, not against the doc, which may already
+   * contain peer changes that have not reached the editor yet.
+   */
   private lastKnownContent = new Map<string, string>();
   private pendingDocs = new Map<string, Promise<Y.Doc>>();
   private operationQueues = new Map<string, Promise<void>>();
@@ -140,21 +145,7 @@ export class YjsDocManager {
 
       if (oldContent === newContent) return;
 
-      doc.transact(() => {
-        const diffs = diff(oldContent, newContent);
-        let index = 0;
-        for (const [op, text] of diffs) {
-          if (op === diff.EQUAL) {
-            index += text.length;
-          } else if (op === diff.INSERT) {
-            ytext.insert(index, text);
-            index += text.length;
-          } else if (op === diff.DELETE) {
-            ytext.delete(index, text.length);
-          }
-        }
-      }, 'local');
-
+      applyRebasedEdit(ytext, oldContent, newContent, 'local');
       this.lastKnownContent.set(filePath, newContent);
     });
   }
@@ -168,10 +159,7 @@ export class YjsDocManager {
       const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, update, remoteOrigin(fromDeviceId));
 
-      const ytext = doc.getText('content');
-      const content = ytext.toString();
-      this.lastKnownContent.set(filePath, content);
-
+      const content = doc.getText('content').toString();
       return content !== previousContent ? { content, previousContent } : null;
     });
 
@@ -245,7 +233,6 @@ export class YjsDocManager {
       // them as a full state instead.
       Y.applyUpdate(doc, update, result === 'adopted' ? 'remote' : remoteOrigin(fromDeviceId));
       const content = doc.getText('content').toString();
-      this.lastKnownContent.set(filePath, content);
       if (result === 'adopted' || content !== previousContent) {
         change = {
           content,
@@ -306,10 +293,7 @@ export class YjsDocManager {
       const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, data, remoteOrigin(fromDeviceId));
 
-      // Update last known content
-      const ytext = doc.getText('content');
-      const content = ytext.toString();
-      this.lastKnownContent.set(filePath, content);
+      const content = doc.getText('content').toString();
       return content !== previousContent ? { content, previousContent } : null;
     });
 
@@ -399,12 +383,20 @@ export class YjsDocManager {
     });
   }
 
+  /** Record that the file (or its editor) now holds this text. */
+  markWritten(filePath: string, content: string): void {
+    this.lastKnownContent.set(filePath, content);
+  }
+
+  /** The text the file or its editor is known to hold, if recorded. */
+  getWrittenContent(filePath: string): string | undefined {
+    return this.lastKnownContent.get(filePath);
+  }
+
   async getContent(filePath: string): Promise<string> {
     return this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
-      const content = doc.getText('content').toString();
-      this.lastKnownContent.set(filePath, content);
-      return content;
+      return doc.getText('content').toString();
     });
   }
 

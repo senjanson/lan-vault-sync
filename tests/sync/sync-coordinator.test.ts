@@ -478,3 +478,53 @@ describe('SyncCoordinator text conflict safety', () => {
     expect((coordinator as any)._hasConflictLoserGuard('note.md')).toBe(false);
   });
 });
+
+describe('SyncCoordinator open editor writes', () => {
+  function fakeEditor(initial: string) {
+    let value = initial;
+    const offsetToPos = (offset: number) => offset;
+    return {
+      getValue: () => value,
+      offsetToPos,
+      transaction: vi.fn(({ changes }: { changes: Array<{ from: number; to?: number; text: string }> }) => {
+        for (const change of [...changes].sort((a, b) => b.from - a.from)) {
+          value = value.slice(0, change.from) + change.text + value.slice(change.to ?? change.from);
+        }
+      }),
+    };
+  }
+
+  it('applies a peer edit to the open editor instead of rewriting the file under unsaved typing', async () => {
+    const vault = new FakeVault();
+    vault.setText('note.md', 'L1\nL2\n');
+    const editor = fakeEditor('L1\nL2\n');
+    const workspace = {
+      on: vi.fn(),
+      offref: vi.fn(),
+      getLeavesOfType: () => [{ view: { file: { path: 'note.md' }, editor } }],
+    };
+    const coordinator = new SyncCoordinator(
+      vault as any,
+      { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] },
+      { workspace: workspace as any },
+    );
+    const docManager = (coordinator as any).docManager;
+    await docManager.applyLocalChange('note.md', 'L1\nL2\n');
+    docManager.markWritten('note.md', 'L1\nL2\n');
+
+    // A peer appends to line 2 while the user types on line 1 (not yet saved).
+    const peer = new (await import('yjs')).Doc();
+    const Y = await import('yjs');
+    Y.applyUpdate(peer, await docManager.encodeFullState('note.md'));
+    peer.getText('content').insert(5, ' B');
+    const update = Y.encodeStateAsUpdate(peer, await docManager.encodeSyncStep1('note.md'));
+    editor.transaction({ changes: [{ from: 2, text: ' C' }] });
+    const modify = vi.spyOn(vault, 'modify');
+
+    await docManager.applyRemoteUpdate('note.md', update, 'peer-1');
+
+    expect(modify).not.toHaveBeenCalled();
+    expect(editor.getValue()).toBe('L1 C\nL2 B\n');
+    expect(await docManager.getContent('note.md')).toBe('L1 C\nL2 B\n');
+  });
+});

@@ -1,5 +1,6 @@
 import { Vault, TFile, Workspace } from "obsidian";
 import * as Y from "yjs";
+import fastDiff from "fast-diff";
 import { AuthFailure, ConnectionManager } from "../transport/connection-manager";
 import {
   encodeYjsSync,
@@ -59,6 +60,7 @@ export class SyncCoordinator {
   >();
   /** Text we last wrote to disk for a remote change, to recognise its echo. */
   private remoteWrittenText = new Map<string, string>();
+  private workspace: Workspace | null;
   /** Files deleted here, so offline peers don't send them back. */
   private tombstones: TombstoneStore;
   /** Last seen content hash per path, recorded in a deletion record. */
@@ -96,6 +98,7 @@ export class SyncCoordinator {
       this.backupService,
       (path) => this._isAllowedPath(path),
     );
+    this.workspace = options?.workspace ?? null;
     this.watcher = new VaultWatcher(
       vault,
       settings.ignoredPaths,
@@ -587,6 +590,16 @@ export class SyncCoordinator {
         .catch(() => content);
       const file = this.vault.getAbstractFileByPath(filePath);
       const isExistingFile = file instanceof TFile;
+
+      // A file open in an editor is updated in the editor, which Obsidian
+      // then saves. Writing the file underneath a dirty editor made Obsidian
+      // merge the disk change into the editor a second time, duplicating the
+      // text that was just typed there (and sending the copy back out).
+      if (isExistingFile && (await this._writeToOpenEditor(filePath))) {
+        this._clearConflictLoserGuard(filePath);
+        return;
+      }
+
       let backupId: string | undefined;
       let contentChanged = !isExistingFile; // new file counts as changed
 
@@ -633,6 +646,7 @@ export class SyncCoordinator {
         // Disk already has this content (e.g. bootstrapping shared CRDT state
         // for identical files). Rewriting would only bump the mtime, which
         // conflict resolution relies on.
+        this.docManager.markWritten(filePath, latestContent);
         this._clearConflictLoserGuard(filePath);
         return;
       }
@@ -650,6 +664,7 @@ export class SyncCoordinator {
         await this.vault.create(filePath, latestContent);
         this.watcher.markRemoteWrite(filePath);
       }
+      this.docManager.markWritten(filePath, latestContent);
 
       // Sync log entry
       if (this.syncLogService && contentChanged) {
@@ -671,6 +686,69 @@ export class SyncCoordinator {
     } catch (err) {
       logger.error(`Failed to write remote content to ${filePath}:`, err);
     }
+  }
+
+  /** Editors (Obsidian Editor objects) currently showing this file. */
+  private _openEditors(filePath: string): any[] {
+    const leaves = this.workspace?.getLeavesOfType?.("markdown") ?? [];
+    const editors: any[] = [];
+    for (const leaf of leaves) {
+      const view = leaf.view as any;
+      if (view?.file?.path === filePath && view.editor) editors.push(view.editor);
+    }
+    return editors;
+  }
+
+  /**
+   * Bring an open editor up to date with the doc. Returns false when the file
+   * is not open in an editor.
+   */
+  private async _writeToOpenEditor(filePath: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const editor = this._openEditors(filePath)[0];
+      if (!editor) return false;
+
+      // Fold in anything typed since the last sync first. The edit is
+      // applied relative to what the editor last showed, so peer changes it
+      // has not shown yet are kept.
+      const current: string = editor.getValue();
+      const shown = this.docManager.getWrittenContent(filePath);
+      if (shown !== undefined && current !== shown) {
+        this.watcher.takePendingModify(filePath);
+        await this.docManager.applyLocalChange(filePath, current);
+      } else if (shown === undefined) {
+        this.docManager.markWritten(filePath, current);
+      }
+      const latest = await this.docManager.getContent(filePath);
+
+      // Typing during the awaits above is folded in on the next round.
+      if (editor.getValue() !== current) continue;
+      if (current !== latest) {
+        this.watcher.markRemoteWrite(filePath);
+        this.remoteWrittenText.set(filePath, latest);
+        let offset = 0;
+        const changes: Array<{ from: any; to?: any; text: string }> = [];
+        for (const [op, text] of fastDiff(current, latest)) {
+          if (op === fastDiff.EQUAL) {
+            offset += text.length;
+          } else if (op === fastDiff.DELETE) {
+            changes.push({
+              from: editor.offsetToPos(offset),
+              to: editor.offsetToPos(offset + text.length),
+              text: "",
+            });
+            offset += text.length;
+          } else {
+            changes.push({ from: editor.offsetToPos(offset), text });
+          }
+        }
+        editor.transaction({ changes });
+      }
+      this.docManager.markWritten(filePath, latest);
+      return true;
+    }
+    logger.warn(`Editor for ${filePath} kept changing; writing to disk instead`);
+    return false;
   }
 
   // ─── Private: Initial sync ──────────────────────────────
