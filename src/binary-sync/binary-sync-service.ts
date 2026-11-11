@@ -18,7 +18,7 @@ import {
 } from "../types";
 import { computeFileHash } from "./file-hash";
 import { logger } from "../logger";
-import { ensureParentDirectory } from "../utils/path-utils";
+import { ensureParentDirectory, isSafeSyncPath } from "../utils/path-utils";
 
 export class BinaryFileSyncService {
   private onRemoteFileWrittenCb: ((path: string) => void) | null = null;
@@ -67,25 +67,25 @@ export class BinaryFileSyncService {
     switch (type) {
       case MessageType.FILE_REQUEST: {
         const path = decodeFileRequest(payload);
-        if (!this._isSafePath(path)) break;
+        if (!isSafeSyncPath(path)) break;
         await this._sendFile(deviceId, path);
         break;
       }
       case MessageType.FILE_DATA: {
         const data = decodeFileData(payload);
-        if (!this._isSafePath(data.path)) break;
+        if (!isSafeSyncPath(data.path)) break;
         await this._receiveFile(data.path, data.content, data.mtime);
         break;
       }
       case MessageType.FILE_DELETE: {
         const del = decodeJSON<FileDeletePayload>(payload);
-        if (!this._isSafePath(del.path)) break;
+        if (!isSafeSyncPath(del.path)) break;
         await this._deleteFile(del.path);
         break;
       }
       case MessageType.FILE_RENAME: {
         const ren = decodeJSON<FileRenamePayload>(payload);
-        if (!this._isSafePath(ren.oldPath) || !this._isSafePath(ren.newPath))
+        if (!isSafeSyncPath(ren.oldPath) || !isSafeSyncPath(ren.newPath))
           break;
         await this._renameFile(ren.oldPath, ren.newPath);
         break;
@@ -160,14 +160,6 @@ export class BinaryFileSyncService {
   }
 
   // ─── Private ────────────────────────────────────────────
-
-  private _isSafePath(filePath: string): boolean {
-    if (!filePath) return false;
-    if (filePath.startsWith("/") || filePath.startsWith("\\")) return false;
-    if (filePath.includes("..")) return false;
-    if (filePath.includes("\0")) return false;
-    return true;
-  }
 
   private async _sendFile(deviceId: string, path: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);

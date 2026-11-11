@@ -98,3 +98,18 @@ export function seed(root: string, files: Record<string, string | Buffer>) {
 }
 
 export const count = (n: Node, prefix: string) => n.events.filter((e) => e.startsWith(prefix)).length;
+
+/** A raw protocol client, used to act as an untrusted device on the LAN. */
+export async function connectRaw(port: number, handshake: Record<string, unknown>) {
+  const { encodeHandshake, decodeMessage } = await import('../../src/transport/protocol');
+  const WS = (globalThis as any).require('ws');
+  const ws = new WS(`ws://127.0.0.1:${port}`);
+  const received: Array<{ type: number; payload: Uint8Array }> = [];
+  let closed = false;
+  ws.on('message', (raw: Buffer) => received.push(decodeMessage(new Uint8Array(raw))));
+  ws.on('close', () => { closed = true; });
+  await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+  ws.send(encodeHandshake({ deviceName: 'rogue', port: 1, ...handshake } as any));
+  await sleep(300);
+  return { ws, received, isClosed: () => closed, send: (data: Uint8Array) => ws.send(data) };
+}

@@ -25,7 +25,7 @@ import {
   SyncState,
 } from "../types";
 import { logger } from "../logger";
-import { ensureParentDirectory } from "../utils/path-utils";
+import { ensureParentDirectory, isSafeSyncPath } from "../utils/path-utils";
 import { supportsIncomingConnections } from "../utils/runtime";
 
 export class SyncCoordinator {
@@ -315,7 +315,7 @@ export class SyncCoordinator {
     switch (type) {
       case MessageType.YJS_SYNC_STEP1: {
         const msg = decodeYjsSync(payload);
-        if (!this._isSafePath(msg.filePath)) break;
+        if (!isSafeSyncPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
         // Ensure the local doc is seeded from disk so we don't respond with an
@@ -356,7 +356,7 @@ export class SyncCoordinator {
 
       case MessageType.YJS_SYNC_STEP2: {
         const msg = decodeYjsSync(payload);
-        if (!this._isSafePath(msg.filePath)) break;
+        if (!isSafeSyncPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
         await this.docManager.handleSyncStep2(resolvedPath, msg.data);
@@ -367,7 +367,7 @@ export class SyncCoordinator {
 
       case MessageType.YJS_UPDATE: {
         const msg = decodeYjsSync(payload);
-        if (!this._isSafePath(msg.filePath)) break;
+        if (!isSafeSyncPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
         await this.docManager.applyRemoteUpdate(resolvedPath, msg.data);
@@ -483,7 +483,7 @@ export class SyncCoordinator {
     previousContent?: string,
   ): Promise<void> {
     try {
-      if (!this._isSafePath(filePath)) {
+      if (!isSafeSyncPath(filePath)) {
         logger.warn(`Rejected unsafe remote path: ${filePath}`);
         return;
       }
@@ -1009,15 +1009,5 @@ export class SyncCoordinator {
       return localMtime > remoteMtime;
     }
     return this.settings.deviceId < remoteDeviceId;
-  }
-
-  /** Validate that a path from a remote peer is safe (no traversal) */
-  private _isSafePath(filePath: string): boolean {
-    if (!filePath) return false;
-    // Reject absolute paths, traversal, and null bytes
-    if (filePath.startsWith("/") || filePath.startsWith("\\")) return false;
-    if (filePath.includes("..")) return false;
-    if (filePath.includes("\0")) return false;
-    return true;
   }
 }

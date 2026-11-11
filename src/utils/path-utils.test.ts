@@ -48,3 +48,20 @@ describe('path-utils', () => {
     expect(adapter.has('existing/deep/path')).toBe(true);
   });
 });
+
+describe('isSafeSyncPath', () => {
+  it('allows ordinary names, including dots inside a name', async () => {
+    const { isSafeSyncPath } = await import('./path-utils');
+    for (const ok of ['note.md', 'v1..2.md', '等等...md', '日记/2024 年/第一 篇.md', 'a/b..c/d.png']) {
+      expect(isSafeSyncPath(ok)).toBe(true);
+    }
+  });
+
+  it('refuses traversal, absolute, drive-letter and hidden paths', async () => {
+    const { isSafeSyncPath } = await import('./path-utils');
+    for (const bad of ['', '../x.md', 'a/../../x.md', '/etc/passwd', 'C:/x.md', 'a\\..\\x.md', 'a//b.md',
+      '.obsidian/plugins/evil/main.js', 'notes/.hidden/x.md', 'a\0b.md']) {
+      expect(isSafeSyncPath(bad)).toBe(false);
+    }
+  });
+});

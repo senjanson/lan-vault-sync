@@ -15,7 +15,10 @@ vi.mock('../../src/discovery/udp-broadcast', () => ({
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { count, Node, ports, seed, sleep, startNode, tmpRoot } from './harness';
+import * as Y from 'yjs';
+import { encodeFileData, encodeYjsSync } from '../../src/transport/protocol';
+import { MessageType } from '../../src/types';
+import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot } from './harness';
 
 let nodes: Node[] = [];
 const track = (n: Node) => (nodes.push(n), n);
@@ -102,5 +105,33 @@ describe('e2e file writes', { timeout: 30000 }, () => {
     track(await startNode(rb, 'bbbb', pa + 1, [pa]));
     await sleep(1500);
     for (const r of [ra, rb]) expect(fs.statSync(path.join(r, 'same.md')).mtime.getFullYear()).toBe(2020);
+  });
+});
+
+describe('e2e paths', { timeout: 30000 }, () => {
+  it('syncs names that contain ".." inside a segment', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'v1..2.md': 'dots', 'img/a..b.png': Buffer.from([7]) });
+    const pa = ports();
+    track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(1500);
+    expect(B.vault.text('v1..2.md')).toBe('dots');
+    expect(B.vault.exists('img/a..b.png')).toBe(true);
+  });
+
+  it('refuses writes into the hidden .obsidian folder', async () => {
+    const ra = tmpRoot('a');
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const rogue = await connectRaw(pa, { deviceId: 'rogue', vaultId: (A.coord as any).vaultId });
+    const doc = new Y.Doc();
+    doc.getText('content').insert(0, 'console.log("pwned")');
+    rogue.send(encodeYjsSync(MessageType.YJS_UPDATE, '.obsidian/plugins/evil/main.js', Y.encodeStateAsUpdate(doc)));
+    rogue.send(encodeFileData({ path: '.obsidian/community-plugins.json', content: new TextEncoder().encode('["evil"]'), mtime: 1 }));
+    await sleep(800);
+    rogue.ws.close();
+    expect(fs.existsSync(path.join(ra, '.obsidian/plugins/evil/main.js'))).toBe(false);
+    expect(fs.existsSync(path.join(ra, '.obsidian/community-plugins.json'))).toBe(false);
   });
 });
