@@ -241,3 +241,44 @@ describe('e2e large files', { timeout: 60000 }, () => {
     expect(count(A, 'Disconnected') + count(B, 'Disconnected')).toBe(0);
   });
 });
+
+describe('e2e unrelated histories', { timeout: 30000 }, () => {
+  it('does not duplicate text when a new device joins with a copy of the vault', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+    seed(ra, { 'x.md': 'Hello\n' });
+    const pa = ports(), pb = pa + 1, pc = pa + 2;
+    const A = track(await startNode(ra, 'mmmm', pa, []));
+    const B = track(await startNode(rb, 'zzzz', pb, [pa]));
+    await sleep(1500);
+    await A.vault.write('x.md', 'Hello\nworld\n');
+    await sleep(1000);
+    // C starts from a copied folder with a fresh plugin install.
+    seed(rc, { 'x.md': 'Hello\nworld\n' });
+    const C = track(await startNode(rc, '0000', pc, [pa]));
+    await sleep(2500);
+    for (const n of [A, B, C]) expect(n.vault.text('x.md')).toBe('Hello\nworld\n');
+    // Edits still flow both ways afterwards.
+    await C.vault.write('x.md', 'Hello\nworld\nfrom C\n');
+    await sleep(1000);
+    for (const n of [A, B, C]) expect(n.vault.text('x.md')).toBe('Hello\nworld\nfrom C\n');
+  });
+
+  it('does not duplicate text when only one side has CRDT history', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'x.md': 'v1\n' });
+    const pa = ports(), pb = pa + 1;
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    await A.vault.write('x.md', 'v1\nedited on A\n');
+    await sleep(600);
+    await A.coord.stop();
+    nodes = [];
+    await sleep(50);
+    seed(rb, { 'x.md': 'v1\nedited on B\n' });
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pb, [pa]));
+    await sleep(2500);
+    const a = A.vault.text('x.md');
+    expect(a).toBe(B.vault.text('x.md'));
+    expect(['v1\nedited on A\n', 'v1\nedited on B\n']).toContain(a);
+  });
+});

@@ -15,8 +15,10 @@ export class YjsDocManager {
 
   // Callbacks
   private onLocalUpdateCb: ((filePath: string, update: Uint8Array) => void) | null = null;
+  /** previousContent is undefined when the doc was replaced by an unrelated
+   *  history, so the caller must back up whatever is on disk. */
   private onRemoteContentCb:
-    | ((filePath: string, content: string, previousContent: string) => Promise<void> | void)
+    | ((filePath: string, content: string, previousContent: string | undefined) => Promise<void> | void)
     | null = null;
 
   constructor(private vault: Vault) {
@@ -35,7 +37,7 @@ export class YjsDocManager {
 
   /** Register callback: fired when a remote update changes doc content → should write to file */
   onRemoteContent(
-    cb: (filePath: string, content: string, previousContent: string) => Promise<void> | void,
+    cb: (filePath: string, content: string, previousContent: string | undefined) => Promise<void> | void,
   ): void {
     this.onRemoteContentCb = cb;
   }
@@ -155,6 +157,79 @@ export class YjsDocManager {
         remoteContentChange.previousContent,
       );
     }
+  }
+
+  /**
+   * Compare this doc's history with a peer's state vector.
+   *
+   * Two Y.Docs that were each seeded from disk on their own share no client
+   * IDs; merging them concatenates both copies of the text. Docs with shared
+   * history always share at least the client that inserted the base text.
+   * When histories are unrelated, both sides pick the same winner (the doc
+   * whose smallest client ID is lower) so they converge on one doc.
+   */
+  async compareHistory(
+    filePath: string,
+    remoteStateVector: Uint8Array,
+  ): Promise<'related' | 'local-wins' | 'remote-wins'> {
+    return this._enqueueForPath(filePath, async () => {
+      const doc = await this.getOrCreateDoc(filePath);
+      return compareStateVectors(
+        Y.decodeStateVector(Y.encodeStateVector(doc)),
+        Y.decodeStateVector(remoteStateVector),
+      );
+    });
+  }
+
+  /**
+   * Apply a peer's complete doc state. Related histories merge as usual. For
+   * unrelated histories the winning doc is kept: either ours (returns
+   * 'kept-local', the caller sends our state back) or theirs, which replaces
+   * our doc instead of being merged into it (returns 'adopted').
+   */
+  async applyFullState(
+    filePath: string,
+    update: Uint8Array,
+  ): Promise<'merged' | 'adopted' | 'kept-local'> {
+    let result: 'merged' | 'adopted' | 'kept-local' = 'merged';
+    let change: { content: string; previousContent: string | undefined } | null = null;
+
+    await this._enqueueForPath(filePath, async () => {
+      let doc = await this.getOrCreateDoc(filePath);
+      const previousContent = doc.getText('content').toString();
+      const relation = compareStateVectors(
+        Y.decodeStateVector(Y.encodeStateVector(doc)),
+        Y.decodeStateVector(Y.encodeStateVectorFromUpdate(update)),
+      );
+
+      if (relation === 'local-wins') {
+        result = 'kept-local';
+        return;
+      }
+      if (relation === 'remote-wins') {
+        result = 'adopted';
+        this.pool.delete(filePath);
+        this.lastKnownContent.delete(filePath);
+        await this.persistence.deleteDoc(filePath);
+        doc = await this.getOrCreateDoc(filePath);
+      }
+
+      Y.applyUpdate(doc, update, 'remote');
+      const content = doc.getText('content').toString();
+      this.lastKnownContent.set(filePath, content);
+      if (result === 'adopted' || content !== previousContent) {
+        change = {
+          content,
+          previousContent: result === 'adopted' ? undefined : previousContent,
+        };
+      }
+    });
+
+    const pending = change as { content: string; previousContent: string | undefined } | null;
+    if (pending) {
+      await this.onRemoteContentCb?.(filePath, pending.content, pending.previousContent);
+    }
+    return result;
   }
 
   /** Generate sync step 1 (state vector) for initial sync with a new peer */
@@ -347,4 +422,18 @@ export class YjsDocManager {
     await this.pool.destroyAll();
     this.lastKnownContent.clear();
   }
+}
+
+/** See YjsDocManager.compareHistory. */
+export function compareStateVectors(
+  local: Map<number, number>,
+  remote: Map<number, number>,
+): 'related' | 'local-wins' | 'remote-wins' {
+  if (local.size === 0 || remote.size === 0) return 'related';
+  for (const client of local.keys()) {
+    if (remote.has(client)) return 'related';
+  }
+  return Math.min(...local.keys()) < Math.min(...remote.keys())
+    ? 'local-wins'
+    : 'remote-wins';
 }

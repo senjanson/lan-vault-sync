@@ -62,7 +62,7 @@ export function encodeHandshakeAck(payload: HandshakePayload): Uint8Array {
 
 // ─── Yjs sync messages ──────────────────────────────────
 
-export function encodeYjsSync(type: MessageType.YJS_SYNC_STEP1 | MessageType.YJS_SYNC_STEP2 | MessageType.YJS_UPDATE, filePath: string, data: Uint8Array): Uint8Array {
+export function encodeYjsSync(type: MessageType.YJS_SYNC_STEP1 | MessageType.YJS_SYNC_STEP2 | MessageType.YJS_UPDATE | MessageType.YJS_FULL_STATE, filePath: string, data: Uint8Array): Uint8Array {
   const pathBytes = encoder.encode(filePath);
   // [2 bytes path length (BE)][path bytes][data bytes]
   const payload = new Uint8Array(2 + pathBytes.length + data.length);

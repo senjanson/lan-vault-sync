@@ -79,6 +79,8 @@ export enum MessageType {
   YJS_SYNC_STEP1 = 0x10,
   YJS_SYNC_STEP2 = 0x11,
   YJS_UPDATE = 0x12,
+  /** A doc's complete state (not an incremental update). */
+  YJS_FULL_STATE = 0x13,
 
   FILE_META_SYNC = 0x20,
   FILE_REQUEST = 0x21,

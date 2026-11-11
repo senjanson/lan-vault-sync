@@ -345,6 +345,24 @@ export class SyncCoordinator {
         if (!this._hasConflictLoserGuard(resolvedPath)) {
           await this._ensureCrdtInitialized(resolvedPath);
         }
+
+        // Never answer with a diff against an unrelated history: merging two
+        // independently seeded docs duplicates the whole text.
+        const relation = await this.docManager.compareHistory(resolvedPath, msg.data);
+        if (relation === "local-wins") {
+          await this._sendFullTextState(deviceId, resolvedPath, "Resolving unrelated history");
+          break;
+        }
+        if (relation === "remote-wins") {
+          // Let the peer see our state vector; it will send its full state.
+          const ourSV = await this.docManager.encodeSyncStep1(resolvedPath);
+          this.connectionManager.sendTo(
+            deviceId,
+            encodeYjsSync(MessageType.YJS_SYNC_STEP1, resolvedPath, ourSV),
+          );
+          break;
+        }
+
         const response = await this.docManager.handleSyncStep1(
           resolvedPath,
           msg.data,
@@ -381,6 +399,26 @@ export class SyncCoordinator {
         await this.docManager.handleSyncStep2(resolvedPath, msg.data);
         // Clear reverse-sync guard so future sync rounds can proceed
         this.reverseSyncSent.delete(`${deviceId}:${resolvedPath}`);
+        break;
+      }
+
+      case MessageType.YJS_FULL_STATE: {
+        const msg = decodeYjsSync(payload);
+        if (!this._isAllowedPath(msg.filePath)) break;
+        const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
+        await this._flushPendingLocalTextChange(resolvedPath);
+        const result = await this.docManager.applyFullState(resolvedPath, msg.data);
+        if (result === "kept-local") {
+          // Our doc wins; send it so the peer adopts it.
+          await this._sendFullTextState(deviceId, resolvedPath, "Resolving unrelated history");
+        } else if (result === "adopted") {
+          // Other peers may still hold the history we just dropped.
+          for (const peerId of this.connectionManager.getConnectedPeerIds()) {
+            if (peerId !== deviceId) {
+              await this._sendFullTextState(peerId, resolvedPath, "Sharing adopted history");
+            }
+          }
+        }
         break;
       }
 
@@ -501,7 +539,7 @@ export class SyncCoordinator {
   private async _writeFileFromRemote(
     filePath: string,
     content: string,
-    previousContent?: string,
+    previousContent: string | undefined,
   ): Promise<void> {
     try {
       if (!this._isAllowedPath(filePath)) {
@@ -813,7 +851,7 @@ export class SyncCoordinator {
     await this._flushPendingLocalTextChange(filePath);
     await this._ensureCrdtInitialized(filePath);
     const update = await this.docManager.encodeFullState(filePath);
-    const msg = encodeYjsSync(MessageType.YJS_UPDATE, filePath, update);
+    const msg = encodeYjsSync(MessageType.YJS_FULL_STATE, filePath, update);
     this.connectionManager.sendTo(deviceId, msg);
     this._emitEvent(`${eventPrefix}: ${filePath}`);
   }
