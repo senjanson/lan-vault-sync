@@ -378,6 +378,12 @@ export class BinaryFileSyncService {
         );
         this.onBackupCreatedCb?.(path, backup.backupId, "remote-file-delete");
       }
+      // Obsidian moves the file object itself on rename: if the file was
+      // renamed while it was backed up, it is no longer this path's file.
+      if (file.path !== path) {
+        logger.warn(`Not deleting ${path}: it was renamed to ${file.path}`);
+        return;
+      }
       this.onRemoteFileWrittenCb?.(path, "delete");
       await this.vault.delete(file);
       await this.onRemoteFileDeletedCb?.(path);

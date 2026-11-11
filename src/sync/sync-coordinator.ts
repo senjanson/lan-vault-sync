@@ -715,6 +715,9 @@ export class SyncCoordinator {
         return;
       }
 
+      // Renamed meanwhile (Obsidian moves the file object): don't write this
+      // path's text into the file under its new name.
+      if (file instanceof TFile && file.path !== filePath) return;
       this.watcher.markRemoteWrite(filePath);
       this.remoteWrittenText.set(filePath, latestContent);
 
@@ -1501,6 +1504,7 @@ export class SyncCoordinator {
     if (!target) {
       const slash = newPath.lastIndexOf("/");
       if (slash > 0) await this._createFolderFromRemote(newPath.slice(0, slash));
+      if (file.path !== oldPath) return false;
       this.watcher.markRemoteWrite(newPath, "rename");
       await this.vault.rename(file, newPath);
       this.knownHashes.set(oldPath, oldHash);
@@ -1518,6 +1522,7 @@ export class SyncCoordinator {
       // An attachment is only dropped when the new name holds the same file.
       if (!(target instanceof TFile)) return false;
       if ((await computeFileHash(await this.vault.readBinary(target))) !== oldHash) return false;
+      if (file.path !== oldPath) return false;
       this.watcher.markRemoteWrite(oldPath, "delete");
       await this.vault.delete(file);
       this.tombstones.add(oldPath, oldHash, undefined, newPath);
@@ -1529,6 +1534,7 @@ export class SyncCoordinator {
       const merged = await this.docManager.absorbDoc(oldPath, newPath);
       if (!merged) return false;
       await this._writeFileFromRemote(newPath, merged.content, merged.previousContent);
+      if (file.path !== oldPath) return false;
       this.watcher.markRemoteWrite(oldPath, "delete");
       await this.vault.delete(file);
       this.tombstones.add(oldPath, oldHash, undefined, newPath);

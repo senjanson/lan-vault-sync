@@ -707,6 +707,17 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     walk(''); return out.sort();
   };
 
+  it('does not delete a note that is renamed while a peer\'s deletion of its old name is applied', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'f.md': 'one\n' });
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const deleting = (B.coord as any).binarySync.applyRemoteDelete('f.md');
+    await B.vault.mv('f.md', 'g.md');
+    await deleting;
+    await sleep(300);
+    expect(B.vault.text('g.md')).toBe('one\n');
+  });
+
   it('keeps the renamed note when two peers lead to following the same rename at once', async () => {
     const rb = tmpRoot('b');
     seed(rb, { 'f.md': 'one\nfrom B\n' });
@@ -750,12 +761,12 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     n = await mesh(false);
     await n[0].vault.mv('f.md', 'g.md');
     n = await mesh(true);
-    await sleep(4000);
+    await sleep(6000);
     for (const data of [Y.encodeStateAsUpdate(old, before), Y.encodeStateAsUpdate(old)]) {
       const msg = decodeMessage(encodeYjsSync(MessageType.YJS_UPDATE, 'f.md', data));
       await (n[0].coord as any)._handleMessage('dddd', msg.type, msg.payload);
     }
-    await sleep(3000);
+    await sleep(4000);
     const merges = n.map((x) => x.events.filter((e) => e.startsWith('Merged edits')).length);
     expect(Math.max(...merges)).toBeLessThan(5);
     for (const x of n) {
