@@ -440,4 +440,22 @@ describe('e2e pairing key', { timeout: 30000 }, () => {
     await sleep(1500);
     expect(B.vault.text('n.md')).toBe('hello');
   });
+
+  it('syncs empty notes, both on connect and when created live', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'empty-offline.md': '', 'Folder/empty2.md': '' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(2000);
+    expect(B.vault.text('empty-offline.md')).toBe('');
+    expect(B.vault.text('Folder/empty2.md')).toBe('');
+    await A.vault.write('empty-live.md', '');
+    await sleep(800);
+    expect(B.vault.text('empty-live.md')).toBe('');
+    // Typing into the new empty note afterwards still syncs normally.
+    await B.vault.write('empty-live.md', 'now with text');
+    await sleep(800);
+    expect(A.vault.text('empty-live.md')).toBe('now with text');
+  });
 });

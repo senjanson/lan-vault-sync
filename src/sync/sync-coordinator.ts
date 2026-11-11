@@ -97,6 +97,7 @@ export class SyncCoordinator {
       this.connectionManager,
       this.backupService,
       (path) => this._isAllowedPath(path),
+      (path) => this.filter.isTextFile(path),
     );
     this.workspace = options?.workspace ?? null;
     this.watcher = new VaultWatcher(
@@ -526,6 +527,10 @@ export class SyncCoordinator {
           this.tombstones.clear(path);
           this.knownHashes.set(path, await this._hashText(content));
           await this.docManager.applyLocalChange(path, content);
+          // An empty note produces no CRDT update, so send the file itself.
+          if (type === "create" && content === "") {
+            await this.binarySync.broadcastFileChange(path);
+          }
         } else {
           this.tombstones.clear(path);
           await this.binarySync.broadcastFileChange(path);
@@ -803,7 +808,11 @@ export class SyncCoordinator {
         this._emitEvent(`Skipping deleted file: ${file.path}`);
         continue;
       }
-      if (file.isTextFile) {
+      if (file.isTextFile && file.size === 0) {
+        // An empty note has no CRDT content to fetch; fetch the file itself.
+        this.binarySync.requestFile(deviceId, file.path);
+        this._emitEvent(`Requesting: ${file.path}`);
+      } else if (file.isTextFile) {
         // DO NOT removeDoc here — it races with concurrent YJS_UPDATE messages
         // from the peer's localOnly processing, potentially destroying freshly
         // received content.  Sending SYNC_STEP1 with an empty state vector

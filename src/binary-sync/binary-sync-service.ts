@@ -55,6 +55,7 @@ export class BinaryFileSyncService {
     private connectionManager: ConnectionManager,
     private backupService: ConflictBackupService,
     private isAllowedPath: (path: string) => boolean = isSafeSyncPath,
+    private isTextPath: (path: string) => boolean = () => false,
   ) {}
 
   onRemoteFileWritten(
@@ -268,9 +269,13 @@ export class BinaryFileSyncService {
     _mtime: number,
   ): Promise<void> {
     try {
+      const existing = this.vault.getAbstractFileByPath(path);
+      // Text files only come this way when they are new and empty (an empty
+      // note has no CRDT content to send). An existing note's content is
+      // synced through its CRDT document, never overwritten here.
+      if (existing instanceof TFile && this.isTextPath(path)) return;
       // Mark remote write BEFORE modifying vault to prevent echo-back
       this.onRemoteFileWrittenCb?.(path);
-      const existing = this.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) {
         const currentContent = new Uint8Array(
           await this.vault.readBinary(existing),
