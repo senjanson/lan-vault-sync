@@ -23,3 +23,15 @@ describe('protocol guards', () => {
     expect(() => decodeFileData(payload)).toThrow(/truncated metadata/i);
   });
 });
+
+describe('file chunks', () => {
+  it('round-trips a chunk with its offsets', async () => {
+    const { encodeFileChunk, decodeFileChunk, decodeMessage } = await import('../../src/transport/protocol');
+    const msg = decodeMessage(encodeFileChunk({
+      path: '视频/a b.mp4', mtime: 123.5, totalSize: 3_000_000_000, offset: 2_147_483_648, content: new Uint8Array([1, 2, 3]),
+    }));
+    const chunk = decodeFileChunk(msg.payload);
+    expect(chunk).toMatchObject({ path: '视频/a b.mp4', mtime: 123.5, totalSize: 3_000_000_000, offset: 2_147_483_648 });
+    expect(Array.from(chunk.content)).toEqual([1, 2, 3]);
+  });
+});

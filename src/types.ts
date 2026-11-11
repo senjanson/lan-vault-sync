@@ -85,6 +85,7 @@ export enum MessageType {
   FILE_DATA = 0x22,
   FILE_DELETE = 0x23,
   FILE_RENAME = 0x24,
+  FILE_CHUNK = 0x25,
 
   PING = 0xf0,
   PONG = 0xf1,
@@ -114,6 +115,16 @@ export interface FileDataPayload {
   path: string;
   content: Uint8Array;
   mtime: number;
+}
+
+export interface FileChunkPayload {
+  path: string;
+  mtime: number;
+  /** Size of the whole file in bytes. */
+  totalSize: number;
+  /** Byte offset of this chunk within the file. */
+  offset: number;
+  content: Uint8Array;
 }
 
 export interface FileDeletePayload {

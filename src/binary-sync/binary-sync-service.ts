@@ -2,6 +2,8 @@ import { Vault, TFile } from "obsidian";
 import { ConnectionManager } from "../transport/connection-manager";
 import { ConflictBackupService } from "../conflict/conflict-backup-service";
 import {
+  decodeFileChunk,
+  encodeFileChunk,
   encodeFileData,
   encodeFileDelete,
   encodeFileRename,
@@ -18,9 +20,23 @@ import {
 } from "../types";
 import { computeFileHash } from "./file-hash";
 import { logger } from "../logger";
+import {
+  CHUNK_SIZE,
+  CHUNKED_FILE_THRESHOLD,
+  MAX_SYNC_FILE_SIZE,
+} from "../constants";
 import { ensureParentDirectory, isSafeSyncPath } from "../utils/path-utils";
 
+interface IncomingFile {
+  path: string;
+  mtime: number;
+  data: Uint8Array;
+  received: number;
+}
+
 export class BinaryFileSyncService {
+  /** Chunked files being received, keyed by `${deviceId}\n${path}`. */
+  private incoming = new Map<string, IncomingFile>();
   private onRemoteFileWrittenCb: ((path: string) => void) | null = null;
   private onRemoteFileDeletedCb:
     | ((path: string) => Promise<void> | void)
@@ -78,6 +94,12 @@ export class BinaryFileSyncService {
         await this._receiveFile(data.path, data.content, data.mtime);
         break;
       }
+      case MessageType.FILE_CHUNK: {
+        const chunk = decodeFileChunk(payload);
+        if (!this.isAllowedPath(chunk.path)) break;
+        await this._receiveChunk(deviceId, chunk);
+        break;
+      }
       case MessageType.FILE_DELETE: {
         const del = decodeJSON<FileDeletePayload>(payload);
         if (!this.isAllowedPath(del.path)) break;
@@ -100,12 +122,9 @@ export class BinaryFileSyncService {
     if (!(file instanceof TFile)) return;
 
     const content = await this.vault.readBinary(file);
-    const msg = encodeFileData({
-      path,
-      content: new Uint8Array(content),
-      mtime: file.stat.mtime,
-    });
-    this.connectionManager.broadcast(msg);
+    for (const msg of this._encodeFile(path, new Uint8Array(content), file.stat.mtime)) {
+      this.connectionManager.broadcast(msg);
+    }
   }
 
   /** Send a file deletion to all peers */
@@ -132,12 +151,9 @@ export class BinaryFileSyncService {
     if (!(file instanceof TFile)) return;
 
     const content = await this.vault.readBinary(file);
-    const msg = encodeFileData({
-      path,
-      content: new Uint8Array(content),
-      mtime: file.stat.mtime,
-    });
-    this.connectionManager.sendTo(deviceId, msg);
+    for (const msg of this._encodeFile(path, new Uint8Array(content), file.stat.mtime)) {
+      this.connectionManager.sendTo(deviceId, msg);
+    }
   }
 
   /** Build metadata list of all non-text files in the vault */
@@ -170,12 +186,76 @@ export class BinaryFileSyncService {
     }
 
     const content = await this.vault.readBinary(file);
-    const msg = encodeFileData({
-      path,
-      content: new Uint8Array(content),
-      mtime: file.stat.mtime,
-    });
-    this.connectionManager.sendTo(deviceId, msg);
+    for (const msg of this._encodeFile(path, new Uint8Array(content), file.stat.mtime)) {
+      this.connectionManager.sendTo(deviceId, msg);
+    }
+  }
+
+  /** Drop partially received files from a peer that went away. */
+  dropIncoming(deviceId: string): void {
+    for (const key of this.incoming.keys()) {
+      if (key.startsWith(`${deviceId}\n`)) this.incoming.delete(key);
+    }
+  }
+
+  /**
+   * Encode a file as one FILE_DATA message, or as FILE_CHUNK messages when it
+   * is large: a single message over ~100 MiB is refused by the ws library and
+   * closed the connection, so big files never synced.
+   */
+  private _encodeFile(path: string, content: Uint8Array, mtime: number): Uint8Array[] {
+    if (content.byteLength <= CHUNKED_FILE_THRESHOLD) {
+      return [encodeFileData({ path, content, mtime })];
+    }
+    const messages: Uint8Array[] = [];
+    for (let offset = 0; offset < content.byteLength; offset += CHUNK_SIZE) {
+      messages.push(
+        encodeFileChunk({
+          path,
+          mtime,
+          totalSize: content.byteLength,
+          offset,
+          content: content.subarray(offset, offset + CHUNK_SIZE),
+        }),
+      );
+    }
+    return messages;
+  }
+
+  private async _receiveChunk(
+    deviceId: string,
+    chunk: { path: string; mtime: number; totalSize: number; offset: number; content: Uint8Array },
+  ): Promise<void> {
+    const key = `${deviceId}\n${chunk.path}`;
+    const { totalSize, offset, content } = chunk;
+    if (
+      !Number.isSafeInteger(totalSize) || totalSize <= 0 || totalSize > MAX_SYNC_FILE_SIZE ||
+      !Number.isSafeInteger(offset) || offset < 0 || offset + content.byteLength > totalSize
+    ) {
+      logger.warn(`Ignoring malformed file chunk for ${chunk.path}`);
+      this.incoming.delete(key);
+      return;
+    }
+
+    let entry = this.incoming.get(key);
+    if (offset === 0 || !entry || entry.data.byteLength !== totalSize) {
+      // A new transfer of this file starts (a stale partial one is dropped).
+      if (offset !== 0) return;
+      entry = { path: chunk.path, mtime: chunk.mtime, data: new Uint8Array(totalSize), received: 0 };
+      this.incoming.set(key, entry);
+    }
+    if (offset !== entry.received) {
+      logger.warn(`Out-of-order chunk for ${chunk.path}; dropping transfer`);
+      this.incoming.delete(key);
+      return;
+    }
+
+    entry.data.set(content, offset);
+    entry.received += content.byteLength;
+    if (entry.received === totalSize) {
+      this.incoming.delete(key);
+      await this._receiveFile(entry.path, entry.data, entry.mtime);
+    }
   }
 
   private async _receiveFile(

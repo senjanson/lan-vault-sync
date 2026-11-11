@@ -58,7 +58,12 @@ export const MAX_ACTIVE_DOCS = 50;
 export const DEBOUNCE_MS = 200;
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 30000;
-export const CHUNK_SIZE = 64 * 1024; // 64 KB
+/** Binary files larger than this are sent in FILE_CHUNK messages. A single
+ *  message must stay well below the ws library's 100 MiB payload limit. */
+export const CHUNKED_FILE_THRESHOLD = 8 * 1024 * 1024; // 8 MB
+export const CHUNK_SIZE = 1024 * 1024; // 1 MB per FILE_CHUNK message
+/** Largest binary file accepted from a peer. */
+export const MAX_SYNC_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 
 export const WS_PING_INTERVAL_MS = 10000;
 

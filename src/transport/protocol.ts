@@ -4,6 +4,7 @@ import {
   YjsSyncMessage,
   FileMetaSyncPayload,
   FileDataPayload,
+  FileChunkPayload,
   FileDeletePayload,
   FileRenamePayload,
 } from '../types';
@@ -126,6 +127,40 @@ export function decodeFileData(payload: Uint8Array): FileDataPayload {
   const mtime = view.getFloat64(2 + pathLen, false);
   const content = payload.slice(2 + pathLen + 8);
   return { path, content, mtime };
+}
+
+export function encodeFileChunk(payload: FileChunkPayload): Uint8Array {
+  const pathBytes = encoder.encode(payload.path);
+  // [2 bytes path len][path][8 bytes mtime][8 bytes total size][8 bytes offset][content]
+  const header = 2 + pathBytes.length + 24;
+  const buf = new Uint8Array(header + payload.content.length);
+  const view = new DataView(buf.buffer);
+  view.setUint16(0, pathBytes.length, false);
+  buf.set(pathBytes, 2);
+  view.setFloat64(2 + pathBytes.length, payload.mtime, false);
+  view.setFloat64(2 + pathBytes.length + 8, payload.totalSize, false);
+  view.setFloat64(2 + pathBytes.length + 16, payload.offset, false);
+  buf.set(payload.content, header);
+  return encodeMessage(MessageType.FILE_CHUNK, buf);
+}
+
+export function decodeFileChunk(payload: Uint8Array): FileChunkPayload {
+  if (payload.byteLength < 2) {
+    throw new Error('Malformed chunk payload: missing path length');
+  }
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const pathLen = view.getUint16(0, false);
+  const header = 2 + pathLen + 24;
+  if (payload.byteLength < header) {
+    throw new Error('Malformed chunk payload: truncated metadata');
+  }
+  return {
+    path: decoder.decode(payload.slice(2, 2 + pathLen)),
+    mtime: view.getFloat64(2 + pathLen, false),
+    totalSize: view.getFloat64(2 + pathLen + 8, false),
+    offset: view.getFloat64(2 + pathLen + 16, false),
+    content: payload.slice(header),
+  };
 }
 
 export function encodeFileDelete(payload: FileDeletePayload): Uint8Array {

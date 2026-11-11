@@ -225,3 +225,19 @@ describe('e2e edits right after a remote write', { timeout: 30000 }, () => {
     expect(B.vault.text('n.md')).toBe('L1 A\nL2 A\nL3 B\n');
   });
 });
+
+describe('e2e large files', { timeout: 60000 }, () => {
+  it('syncs a binary file larger than 100 MB without dropping the connection', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const big = Buffer.alloc(101 * 1024 * 1024);
+    for (let i = 0; i < big.length; i += 4096) big[i] = i % 251;
+    seed(ra, { 'video.mp4': big, 'small.md': 'hi' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(8000);
+    expect(B.vault.bin('video.mp4')?.equals(big)).toBe(true);
+    expect(B.vault.text('small.md')).toBe('hi');
+    expect(count(A, 'Disconnected') + count(B, 'Disconnected')).toBe(0);
+  });
+});

@@ -243,6 +243,7 @@ export class SyncCoordinator {
 
     this.connectionManager.onPeerDisconnected((deviceId) => {
       this.pendingInitialBootstrapPeers.delete(deviceId);
+      this.binarySync.dropIncoming(deviceId);
       // Clear reverse-sync tracking for this peer
       for (const key of this.reverseSyncSent) {
         if (key.startsWith(deviceId + ":")) this.reverseSyncSent.delete(key);
@@ -415,6 +416,7 @@ export class SyncCoordinator {
       case MessageType.FILE_DATA:
       case MessageType.FILE_DELETE:
       case MessageType.FILE_RENAME:
+      case MessageType.FILE_CHUNK:
         await this.binarySync.handleMessage(deviceId, type, payload);
         break;
     }
