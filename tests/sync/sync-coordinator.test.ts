@@ -91,7 +91,7 @@ describe('SyncCoordinator text conflict safety', () => {
     await (coordinator as any)._handleMessage('peer-1', MessageType.YJS_UPDATE, payload);
 
     expect(flushPendingLocalTextChange).toHaveBeenCalledWith('note.md');
-    expect(applyRemoteUpdate).toHaveBeenCalledWith('note.md', new Uint8Array([1, 2, 3]));
+    expect(applyRemoteUpdate).toHaveBeenCalledWith('note.md', new Uint8Array([1, 2, 3]), 'peer-1');
     expect(flushPendingLocalTextChange.mock.invocationCallOrder[0]).toBeLessThan(
       applyRemoteUpdate.mock.invocationCallOrder[0],
     );
@@ -380,7 +380,7 @@ describe('SyncCoordinator text conflict safety', () => {
     await (coordinator as any)._handleMessage('peer-1', MessageType.YJS_UPDATE, payload);
 
     expect(flushPendingLocalTextChange).toHaveBeenCalledWith('note.md');
-    expect(applyRemoteUpdate).toHaveBeenCalledWith('note.md', new Uint8Array([1, 2, 3]));
+    expect(applyRemoteUpdate).toHaveBeenCalledWith('note.md', new Uint8Array([1, 2, 3]), 'peer-1');
   });
 
   it('migrates CRDT state on local text rename instead of deleting it', async () => {

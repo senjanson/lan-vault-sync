@@ -351,3 +351,43 @@ describe('e2e offline deletes', { timeout: 30000 }, () => {
     expect(B.vault.text('n.md')).toBe('v1 edited later');
   });
 });
+
+describe('e2e idle traffic', { timeout: 30000 }, () => {
+  it('stops sending sync messages once the peers agree', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'n.md': 'L1\nL2\n', 'm.md': 'x' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(1500);
+    await A.vault.write('n.md', 'L1 A\nL2\n');
+    await sleep(1500);
+    expect(B.vault.text('n.md')).toBe('L1 A\nL2\n');
+    let sent = 0;
+    for (const n of [A, B]) {
+      const cm = (n.coord as any).connectionManager;
+      const sendTo = cm.sendTo.bind(cm);
+      cm.sendTo = (id: string, data: Uint8Array) => { sent++; sendTo(id, data); };
+    }
+    await sleep(1000);
+    expect(sent).toBe(0);
+  });
+});
+
+describe('e2e hub devices', { timeout: 30000 }, () => {
+  it('passes edits between two devices that are only connected through a third', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+    seed(ra, { 'n.md': 'L1\nL2\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'mmmm', pa, []));
+    const B = track(await startNode(rb, 'zzzz', pa + 1, [pa]));
+    const C = track(await startNode(rc, '0000', pa + 2, [pa]));
+    await sleep(2000);
+    await A.vault.write('n.md', 'L1 A\nL2\n');
+    await sleep(800);
+    await C.vault.write('n.md', 'L1 A\nL2 C\n');
+    await sleep(1000);
+    expect(A.vault.text('n.md')).toBe('L1 A\nL2 C\n');
+    expect(B.vault.text('n.md')).toBe('L1 A\nL2 C\n');
+  });
+});

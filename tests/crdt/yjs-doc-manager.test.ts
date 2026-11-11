@@ -74,3 +74,21 @@ describe('YjsDocManager remote content ordering', () => {
     expect(await manager.getContent('note.md')).toBe('body');
   });
 });
+
+describe('YjsDocManager forwarding peer updates', () => {
+  it('reports only changes that were new to the doc, with the sending device', async () => {
+    const manager = createManager();
+    const forwarded: Array<[string, string]> = [];
+    manager.onRemoteUpdateApplied((path, _update, from) => forwarded.push([path, from]));
+
+    const source = new Y.Doc();
+    source.getText('content').insert(0, 'hello');
+    const update = Y.encodeStateAsUpdate(source);
+
+    await manager.applyRemoteUpdate('n.md', update, 'peer-a');
+    // The same update again (e.g. relayed back by another peer) changes nothing.
+    await manager.applyRemoteUpdate('n.md', update, 'peer-b');
+
+    expect(forwarded).toEqual([['n.md', 'peer-a']]);
+  });
+});

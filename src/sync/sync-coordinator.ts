@@ -45,9 +45,6 @@ export class SyncCoordinator {
   private fullSyncTimer: ReturnType<typeof setInterval> | null = null;
   private persistTimer: ReturnType<typeof setInterval> | null = null;
   private pendingInitialBootstrapPeers = new Set<string>();
-  /** Tracks (deviceId:filePath) combos where we've already sent a reverse
-   *  SYNC_STEP1 in response to receiving one, to prevent infinite loops. */
-  private reverseSyncSent = new Set<string>();
   /** Tracks file paths where we are the conflict "loser" and must NOT seed
    *  the CRDT doc from disk.  Stored per winning peer so an unrelated
    *  disconnect does not clear protection for active conflicts on other peers.
@@ -254,10 +251,6 @@ export class SyncCoordinator {
     this.connectionManager.onPeerDisconnected((deviceId) => {
       this.pendingInitialBootstrapPeers.delete(deviceId);
       this.binarySync.dropIncoming(deviceId);
-      // Clear reverse-sync tracking for this peer
-      for (const key of this.reverseSyncSent) {
-        if (key.startsWith(deviceId + ":")) this.reverseSyncSent.delete(key);
-      }
       // Clear only guards associated with the disconnected peer — unrelated
       // peers may still be mid-conflict on their own paths.
       this._clearConflictLoserGuardsForDevice(deviceId);
@@ -278,6 +271,18 @@ export class SyncCoordinator {
     this.docManager.onLocalUpdate((filePath, update) => {
       const msg = encodeYjsSync(MessageType.YJS_UPDATE, filePath, update);
       this.connectionManager.broadcast(msg);
+    });
+
+    // Pass peers' edits on to the other connected peers, so devices that are
+    // only connected through this one (e.g. two phones and a desktop) get
+    // them right away instead of at the next full sync.
+    this.docManager.onRemoteUpdateApplied((filePath, update, fromDeviceId) => {
+      const peers = this.connectionManager
+        .getConnectedPeerIds()
+        .filter((id) => id !== fromDeviceId);
+      if (peers.length === 0) return;
+      const msg = encodeYjsSync(MessageType.YJS_UPDATE, filePath, update);
+      for (const peerId of peers) this.connectionManager.sendTo(peerId, msg);
     });
 
     // Yjs doc manager → remote content changed, write to file
@@ -389,12 +394,11 @@ export class SyncCoordinator {
         );
         this.connectionManager.sendTo(deviceId, reply);
 
-        // Complete bidirectional sync: also send our own state vector so the
-        // initiator can send back the diff we're missing.  Guard with a
-        // per-(peer,file) flag to prevent infinite SYNC_STEP1 ping-pong.
-        const reverseKey = `${deviceId}:${resolvedPath}`;
-        if (!this.reverseSyncSent.has(reverseKey)) {
-          this.reverseSyncSent.add(reverseKey);
+        // Complete bidirectional sync: when the peer has changes we lack, send
+        // our own state vector so it can send them. Asking only when something
+        // is missing ends the exchange; a flag cleared on every STEP2 made the
+        // two peers trade STEP1/STEP2 forever.
+        if (await this.docManager.isMissingRemoteChanges(resolvedPath, msg.data)) {
           const ourSV = await this.docManager.encodeSyncStep1(resolvedPath);
           const reverseStep1 = encodeYjsSync(
             MessageType.YJS_SYNC_STEP1,
@@ -411,9 +415,7 @@ export class SyncCoordinator {
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
-        await this.docManager.handleSyncStep2(resolvedPath, msg.data);
-        // Clear reverse-sync guard so future sync rounds can proceed
-        this.reverseSyncSent.delete(`${deviceId}:${resolvedPath}`);
+        await this.docManager.handleSyncStep2(resolvedPath, msg.data, deviceId);
         break;
       }
 
@@ -422,7 +424,7 @@ export class SyncCoordinator {
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
-        const result = await this.docManager.applyFullState(resolvedPath, msg.data);
+        const result = await this.docManager.applyFullState(resolvedPath, msg.data, deviceId);
         if (result === "kept-local") {
           // Our doc wins; send it so the peer adopts it.
           await this._sendFullTextState(deviceId, resolvedPath, "Resolving unrelated history");
@@ -442,7 +444,7 @@ export class SyncCoordinator {
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
-        await this.docManager.applyRemoteUpdate(resolvedPath, msg.data);
+        await this.docManager.applyRemoteUpdate(resolvedPath, msg.data, deviceId);
         break;
       }
 

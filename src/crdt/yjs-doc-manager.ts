@@ -15,6 +15,9 @@ export class YjsDocManager {
 
   // Callbacks
   private onLocalUpdateCb: ((filePath: string, update: Uint8Array) => void) | null = null;
+  private onRemoteUpdateAppliedCb:
+    | ((filePath: string, update: Uint8Array, fromDeviceId: string) => void)
+    | null = null;
   /** previousContent is undefined when the doc was replaced by an unrelated
    *  history, so the caller must back up whatever is on disk. */
   private onRemoteContentCb:
@@ -33,6 +36,17 @@ export class YjsDocManager {
   /** Register callback: fired when a local edit produces a Yjs update to broadcast */
   onLocalUpdate(cb: (filePath: string, update: Uint8Array) => void): void {
     this.onLocalUpdateCb = cb;
+  }
+
+  /**
+   * Called with the part of a peer's update that was new to this doc. Yjs
+   * reports nothing for updates the doc already had, so forwarding these to
+   * other peers cannot loop.
+   */
+  onRemoteUpdateApplied(
+    cb: (filePath: string, update: Uint8Array, fromDeviceId: string) => void,
+  ): void {
+    this.onRemoteUpdateAppliedCb = cb;
   }
 
   /** Register callback: fired when a remote update changes doc content → should write to file */
@@ -73,6 +87,8 @@ export class YjsDocManager {
     doc.on('update', (update: Uint8Array, origin: any) => {
       if (origin === 'local') {
         this.onLocalUpdateCb?.(filePath, update);
+      } else if (origin instanceof RemoteOrigin) {
+        this.onRemoteUpdateAppliedCb?.(filePath, update, origin.deviceId);
       }
     });
 
@@ -131,7 +147,7 @@ export class YjsDocManager {
   }
 
   /** Called when receiving a Yjs update from a remote peer */
-  async applyRemoteUpdate(filePath: string, update: Uint8Array): Promise<void> {
+  async applyRemoteUpdate(filePath: string, update: Uint8Array, fromDeviceId?: string): Promise<void> {
     let remoteContentChange:
       | { content: string; previousContent: string }
       | null = null;
@@ -139,7 +155,7 @@ export class YjsDocManager {
     await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
       const previousContent = doc.getText('content').toString();
-      Y.applyUpdate(doc, update, 'remote');
+      Y.applyUpdate(doc, update, remoteOrigin(fromDeviceId));
 
       const ytext = doc.getText('content');
       const content = ytext.toString();
@@ -190,6 +206,7 @@ export class YjsDocManager {
   async applyFullState(
     filePath: string,
     update: Uint8Array,
+    fromDeviceId?: string,
   ): Promise<'merged' | 'adopted' | 'kept-local'> {
     let result: 'merged' | 'adopted' | 'kept-local' = 'merged';
     let change: { content: string; previousContent: string | undefined } | null = null;
@@ -214,7 +231,10 @@ export class YjsDocManager {
         doc = await this.getOrCreateDoc(filePath);
       }
 
-      Y.applyUpdate(doc, update, 'remote');
+      // An adopted history is not forwarded as an update: peers holding the
+      // dropped history would merge it into theirs. The caller sends it to
+      // them as a full state instead.
+      Y.applyUpdate(doc, update, result === 'adopted' ? 'remote' : remoteOrigin(fromDeviceId));
       const content = doc.getText('content').toString();
       this.lastKnownContent.set(filePath, content);
       if (result === 'adopted' || content !== previousContent) {
@@ -233,6 +253,18 @@ export class YjsDocManager {
   }
 
   /** Generate sync step 1 (state vector) for initial sync with a new peer */
+  /** Whether a peer's state vector includes changes this doc lacks. */
+  async isMissingRemoteChanges(filePath: string, remoteStateVector: Uint8Array): Promise<boolean> {
+    return this._enqueueForPath(filePath, async () => {
+      const doc = await this.getOrCreateDoc(filePath);
+      const local = Y.decodeStateVector(Y.encodeStateVector(doc));
+      for (const [client, clock] of Y.decodeStateVector(remoteStateVector)) {
+        if (clock > (local.get(client) ?? 0)) return true;
+      }
+      return false;
+    });
+  }
+
   async encodeSyncStep1(filePath: string): Promise<Uint8Array> {
     return this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
@@ -257,7 +289,7 @@ export class YjsDocManager {
   }
 
   /** Handle sync step 2 from peer (update diff) */
-  async handleSyncStep2(filePath: string, data: Uint8Array): Promise<void> {
+  async handleSyncStep2(filePath: string, data: Uint8Array, fromDeviceId?: string): Promise<void> {
     let remoteContentChange:
       | { content: string; previousContent: string }
       | null = null;
@@ -265,7 +297,7 @@ export class YjsDocManager {
     await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
       const previousContent = doc.getText('content').toString();
-      Y.applyUpdate(doc, data, 'remote');
+      Y.applyUpdate(doc, data, remoteOrigin(fromDeviceId));
 
       // Update last known content
       const ytext = doc.getText('content');
@@ -436,4 +468,13 @@ export function compareStateVectors(
   return Math.min(...local.keys()) < Math.min(...remote.keys())
     ? 'local-wins'
     : 'remote-wins';
+}
+
+/** Transaction origin for updates received from a peer. */
+class RemoteOrigin {
+  constructor(readonly deviceId: string) {}
+}
+
+function remoteOrigin(deviceId: string | undefined): RemoteOrigin | 'remote' {
+  return deviceId ? new RemoteOrigin(deviceId) : 'remote';
 }
