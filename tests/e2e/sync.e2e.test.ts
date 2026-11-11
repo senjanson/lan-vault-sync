@@ -707,6 +707,71 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     walk(''); return out.sort();
   };
 
+  it('does not pass an old-name edit around forever between three devices', async () => {
+    const ids = ['aaaa', 'bbbb', 'cccc'];
+    const roots = ids.map((id) => tmpRoot(id));
+    const pa = ports();
+    const mesh = async (connect: boolean) => {
+      for (const x of nodes) await x.coord.stop();
+      nodes = [];
+      await sleep(50);
+      const out: Node[] = [];
+      for (let i = 0; i < 3; i++) out.push(track(await startNode(roots[i], ids[i], pa + i, connect ? [pa, pa + 1, pa + 2].slice(0, i) : [])));
+      return out;
+    };
+    seed(roots[0], { 'f.md': 'one\n' });
+    let n = await mesh(true);
+    await sleep(2500);
+    // An edit made under the old name, from a device that has not seen the rename.
+    const old = new Y.Doc();
+    Y.applyUpdate(old, await (n[1].coord as any).docManager.encodeFullState('f.md'));
+    const before = Y.encodeStateVector(old);
+    old.getText('content').insert(0, 'late ');
+    n = await mesh(false);
+    await n[0].vault.mv('f.md', 'g.md');
+    n = await mesh(true);
+    await sleep(4000);
+    for (const data of [Y.encodeStateAsUpdate(old, before), Y.encodeStateAsUpdate(old)]) {
+      const msg = decodeMessage(encodeYjsSync(MessageType.YJS_UPDATE, 'f.md', data));
+      await (n[0].coord as any)._handleMessage('dddd', msg.type, msg.payload);
+    }
+    await sleep(3000);
+    const merges = n.map((x) => x.events.filter((e) => e.startsWith('Merged edits')).length);
+    expect(Math.max(...merges)).toBeLessThan(5);
+    for (const x of n) {
+      expect(x.vault.exists('f.md')).toBe(false);
+      expect(x.vault.text('g.md')).toBe('late one\n');
+    }
+  });
+
+  it('keeps edits to notes another device moved, with five devices', async () => {
+    const ids = ['aaaa', 'bbbb', 'cccc', 'dddd', 'eeee'];
+    const roots = ids.map((id) => tmpRoot(id));
+    const pa = ports();
+    const base: Record<string, string> = {};
+    for (let k = 0; k < 10; k++) base[`y${k}.md`] = `head y${k}\nmid\ntail\n`;
+    seed(roots[0], base);
+    let n = await phase(roots, ids, pa, true);
+    await sleep(4000);
+    n = await phase(roots, ids, pa, false);
+    for (let k = 0; k < 10; k++) {
+      await n[2].vault.write(`y${k}.md`, `head y${k}\nmid\ntail\n[C${k}]\n`);
+      await n[3].vault.mv(`y${k}.md`, `sub/y${k}.md`);
+    }
+    await sleep(500);
+    for (const x of nodes) await x.coord.stop();
+    nodes = [];
+    await sleep(50);
+    // Every device dials every other, as discovery does on a LAN.
+    n = [];
+    for (let i = 0; i < 5; i++) n.push(track(await startNode(roots[i], ids[i], pa + i, ids.map((_, j) => pa + j).filter((_, j) => j < i))));
+    await sleep(15000);
+    for (let i = 0; i < 5; i++) {
+      expect(notes(roots[i]).filter((p) => p.endsWith('.md')).length, `device ${ids[i]}`).toBe(10);
+      for (let k = 0; k < 10; k++) expect(n[i].vault.text(`sub/y${k}.md`), `device ${ids[i]} y${k}`).toContain(`[C${k}]`);
+    }
+  });
+
   it('moves an offline edit to the name a peer gave the note', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     const pa = ports(), ids = ['aaaa', 'bbbb'];

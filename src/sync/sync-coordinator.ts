@@ -406,6 +406,7 @@ export class SyncCoordinator {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
+        if (await this._applyToRenamed(deviceId, resolvedPath, msg.data)) break;
         await this._flushPendingLocalTextChange(resolvedPath);
         // Ensure the local doc is seeded from disk so we don't respond with an
         // empty state when we have content the remote peer hasn't seen yet.
@@ -1387,6 +1388,33 @@ export class SyncCoordinator {
   }
 
   /** Merge a doc received under a renamed note's old name into the note. */
+  /**
+   * A peer that has not seen a rename yet sends changes under the old name.
+   * Apply them to the renamed note when they continue its history. A doc
+   * for the old name is not recreated: it would forget which changes it
+   * already passed on, and peers would keep sending them to each other.
+   */
+  private async _applyToRenamed(deviceId: string, oldPath: string, update: Uint8Array): Promise<boolean> {
+    const target = this._renamedTextTarget(oldPath);
+    if (!target) return false;
+    await this._flushPendingLocalTextChange(target);
+    await this._ensureCrdtInitialized(target);
+    return this.docManager.applyRelatedUpdate(target, update, deviceId);
+  }
+
+  /** The existing note that a missing note was renamed to, if any. */
+  private _renamedTextTarget(oldPath: string): string | null {
+    if (!this.filter.isTextFile(oldPath) || this.vault.getAbstractFileByPath(oldPath)) return null;
+    let target = this.tombstones.get(oldPath)?.movedTo;
+    for (let hops = 0; target && hops < 8; hops++) {
+      if (this.vault.getAbstractFileByPath(target) instanceof TFile) {
+        return this.filter.isTextFile(target) ? target : null;
+      }
+      target = this.tombstones.get(target)?.movedTo;
+    }
+    return null;
+  }
+
   private async _mergeIntoRenamed(oldPath: string): Promise<boolean> {
     let target = this.tombstones.get(oldPath)?.movedTo;
     for (let hops = 0; target && hops < 8; hops++) {
@@ -1595,6 +1623,7 @@ export class SyncCoordinator {
     filePath: string,
     update: Uint8Array,
   ): Promise<void> {
+    if (await this._applyToRenamed(deviceId, filePath, update)) return;
     await this._flushPendingLocalTextChange(filePath);
     if (!this._hasConflictLoserGuard(filePath)) {
       await this._ensureCrdtInitialized(filePath);
