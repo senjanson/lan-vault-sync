@@ -18,6 +18,7 @@ export type RemoteWriteKind = "write" | "delete" | "rename";
 export class VaultWatcher {
   private filter: FileFilter;
   private eventRefs: EventRef[] = [];
+  private workspaceRefs: EventRef[] = [];
   private changeCb: ((event: FileChangeEvent) => void) | null = null;
   private remoteWritePaths = new Map<string, number>();
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -97,7 +98,7 @@ export class VaultWatcher {
     );
 
     if (this.workspace) {
-      this.eventRefs.push(
+      this.workspaceRefs.push(
         this.workspace.on(
           "editor-change",
           (editor: Editor, info: MarkdownView | MarkdownFileInfo) =>
@@ -114,6 +115,11 @@ export class VaultWatcher {
       this.vault.offref(ref);
     }
     this.eventRefs = [];
+    // Workspace listeners are removed from the workspace they were added to.
+    for (const ref of this.workspaceRefs) {
+      this.workspace?.offref(ref);
+    }
+    this.workspaceRefs = [];
     for (const timer of this.debounceTimers.values()) {
       clearTimeout(timer);
     }

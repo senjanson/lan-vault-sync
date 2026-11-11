@@ -133,3 +133,22 @@ describe("VaultWatcher", () => {
     expect(events.map((e) => [e.type, e.path])).toEqual([["delete", "note.md"]]);
   });
 });
+
+describe("VaultWatcher stop", () => {
+  it("stops listening to editor changes", () => {
+    vi.useFakeTimers();
+    const vault = new FakeVault();
+    const workspace = new FakeWorkspace();
+    const watcher = new VaultWatcher(vault as any, [], workspace as any);
+    const events: FileChangeEvent[] = [];
+    watcher.onFileChanged((event) => events.push(event));
+    watcher.start();
+    watcher.stop();
+
+    workspace.trigger("editor-change", { getValue: () => "x" }, { file: createFile("note.md") });
+    vi.advanceTimersByTime(DEBOUNCE_MS);
+    vi.useRealTimers();
+
+    expect(events).toHaveLength(0);
+  });
+});
