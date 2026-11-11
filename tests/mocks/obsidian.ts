@@ -21,6 +21,14 @@ export class TFile extends TAbstractFile {
   }
 }
 
+export class TFolder extends TAbstractFile {
+  children: TAbstractFile[] = [];
+
+  isRoot(): boolean {
+    return this.path === '/' || this.path === '';
+  }
+}
+
 export class EventRef {}
 
 export class Plugin {}

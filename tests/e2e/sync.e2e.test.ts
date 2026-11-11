@@ -16,6 +16,7 @@ vi.mock('../../src/discovery/udp-broadcast', () => ({
 import fs from 'node:fs';
 import path from 'node:path';
 import * as Y from 'yjs';
+import { TFolder } from 'obsidian';
 import { encodeFileData, encodeFileRequest, encodeYjsSync } from '../../src/transport/protocol';
 import { MessageType } from '../../src/types';
 import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot } from './harness';
@@ -519,5 +520,53 @@ describe('e2e pairing key', { timeout: 30000 }, () => {
     await B.coord.stop();
     await sleep(800);
     expect(counts.at(-1)).toBe(0);
+  });
+});
+
+describe('e2e folders', { timeout: 30000 }, () => {
+  let local: Node[] = [];
+  afterEach(async () => { for (const n of local) await n.coord.stop(); local = []; });
+  const t = (n: Node) => (local.push(n), n);
+  const isDir = (n: Node, p: string) => n.vault.getAbstractFileByPath(p) instanceof TFolder;
+
+  it('syncs empty folders and folder renames and deletes without leftovers', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    fs.mkdirSync(path.join(ra, 'Empty/Inner'), { recursive: true });
+    seed(ra, { 'Old/a.md': 'a', 'Old/Sub/b.md': 'b', 'Gone/c.md': 'c' });
+    const pa = ports();
+    const A = t(await startNode(ra, 'aaaa', pa, []));
+    const B = t(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(2000);
+    expect(isDir(B, 'Empty/Inner')).toBe(true);
+    await A.vault.createFolder('Live');
+    await A.vault.renameFolder('Old', 'New');
+    await A.vault.deleteFolder('Gone');
+    await sleep(1500);
+    expect(isDir(B, 'Live')).toBe(true);
+    expect(B.vault.text('New/Sub/b.md')).toBe('b');
+    expect(B.vault.exists('Old')).toBe(false);
+    expect(B.vault.exists('Gone')).toBe(false);
+  });
+
+  it('removes a folder deleted while apart, and keeps one that got new files', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    fs.mkdirSync(path.join(ra, 'Drop'), { recursive: true });
+    fs.mkdirSync(path.join(ra, 'Keep'), { recursive: true });
+    const pa = ports();
+    let A = t(await startNode(ra, 'aaaa', pa, []));
+    let B = t(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(2000);
+    expect(isDir(B, 'Drop')).toBe(true);
+    await A.coord.stop();
+    local = local.filter((n) => n !== A);
+    await B.vault.deleteFolder('Drop');
+    await B.vault.deleteFolder('Keep');
+    await sleep(200);
+    seed(ra, { 'Keep/new.md': 'added while apart' });
+    A = t(await startNode(ra, 'aaaa', pa, []));
+    await sleep(2500);
+    expect(A.vault.exists('Drop')).toBe(false);
+    expect(B.vault.exists('Drop')).toBe(false);
+    expect(B.vault.text('Keep/new.md')).toBe('added while apart');
   });
 });

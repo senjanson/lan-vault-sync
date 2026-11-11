@@ -1,4 +1,4 @@
-import { Vault, TFile, Workspace } from "obsidian";
+import { Vault, TAbstractFile, TFile, TFolder, Workspace } from "obsidian";
 import * as Y from "yjs";
 import fastDiff from "fast-diff";
 import { AuthFailure, ConnectionManager } from "../transport/connection-manager";
@@ -6,6 +6,7 @@ import {
   encodeYjsSync,
   decodeYjsSync,
   encodeFileMetaSync,
+  encodeFolderOp,
   decodeJSON,
 } from "../transport/protocol";
 import { YjsDocManager } from "../crdt/yjs-doc-manager";
@@ -24,6 +25,7 @@ import {
   DeviceInfo,
   FileChangeEvent,
   FileMetaSyncPayload,
+  FolderChangeEvent,
   LANSyncSettings,
   MessageType,
   SyncState,
@@ -32,6 +34,9 @@ import { logger } from "../logger";
 import { ensureParentDirectory, isSafeSyncPath } from "../utils/path-utils";
 import { supportsIncomingConnections } from "../utils/runtime";
 import { parsePeerAddress } from "../discovery/manual-peers";
+
+/** Hash recorded in deletion records of folders. */
+const FOLDER_HASH = "folder";
 
 export class SyncCoordinator {
   private static readonly REMOTE_TEXT_RENAME_ALIAS_TTL_MS = 10_000;
@@ -65,6 +70,8 @@ export class SyncCoordinator {
   private tombstones: TombstoneStore;
   /** Last seen content hash per path, recorded in a deletion record. */
   private knownHashes = new Map<string, string>();
+  /** Folders a peer deleted, removed here once they hold no files (path → expiry). */
+  private pendingFolderDeletes = new Map<string, number>();
   private vaultId: string;
   private syncLogService: SyncLogService | null;
 
@@ -291,6 +298,7 @@ export class SyncCoordinator {
     this.watcher.onFileChanged((event) => {
       void this._enqueueLocalFileChange(event);
     });
+    this.watcher.onFolderChanged((event) => this._handleLocalFolderChange(event));
 
     // Yjs doc manager → broadcast local updates
     this.docManager.onLocalUpdate((filePath, update) => {
@@ -331,6 +339,7 @@ export class SyncCoordinator {
       // Remember the deletion too, for peers that are offline right now.
       this.tombstones.add(path, this.knownHashes.get(path));
       this.knownHashes.delete(path);
+      void this._prunePendingFolders();
       if (!this.filter.isTextFile(path)) return;
       await this.docManager.removeDoc(path);
       this._clearConflictLoserGuard(path);
@@ -356,6 +365,7 @@ export class SyncCoordinator {
 
     this.binarySync.onRemoteFileRenamed(async (oldPath, newPath) => {
       this._recordRename(oldPath, newPath);
+      void this._prunePendingFolders();
       const oldIsText = this.filter.isTextFile(oldPath);
       const newIsText = this.filter.isTextFile(newPath);
 
@@ -490,6 +500,23 @@ export class SyncCoordinator {
           const reply = this._encodeTree(metaList, true);
           this.connectionManager.sendTo(deviceId, reply);
         }
+        break;
+      }
+
+      case MessageType.FOLDER_CREATE: {
+        const { path } = decodeJSON<{ path: string }>(payload);
+        if (!this._isAllowedPath(path)) break;
+        this.tombstones.clear(path);
+        this.pendingFolderDeletes.delete(path);
+        await this._createFolderFromRemote(path);
+        break;
+      }
+
+      case MessageType.FOLDER_DELETE: {
+        const { path } = decodeJSON<{ path: string }>(payload);
+        if (!this._isAllowedPath(path)) break;
+        this.tombstones.add(path, FOLDER_HASH);
+        this._scheduleFolderDelete(path);
         break;
       }
 
@@ -946,6 +973,8 @@ export class SyncCoordinator {
       }
     }
 
+    if (meta.folders) await this._syncFolders(meta.folders, remoteDeleted);
+
     if (isInitialBootstrap) {
       for (const [path, local] of localTree.files) {
         const remote = remoteFiles.get(path);
@@ -1119,6 +1148,102 @@ export class SyncCoordinator {
     return tree;
   }
 
+  // ─── Private: folders ─────────────────────────────────────
+
+  private _listFolders(): string[] {
+    const all: TAbstractFile[] = (this.vault as any).getAllLoadedFiles?.() ?? [];
+    return all
+      .filter((f) => f instanceof TFolder && !f.isRoot() && this._isAllowedPath(f.path))
+      .map((f) => f.path);
+  }
+
+  private _handleLocalFolderChange(event: FolderChangeEvent): void {
+    if (event.type === "create") {
+      this.tombstones.clear(event.path);
+      this.connectionManager.broadcast(encodeFolderOp(MessageType.FOLDER_CREATE, event.path));
+      return;
+    }
+    const gone = event.type === "rename" ? event.oldPath! : event.path;
+    this.tombstones.add(gone, FOLDER_HASH);
+    if (event.type === "rename") {
+      this.tombstones.clear(event.path);
+      this.connectionManager.broadcast(encodeFolderOp(MessageType.FOLDER_CREATE, event.path));
+    }
+    this.connectionManager.broadcast(encodeFolderOp(MessageType.FOLDER_DELETE, gone));
+  }
+
+  /** Create folders the peer has, and remove empty ones the peer deleted. */
+  private async _syncFolders(
+    remoteFolders: string[],
+    remoteDeleted: Map<string, { hash?: string }>,
+  ): Promise<void> {
+    const remote = new Set(remoteFolders.filter((p) => this._isAllowedPath(p)));
+    for (const path of remote) {
+      if (this.vault.getAbstractFileByPath(path)) continue;
+      if (this.tombstones.get(path)?.hash === FOLDER_HASH) continue;
+      await this._createFolderFromRemote(path);
+    }
+    for (const path of this._listFolders()) {
+      if (remote.has(path)) continue;
+      if (remoteDeleted.get(path)?.hash === FOLDER_HASH) this._scheduleFolderDelete(path);
+    }
+  }
+
+  private async _createFolderFromRemote(path: string): Promise<void> {
+    const parts = path.split("/");
+    for (let i = 1; i <= parts.length; i++) {
+      const sub = parts.slice(0, i).join("/");
+      if (this.vault.getAbstractFileByPath(sub)) continue;
+      this.watcher.markRemoteWrite(sub, "write");
+      try {
+        await this.vault.createFolder(sub);
+      } catch (err) {
+        logger.warn(`Could not create folder ${sub}:`, err);
+        return;
+      }
+    }
+  }
+
+  private _scheduleFolderDelete(path: string): void {
+    // Files inside may still be on their way out (moved or deleted by the
+    // same change), so keep trying for a while.
+    this.pendingFolderDeletes.set(path, Date.now() + 60_000);
+    void this._prunePendingFolders();
+  }
+
+  private async _prunePendingFolders(): Promise<void> {
+    // Deepest first, so a parent is checked after its subfolders are gone.
+    const paths = [...this.pendingFolderDeletes.keys()].sort((a, b) => b.length - a.length);
+    for (const path of paths) {
+      const expiry = this.pendingFolderDeletes.get(path);
+      if (expiry === undefined) continue;
+      const folder = this.vault.getAbstractFileByPath(path);
+      if (!(folder instanceof TFolder) || expiry < Date.now()) {
+        this.pendingFolderDeletes.delete(path);
+        continue;
+      }
+      if (this._holdsFiles(folder)) continue;
+      this.pendingFolderDeletes.delete(path);
+      const markAll = (f: TFolder) => {
+        this.watcher.markRemoteWrite(f.path, "delete");
+        for (const child of f.children) if (child instanceof TFolder) markAll(child);
+      };
+      markAll(folder);
+      try {
+        await this.vault.delete(folder, true);
+        this._emitEvent(`Deleted folder: ${path}`);
+      } catch (err) {
+        logger.warn(`Could not delete folder ${path}:`, err);
+      }
+    }
+  }
+
+  private _holdsFiles(folder: TFolder): boolean {
+    return folder.children.some((c) =>
+      c instanceof TFolder ? this._holdsFiles(c) : true,
+    );
+  }
+
   private async _primeKnownHashes(): Promise<void> {
     try {
       const tree = await buildFileTree(this.vault, this.filter);
@@ -1134,7 +1259,9 @@ export class SyncCoordinator {
   private _encodeTree(files: FileMeta[], isResponse?: boolean): Uint8Array {
     const deleted = this.tombstones.list().filter((t) => !this.filter.shouldIgnore(t.path));
     return encodeFileMetaSync(
-      isResponse ? { files, deleted, isResponse: true } : { files, deleted },
+      isResponse
+        ? { files, folders: this._listFolders(), deleted, isResponse: true }
+        : { files, folders: this._listFolders(), deleted },
     );
   }
 

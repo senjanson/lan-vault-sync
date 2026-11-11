@@ -46,6 +46,12 @@ export interface DeviceInfo {
 }
 
 // ─── File events ─────────────────────────────────────────
+export interface FolderChangeEvent {
+  type: "create" | "delete" | "rename";
+  path: string;
+  oldPath?: string;
+}
+
 export interface FileChangeEvent {
   type: "create" | "modify" | "delete" | "rename";
   path: string;
@@ -93,6 +99,10 @@ export enum MessageType {
   FILE_DELETE = 0x23,
   FILE_RENAME = 0x24,
   FILE_CHUNK = 0x25,
+  /** A folder was created (payload: FileDeletePayload-shaped JSON). */
+  FOLDER_CREATE = 0x26,
+  /** A folder was deleted; peers remove it once it holds no files. */
+  FOLDER_DELETE = 0x27,
 
   PING = 0xf0,
   PONG = 0xf1,
@@ -129,6 +139,8 @@ export interface Tombstone {
 
 export interface FileMetaSyncPayload {
   files: FileMeta[];
+  /** All folders of the sender's vault; older versions leave this out. */
+  folders?: string[];
   /** Files the sender deleted; older versions leave this out. */
   deleted?: Tombstone[];
   /** When true this is a response to a received FILE_META_SYNC — the receiver

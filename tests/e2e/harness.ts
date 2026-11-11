@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 (globalThis as any).require = createRequire(import.meta.url);
-import { TFile } from 'obsidian';
+import { TFile, TFolder } from 'obsidian';
 import { SyncCoordinator } from '../../src/sync/sync-coordinator';
 import { DEFAULT_SETTINGS, LANSyncSettings } from '../../src/types';
 
@@ -48,7 +48,33 @@ export class DiskVault {
   offref(ref: any) { this.handlers.get(ref.ev)?.delete(ref.h); }
   trigger(ev: string, ...a: any[]) { for (const h of this.handlers.get(ev) ?? []) h(...a); }
   getFiles() { return [...this.files.values()]; }
-  getAbstractFileByPath(p: string) { return this.files.get(p) ?? null; }
+  getAbstractFileByPath(p: string): any { return this.files.get(p) ?? this.folder(p); }
+  /** Folders come straight from disk, with their children, like Obsidian's tree. */
+  folder(p: string): TFolder | null {
+    if (!p || p.startsWith('.obsidian') || !fs.existsSync(this.abs(p)) || !fs.statSync(this.abs(p)).isDirectory()) return null;
+    const f = new TFolder(p);
+    f.children = fs.readdirSync(this.abs(p)).map((n) => this.getAbstractFileByPath(`${p}/${n}`)).filter(Boolean);
+    return f;
+  }
+  getAllLoadedFiles(): any[] {
+    const out: any[] = [];
+    const walk = (dir: string) => { for (const e of fs.readdirSync(this.abs(dir), { withFileTypes: true })) { const rel = dir ? `${dir}/${e.name}` : e.name; if (rel.startsWith('.obsidian')) continue; if (e.isDirectory()) { out.push(this.folder(rel)); walk(rel); } else if (this.files.has(rel)) out.push(this.files.get(rel)); } };
+    walk('');
+    return out;
+  }
+  async createFolder(p: string) { if (fs.existsSync(this.abs(p))) throw new Error('Folder already exists.'); this.parentOk(p); fs.mkdirSync(this.abs(p)); this.trigger('create', this.folder(p)); }
+  /** Delete a folder with everything in it, firing events for each item, as Obsidian does. */
+  async deleteFolder(p: string) {
+    const folder = this.folder(p)!;
+    for (const c of folder.children) { if (c instanceof TFolder) await this.deleteFolder(c.path); else { this.files.delete(c.path); fs.rmSync(this.abs(c.path)); this.trigger('delete', c); } }
+    fs.rmdirSync(this.abs(p)); this.trigger('delete', folder);
+  }
+  async renameFolder(p: string, np: string) {
+    const moved = [...this.files.keys()].filter((k) => k.startsWith(p + '/'));
+    this.parentOk(np); fs.renameSync(this.abs(p), this.abs(np));
+    this.trigger('rename', this.folder(np), p);
+    for (const old of moved) { this.files.delete(old); const nf = this.track(np + old.slice(p.length)); this.trigger('rename', nf, old); }
+  }
   async cachedRead(f: TFile) { return fs.readFileSync(this.abs(f.path), 'utf8'); }
   async read(f: TFile) { return this.cachedRead(f); }
   async readBinary(f: TFile) { return this.adapter.readBinary(f.path); }
@@ -57,7 +83,8 @@ export class DiskVault {
   async createBinary(p: string, c: ArrayBuffer) { if (this.files.has(p)) throw new Error('File already exists.'); this.parentOk(p); fs.writeFileSync(this.abs(p), Buffer.from(c)); const f = this.track(p); this.trigger('create', f); return f; }
   async modify(f: TFile, c: string) { fs.writeFileSync(this.abs(f.path), c); this.track(f.path); this.trigger('modify', this.files.get(f.path)); }
   async modifyBinary(f: TFile, c: ArrayBuffer) { fs.writeFileSync(this.abs(f.path), Buffer.from(c)); this.track(f.path); this.trigger('modify', this.files.get(f.path)); }
-  async delete(f: TFile) { fs.rmSync(this.abs(f.path)); this.files.delete(f.path); this.trigger('delete', f); }
+  async delete(f: any, _force?: boolean) { if (f instanceof TFolder) return this.deleteFolder(f.path); return this.deleteFile(f); }
+  async deleteFile(f: TFile) { fs.rmSync(this.abs(f.path)); this.files.delete(f.path); this.trigger('delete', f); }
   async rename(f: TFile, np: string) { const old = f.path; this.parentOk(np); fs.renameSync(this.abs(old), this.abs(np)); this.files.delete(old); const nf = this.track(np); this.trigger('rename', nf, old); }
   // ── "user" helpers (go through the vault API like the editor would)
   async write(p: string, c: string) { const f = this.files.get(p); if (f) return this.modify(f, c); fs.mkdirSync(path.dirname(this.abs(p)), { recursive: true }); return this.create(p, c); }

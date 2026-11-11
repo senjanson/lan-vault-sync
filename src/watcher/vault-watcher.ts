@@ -5,10 +5,11 @@ import {
   MarkdownView,
   TAbstractFile,
   TFile,
+  TFolder,
   Vault,
   Workspace,
 } from "obsidian";
-import { FileChangeEvent } from "../types";
+import { FileChangeEvent, FolderChangeEvent } from "../types";
 import { FileFilter } from "./file-filter";
 import { DEBOUNCE_MS } from "../constants";
 import { logger } from "../logger";
@@ -20,6 +21,7 @@ export class VaultWatcher {
   private eventRefs: EventRef[] = [];
   private workspaceRefs: EventRef[] = [];
   private changeCb: ((event: FileChangeEvent) => void) | null = null;
+  private folderCb: ((event: FolderChangeEvent) => void) | null = null;
   private remoteWritePaths = new Map<string, number>();
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingModifyEvents = new Map<
@@ -41,6 +43,10 @@ export class VaultWatcher {
 
   onFileChanged(cb: (event: FileChangeEvent) => void): void {
     this.changeCb = cb;
+  }
+
+  onFolderChanged(cb: (event: FolderChangeEvent) => void): void {
+    this.folderCb = cb;
   }
 
   /**
@@ -133,6 +139,14 @@ export class VaultWatcher {
     file: TAbstractFile,
     oldPath?: string,
   ): void {
+    if (file instanceof TFolder) {
+      if (type === "modify" || file.isRoot()) return;
+      if (this.filter.shouldIgnore(file.path)) return;
+      if (oldPath && this.filter.shouldIgnore(oldPath)) return;
+      if (this._isRemoteWrite(file.path, type)) return;
+      this.folderCb?.({ type, path: file.path, oldPath });
+      return;
+    }
     if (!(file instanceof TFile)) return;
 
     const path = file.path;

@@ -176,6 +176,13 @@ export function encodeFileRename(payload: FileRenamePayload): Uint8Array {
   return encodeMessage(MessageType.FILE_RENAME, encodeJSON(payload));
 }
 
+export function encodeFolderOp(
+  type: MessageType.FOLDER_CREATE | MessageType.FOLDER_DELETE,
+  path: string,
+): Uint8Array {
+  return encodeMessage(type, encodeJSON({ path }));
+}
+
 // ─── Ping / Pong ─────────────────────────────────────────
 
 export function encodePing(): Uint8Array {
