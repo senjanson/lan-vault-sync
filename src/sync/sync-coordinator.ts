@@ -648,6 +648,13 @@ export class SyncCoordinator {
         return;
       }
 
+      // The note was renamed here, and a peer still sends edits under the
+      // old name: merge them into the renamed note instead of bringing the
+      // old name back.
+      if (!isExistingFile && tombstone?.movedTo && (await this._mergeIntoRenamed(filePath))) {
+        return;
+      }
+
       // A file open in an editor is updated in the editor, which Obsidian
       // then saves. Writing the file underneath a dirty editor made Obsidian
       // merge the disk change into the editor a second time, duplicating the
@@ -1379,6 +1386,28 @@ export class SyncCoordinator {
       target = remoteDeleted.get(target)?.movedTo;
     }
     return null;
+  }
+
+  /** Merge a doc received under a renamed note's old name into the note. */
+  private async _mergeIntoRenamed(oldPath: string): Promise<boolean> {
+    let target = this.tombstones.get(oldPath)?.movedTo;
+    for (let hops = 0; target && hops < 8; hops++) {
+      if (this.vault.getAbstractFileByPath(target) instanceof TFile) break;
+      target = this.tombstones.get(target)?.movedTo;
+    }
+    if (!target || !this.filter.isTextFile(target)) return false;
+    if (!(this.vault.getAbstractFileByPath(target) instanceof TFile)) return false;
+    await this._flushPendingLocalTextChange(target);
+    await this._ensureCrdtInitialized(target);
+    const merged = await this.docManager.absorbDoc(oldPath, target);
+    // Unrelated history: someone made a new note under the old name.
+    if (!merged) return false;
+    await this.docManager.removeDoc(oldPath);
+    if (merged.content !== merged.previousContent) {
+      await this._writeFileFromRemote(target, merged.content, merged.previousContent);
+    }
+    this._emitEvent(`Merged edits for ${oldPath} into ${target}`);
+    return true;
   }
 
   /**

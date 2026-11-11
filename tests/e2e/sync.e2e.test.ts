@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as Y from 'yjs';
 import { TFolder } from 'obsidian';
-import { encodeFileData, encodeFileRequest, encodeYjsSync } from '../../src/transport/protocol';
+import { decodeMessage, encodeFileData, encodeFileRequest, encodeYjsSync } from '../../src/transport/protocol';
 import { MessageType } from '../../src/types';
 import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot } from './harness';
 
@@ -749,6 +749,25 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
       expect(notes(r)).toEqual(['p-b.png', 'r-b.md']);
       expect(n.vault.text('r-b.md')).toBe('r\nedited on B\n');
     }
+  });
+
+  it('merges edits a peer sends under the old name into the renamed note', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports(), ids = ['aaaa', 'bbbb'];
+    seed(ra, { 'f.md': 'one\ntwo\n' });
+    let [A, B] = await phase([ra, rb], ids, pa, true);
+    await sleep(2000);
+    [A, B] = await phase([ra, rb], ids, pa, false);
+    await A.vault.mv('f.md', 'g.md');
+    await B.vault.write('f.md', 'one\ntwo\nfrom B\n');
+    await sleep(800);
+    // B's copy reaches A under the old name, e.g. relayed by a third device.
+    const state = await (B.coord as any).docManager.encodeFullState('f.md');
+    const msg = decodeMessage(encodeYjsSync(MessageType.YJS_FULL_STATE, 'f.md', state));
+    await (A.coord as any)._handleMessage('cccc', msg.type, msg.payload);
+    await sleep(500);
+    expect(A.vault.exists('f.md')).toBe(false);
+    expect(A.vault.text('g.md')).toBe('one\ntwo\nfrom B\n');
   });
 
   it('moves offline edits from two devices to the new name, with three devices', async () => {
