@@ -85,6 +85,7 @@ export class SyncCoordinator {
       vault,
       this.connectionManager,
       this.backupService,
+      (path) => this._isAllowedPath(path),
     );
     this.watcher = new VaultWatcher(
       vault,
@@ -315,7 +316,7 @@ export class SyncCoordinator {
     switch (type) {
       case MessageType.YJS_SYNC_STEP1: {
         const msg = decodeYjsSync(payload);
-        if (!isSafeSyncPath(msg.filePath)) break;
+        if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
         // Ensure the local doc is seeded from disk so we don't respond with an
@@ -356,7 +357,7 @@ export class SyncCoordinator {
 
       case MessageType.YJS_SYNC_STEP2: {
         const msg = decodeYjsSync(payload);
-        if (!isSafeSyncPath(msg.filePath)) break;
+        if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
         await this.docManager.handleSyncStep2(resolvedPath, msg.data);
@@ -367,7 +368,7 @@ export class SyncCoordinator {
 
       case MessageType.YJS_UPDATE: {
         const msg = decodeYjsSync(payload);
-        if (!isSafeSyncPath(msg.filePath)) break;
+        if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
         await this.docManager.applyRemoteUpdate(resolvedPath, msg.data);
@@ -483,7 +484,7 @@ export class SyncCoordinator {
     previousContent?: string,
   ): Promise<void> {
     try {
-      if (!isSafeSyncPath(filePath)) {
+      if (!this._isAllowedPath(filePath)) {
         logger.warn(`Rejected unsafe remote path: ${filePath}`);
         return;
       }
@@ -613,6 +614,8 @@ export class SyncCoordinator {
     const isInitialBootstrap = this.pendingInitialBootstrapPeers.has(deviceId);
     const remoteFiles = new Map<string, (typeof meta.files)[number]>();
     for (const f of meta.files) {
+      // Never pull files this device ignores (or cannot safely write).
+      if (!this._isAllowedPath(f.path)) continue;
       remoteFiles.set(f.path, f);
     }
 
@@ -1000,6 +1003,15 @@ export class SyncCoordinator {
    * Winner: the side with the more-recent mtime.  On tie: the side whose
    * deviceId is lexicographically smaller.
    */
+  /**
+   * Whether a path from a peer may be read or written here: it must be safe
+   * and not in this device's ignored paths (incoming files and requests for
+   * our files are filtered the same way as local changes).
+   */
+  private _isAllowedPath(filePath: string): boolean {
+    return isSafeSyncPath(filePath) && !this.filter.shouldIgnore(filePath);
+  }
+
   private _isConflictWinner(
     localMtime: number,
     remoteMtime: number,

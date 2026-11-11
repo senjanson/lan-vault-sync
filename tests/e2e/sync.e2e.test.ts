@@ -16,7 +16,7 @@ vi.mock('../../src/discovery/udp-broadcast', () => ({
 import fs from 'node:fs';
 import path from 'node:path';
 import * as Y from 'yjs';
-import { encodeFileData, encodeYjsSync } from '../../src/transport/protocol';
+import { encodeFileData, encodeFileRequest, encodeYjsSync } from '../../src/transport/protocol';
 import { MessageType } from '../../src/types';
 import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot } from './harness';
 
@@ -133,5 +133,30 @@ describe('e2e paths', { timeout: 30000 }, () => {
     rogue.ws.close();
     expect(fs.existsSync(path.join(ra, '.obsidian/plugins/evil/main.js'))).toBe(false);
     expect(fs.existsSync(path.join(ra, '.obsidian/community-plugins.json'))).toBe(false);
+  });
+});
+
+describe('e2e ignored paths', { timeout: 30000 }, () => {
+  it('does not pull or serve files in ignored paths', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'private/mine.md': 'A secret', 'private/mine.png': Buffer.from([1]) });
+    seed(rb, { 'private/secret.md': 'B secret', 'private/p.png': Buffer.from([5]) });
+    const pa = ports();
+    const ignore = { ignoredPaths: ['.obsidian/', '.trash/', 'private/'] };
+    const A = track(await startNode(ra, 'aaaa', pa, [], ignore));
+    track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(1500);
+    expect(A.vault.text('private/secret.md')).toBeNull();
+    expect(A.vault.exists('private/p.png')).toBe(false);
+
+    // A peer that asks for ignored files directly gets nothing.
+    const rogue = await connectRaw(pa, { deviceId: 'rogue', vaultId: (A.coord as any).vaultId });
+    rogue.send(encodeFileRequest('private/mine.png'));
+    rogue.send(encodeYjsSync(MessageType.YJS_SYNC_STEP1, 'private/mine.md', Y.encodeStateVector(new Y.Doc())));
+    await sleep(800);
+    rogue.ws.close();
+    const types = rogue.received.map((m) => m.type);
+    expect(types).not.toContain(MessageType.FILE_DATA);
+    expect(types).not.toContain(MessageType.YJS_SYNC_STEP2);
   });
 });

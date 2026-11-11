@@ -36,6 +36,7 @@ export class BinaryFileSyncService {
     private vault: Vault,
     private connectionManager: ConnectionManager,
     private backupService: ConflictBackupService,
+    private isAllowedPath: (path: string) => boolean = isSafeSyncPath,
   ) {}
 
   onRemoteFileWritten(cb: (path: string) => void): void {
@@ -67,25 +68,25 @@ export class BinaryFileSyncService {
     switch (type) {
       case MessageType.FILE_REQUEST: {
         const path = decodeFileRequest(payload);
-        if (!isSafeSyncPath(path)) break;
+        if (!this.isAllowedPath(path)) break;
         await this._sendFile(deviceId, path);
         break;
       }
       case MessageType.FILE_DATA: {
         const data = decodeFileData(payload);
-        if (!isSafeSyncPath(data.path)) break;
+        if (!this.isAllowedPath(data.path)) break;
         await this._receiveFile(data.path, data.content, data.mtime);
         break;
       }
       case MessageType.FILE_DELETE: {
         const del = decodeJSON<FileDeletePayload>(payload);
-        if (!isSafeSyncPath(del.path)) break;
+        if (!this.isAllowedPath(del.path)) break;
         await this._deleteFile(del.path);
         break;
       }
       case MessageType.FILE_RENAME: {
         const ren = decodeJSON<FileRenamePayload>(payload);
-        if (!isSafeSyncPath(ren.oldPath) || !isSafeSyncPath(ren.newPath))
+        if (!this.isAllowedPath(ren.oldPath) || !this.isAllowedPath(ren.newPath))
           break;
         await this._renameFile(ren.oldPath, ren.newPath);
         break;
