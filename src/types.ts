@@ -106,8 +106,18 @@ export interface YjsSyncMessage {
   data: Uint8Array;
 }
 
+/** A file this device deleted or renamed away. */
+export interface Tombstone {
+  path: string;
+  deletedAt: number;
+  /** Hash of the content that was deleted, when known. */
+  hash?: string;
+}
+
 export interface FileMetaSyncPayload {
   files: FileMeta[];
+  /** Files the sender deleted; older versions leave this out. */
+  deleted?: Tombstone[];
   /** When true this is a response to a received FILE_META_SYNC — the receiver
    *  should NOT echo yet another FILE_META_SYNC back to avoid ping-pong. */
   isResponse?: boolean;

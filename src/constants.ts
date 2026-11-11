@@ -53,6 +53,9 @@ export const TEXT_EXTENSIONS = new Set([
 
 export const CRDT_STATE_DIR = ".obsidian/plugins/lan-vault-sync/crdt-state";
 export const CONFLICT_BACKUP_DIR = ".obsidian/plugins/lan-vault-sync/conflicts";
+export const TOMBSTONE_FILE = ".obsidian/plugins/lan-vault-sync/deleted-files.json";
+/** How long a deletion is remembered for peers that were offline. */
+export const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const MAX_ACTIVE_DOCS = 50;
 export const DEBOUNCE_MS = 200;

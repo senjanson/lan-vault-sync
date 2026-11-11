@@ -121,4 +121,15 @@ describe("VaultWatcher", () => {
 
     expect(events).toHaveLength(0);
   });
+
+  it("emits a user delete made right after a remote write", () => {
+    const file = createFile("note.md");
+
+    watcher.markRemoteWrite("note.md");
+    vault.trigger("delete", file);
+    watcher.markRemoteWrite("image.png", "delete");
+    vault.trigger("delete", createFile("image.png"));
+
+    expect(events.map((e) => [e.type, e.path])).toEqual([["delete", "note.md"]]);
+  });
 });

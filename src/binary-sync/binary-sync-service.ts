@@ -37,7 +37,9 @@ interface IncomingFile {
 export class BinaryFileSyncService {
   /** Chunked files being received, keyed by `${deviceId}\n${path}`. */
   private incoming = new Map<string, IncomingFile>();
-  private onRemoteFileWrittenCb: ((path: string) => void) | null = null;
+  private onRemoteFileWrittenCb:
+    | ((path: string, kind?: "write" | "delete" | "rename") => void)
+    | null = null;
   private onRemoteFileDeletedCb:
     | ((path: string) => Promise<void> | void)
     | null = null;
@@ -55,7 +57,9 @@ export class BinaryFileSyncService {
     private isAllowedPath: (path: string) => boolean = isSafeSyncPath,
   ) {}
 
-  onRemoteFileWritten(cb: (path: string) => void): void {
+  onRemoteFileWritten(
+    cb: (path: string, kind?: "write" | "delete" | "rename") => void,
+  ): void {
     this.onRemoteFileWrittenCb = cb;
   }
 
@@ -310,6 +314,12 @@ export class BinaryFileSyncService {
     }
   }
 
+  /** Delete a local file because a peer deleted it (backed up first). */
+  async applyRemoteDelete(path: string): Promise<void> {
+    if (!this.isAllowedPath(path)) return;
+    await this._deleteFile(path);
+  }
+
   private async _deleteFile(path: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
@@ -336,7 +346,7 @@ export class BinaryFileSyncService {
         );
         this.onBackupCreatedCb?.(path, backup.backupId, "remote-file-delete");
       }
-      this.onRemoteFileWrittenCb?.(path);
+      this.onRemoteFileWrittenCb?.(path, "delete");
       await this.vault.delete(file);
       await this.onRemoteFileDeletedCb?.(path);
       logger.debug(`Deleted file: ${path}`);
@@ -386,8 +396,8 @@ export class BinaryFileSyncService {
       );
     }
 
-    this.onRemoteFileWrittenCb?.(oldPath);
-    this.onRemoteFileWrittenCb?.(newPath);
+    this.onRemoteFileWrittenCb?.(oldPath, "rename");
+    this.onRemoteFileWrittenCb?.(newPath, "rename");
     const adapter = (this.vault as any).adapter;
     if (adapter) {
       await ensureParentDirectory(adapter, newPath);

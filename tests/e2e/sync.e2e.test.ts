@@ -282,3 +282,72 @@ describe('e2e unrelated histories', { timeout: 30000 }, () => {
     expect(['v1\nedited on A\n', 'v1\nedited on B\n']).toContain(a);
   });
 });
+
+describe('e2e offline deletes', { timeout: 30000 }, () => {
+  async function pair(ra: string, rb: string, pa: number) {
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    return { A, B };
+  }
+
+  it('does not bring back files deleted or renamed while a peer was offline', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'keep.md': 'k', 'gone.md': 'delete me', 'g.png': Buffer.from([1]), 'old.md': 'moved' });
+    const pa = ports();
+    let { A, B } = await pair(ra, rb, pa);
+    await sleep(1500);
+    expect(B.vault.text('gone.md')).toBe('delete me');
+    await B.coord.stop();
+    nodes = nodes.filter((n) => n !== B);
+    await A.vault.rm('gone.md');
+    await A.vault.rm('g.png');
+    await A.vault.mv('old.md', 'new.md');
+    await sleep(500);
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(2000);
+    for (const n of [A, B]) {
+      expect(n.vault.exists('gone.md')).toBe(false);
+      expect(n.vault.exists('g.png')).toBe(false);
+      expect(n.vault.exists('old.md')).toBe(false);
+      expect(n.vault.text('new.md')).toBe('moved');
+      expect(n.vault.text('keep.md')).toBe('k');
+    }
+  });
+
+  it('applies a deletion made by the device that was offline', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'gone.md': 'delete me' });
+    const pa = ports();
+    let { A, B } = await pair(ra, rb, pa);
+    await sleep(1500);
+    await A.coord.stop();
+    nodes = nodes.filter((n) => n !== A);
+    await B.vault.rm('gone.md');
+    await sleep(300);
+    // Restart B too, so the deletion has to survive a restart.
+    await B.coord.stop();
+    nodes = [];
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(2000);
+    expect(A.vault.exists('gone.md')).toBe(false);
+    expect(B.vault.exists('gone.md')).toBe(false);
+  });
+
+  it('keeps a file the offline peer edited after it was deleted', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'n.md': 'v1' });
+    const pa = ports();
+    let { A, B } = await pair(ra, rb, pa);
+    await sleep(1500);
+    await B.coord.stop();
+    nodes = nodes.filter((n) => n !== B);
+    await A.vault.rm('n.md');
+    await sleep(300);
+    seed(rb, { 'n.md': 'v1 edited later' });
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(2000);
+    expect(A.vault.text('n.md')).toBe('v1 edited later');
+    expect(B.vault.text('n.md')).toBe('v1 edited later');
+  });
+});

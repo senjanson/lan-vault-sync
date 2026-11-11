@@ -14,9 +14,12 @@ import { VaultWatcher } from "../watcher/vault-watcher";
 import { DiscoveryService } from "../discovery/discovery-service";
 import { FileFilter } from "../watcher/file-filter";
 import { SyncStateMachine } from "./sync-state";
-import { buildFileTree, diffFileTrees } from "./file-tree";
+import { buildFileTree, diffFileTrees, FileTreeSnapshot } from "./file-tree";
+import { TombstoneStore } from "./tombstones";
+import { computeFileHash } from "../binary-sync/file-hash";
 import { SyncLogService } from "../sync-log/sync-log-service";
 import {
+  FileMeta,
   DeviceInfo,
   FileChangeEvent,
   FileMetaSyncPayload,
@@ -59,6 +62,10 @@ export class SyncCoordinator {
   >();
   /** Text we last wrote to disk for a remote change, to recognise its echo. */
   private remoteWrittenText = new Map<string, string>();
+  /** Files deleted here, so offline peers don't send them back. */
+  private tombstones: TombstoneStore;
+  /** Last seen content hash per path, recorded in a deletion record. */
+  private knownHashes = new Map<string, string>();
   private vaultId: string;
   private syncLogService: SyncLogService | null;
 
@@ -81,6 +88,7 @@ export class SyncCoordinator {
     this.stateMachine = new SyncStateMachine();
     this.connectionManager = new ConnectionManager(settings, this.vaultId);
     this.docManager = new YjsDocManager(vault);
+    this.tombstones = new TombstoneStore((vault as any).adapter);
     this.backupService =
       options?.backupService ?? new ConflictBackupService(vault);
     this.syncLogService = options?.syncLogService ?? null;
@@ -135,6 +143,7 @@ export class SyncCoordinator {
 
     try {
       this.stateMachine.transition("discovering");
+      await this.tombstones.load();
 
       // Start WebSocket server
       await this.connectionManager.start();
@@ -193,6 +202,7 @@ export class SyncCoordinator {
     await this.docManager.persistAll();
     await this.docManager.destroy();
     await this.syncLogService?.flush();
+    await this.tombstones.flush();
 
     this.stateMachine.transition("idle");
     this._emitEvent("Sync service stopped");
@@ -278,11 +288,15 @@ export class SyncCoordinator {
     );
 
     // Binary sync → mark remote writes
-    this.binarySync.onRemoteFileWritten((path) => {
-      this.watcher.markRemoteWrite(path);
+    this.binarySync.onRemoteFileWritten((path, kind) => {
+      this.watcher.markRemoteWrite(path, kind);
+      if (kind !== "delete") this.tombstones.clear(path);
     });
 
     this.binarySync.onRemoteFileDeleted(async (path) => {
+      // Remember the deletion too, for peers that are offline right now.
+      this.tombstones.add(path, this.knownHashes.get(path));
+      this.knownHashes.delete(path);
       if (!this.filter.isTextFile(path)) return;
       await this.docManager.removeDoc(path);
       this._clearConflictLoserGuard(path);
@@ -307,6 +321,7 @@ export class SyncCoordinator {
     });
 
     this.binarySync.onRemoteFileRenamed(async (oldPath, newPath) => {
+      this._recordRename(oldPath, newPath);
       const oldIsText = this.filter.isTextFile(oldPath);
       const newIsText = this.filter.isTextFile(newPath);
 
@@ -439,12 +454,9 @@ export class SyncCoordinator {
         // processes our files.  This ensures bidirectional tree exchange even
         // during one-sided periodic syncs.
         if (!meta.isResponse) {
-          const tree = await buildFileTree(this.vault, this.filter);
+          const tree = await this._buildTree();
           const metaList = Array.from(tree.files.values());
-          const reply = encodeFileMetaSync({
-            files: metaList,
-            isResponse: true,
-          });
+          const reply = this._encodeTree(metaList, true);
           this.connectionManager.sendTo(deviceId, reply);
         }
         break;
@@ -491,8 +503,11 @@ export class SyncCoordinator {
           if (content === null || this._isEchoOfRemoteWrite(path, content)) {
             break;
           }
+          this.tombstones.clear(path);
+          this.knownHashes.set(path, await this._hashText(content));
           await this.docManager.applyLocalChange(path, content);
         } else {
+          this.tombstones.clear(path);
           await this.binarySync.broadcastFileChange(path);
         }
         this.syncLogService?.addEntry("local-send", path, {
@@ -503,6 +518,8 @@ export class SyncCoordinator {
       }
 
       case "delete": {
+        this.tombstones.add(path, this.knownHashes.get(path));
+        this.knownHashes.delete(path);
         if (isTextFile) {
           await this.docManager.removeDoc(path);
           this._clearConflictLoserGuard(path);
@@ -517,6 +534,7 @@ export class SyncCoordinator {
 
       case "rename": {
         if (oldPath) {
+          this._recordRename(oldPath, path);
           const oldIsText = this.filter.isTextFile(oldPath);
           if (oldIsText && isTextFile) {
             await this.docManager.renameDoc(oldPath, path);
@@ -650,9 +668,9 @@ export class SyncCoordinator {
       // This avoids the dual-initialization bug where both sides insert
       // the full file content into independent Y.Docs, causing duplicated
       // text when the docs are synced.
-      const tree = await buildFileTree(this.vault, this.filter);
+      const tree = await this._buildTree();
       const metaList = Array.from(tree.files.values());
-      const msg = encodeFileMetaSync({ files: metaList });
+      const msg = this._encodeTree(metaList);
       this.connectionManager.sendTo(deviceId, msg);
 
       this.stateMachine.transition("watching");
@@ -669,7 +687,7 @@ export class SyncCoordinator {
     deviceId: string,
     meta: FileMetaSyncPayload,
   ): Promise<void> {
-    const localTree = await buildFileTree(this.vault, this.filter);
+    const localTree = await this._buildTree();
     const isInitialBootstrap = this.pendingInitialBootstrapPeers.has(deviceId);
     const remoteFiles = new Map<string, (typeof meta.files)[number]>();
     for (const f of meta.files) {
@@ -679,9 +697,17 @@ export class SyncCoordinator {
     }
 
     const treeDiff = diffFileTrees(localTree.files, remoteFiles);
+    const remoteDeleted = new Map((meta.deleted ?? []).map((t) => [t.path, t]));
 
     // Files only on remote — request them via CRDT sync or binary transfer
     for (const file of treeDiff.remoteOnly) {
+      // Deleted here while the peer was away: the peer removes its copy
+      // when it sees our deletion record, so don't fetch it back.
+      const ownTombstone = this.tombstones.get(file.path);
+      if (ownTombstone && TombstoneStore.covers(ownTombstone, file)) {
+        this._emitEvent(`Skipping deleted file: ${file.path}`);
+        continue;
+      }
       if (file.isTextFile) {
         // DO NOT removeDoc here — it races with concurrent YJS_UPDATE messages
         // from the peer's localOnly processing, potentially destroying freshly
@@ -703,6 +729,13 @@ export class SyncCoordinator {
 
     // Files only locally — send them to the specific peer
     for (const file of treeDiff.localOnly) {
+      // The peer deleted this file while we were away.
+      const peerTombstone = remoteDeleted.get(file.path);
+      if (peerTombstone && TombstoneStore.covers(peerTombstone, file)) {
+        await this.binarySync.applyRemoteDelete(file.path);
+        this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
+        continue;
+      }
       if (file.isTextFile) {
         await this._sendFullTextState(
           deviceId,
@@ -893,7 +926,7 @@ export class SyncCoordinator {
     }
 
     onProgress(5, "Building file tree...");
-    const tree = await buildFileTree(this.vault, this.filter);
+    const tree = await this._buildTree();
     const metaList = Array.from(tree.files.values());
     onProgress(
       15,
@@ -905,7 +938,7 @@ export class SyncCoordinator {
       const peerId = peers[i];
       const peerPercent = 20 + ((i + 1) / totalPeers) * 50;
 
-      const msg = encodeFileMetaSync({ files: metaList });
+      const msg = this._encodeTree(metaList);
       this.connectionManager.sendTo(peerId, msg);
       onProgress(peerPercent, `Sent file tree to peer ${i + 1}/${totalPeers}`);
 
@@ -955,9 +988,9 @@ export class SyncCoordinator {
     if (peers.length === 0) return;
 
     // Re-send file tree metadata to trigger tree diff on peers
-    const tree = await buildFileTree(this.vault, this.filter);
+    const tree = await this._buildTree();
     const metaList = Array.from(tree.files.values());
-    const msg = encodeFileMetaSync({ files: metaList });
+    const msg = this._encodeTree(metaList);
 
     for (const peerId of peers) {
       this.connectionManager.sendTo(peerId, msg);
@@ -965,6 +998,35 @@ export class SyncCoordinator {
   }
 
   // ─── Private: Helpers ───────────────────────────────────
+
+  private async _buildTree(): Promise<FileTreeSnapshot> {
+    const tree = await buildFileTree(this.vault, this.filter);
+    for (const [path, meta] of tree.files) this.knownHashes.set(path, meta.hash);
+    return tree;
+  }
+
+  private _encodeTree(files: FileMeta[], isResponse?: boolean): Uint8Array {
+    const deleted = this.tombstones.list().filter((t) => !this.filter.shouldIgnore(t.path));
+    return encodeFileMetaSync(
+      isResponse ? { files, deleted, isResponse: true } : { files, deleted },
+    );
+  }
+
+  private async _hashText(content: string): Promise<string> {
+    const bytes = new TextEncoder().encode(content);
+    return computeFileHash(
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    );
+  }
+
+  /** A rename removes the old path for peers that were offline. */
+  private _recordRename(oldPath: string, newPath: string): void {
+    const hash = this.knownHashes.get(oldPath);
+    this.tombstones.add(oldPath, hash);
+    this.tombstones.clear(newPath);
+    this.knownHashes.delete(oldPath);
+    if (hash) this.knownHashes.set(newPath, hash);
+  }
 
   private _hashVaultId(name: string): string {
     let hash = 0;

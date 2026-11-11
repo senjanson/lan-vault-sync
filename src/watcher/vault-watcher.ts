@@ -13,6 +13,8 @@ import { FileFilter } from "./file-filter";
 import { DEBOUNCE_MS } from "../constants";
 import { logger } from "../logger";
 
+export type RemoteWriteKind = "write" | "delete" | "rename";
+
 export class VaultWatcher {
   private filter: FileFilter;
   private eventRefs: EventRef[] = [];
@@ -40,14 +42,19 @@ export class VaultWatcher {
     this.changeCb = cb;
   }
 
-  /** Mark a path as coming from a remote write — next change will be ignored */
-  markRemoteWrite(filePath: string): void {
+  /**
+   * Mark a change this plugin is about to make for a peer, so the vault event
+   * it causes is not sent back out. Only events of the same kind are skipped:
+   * a user deleting or renaming a file right after a remote write is real.
+   */
+  markRemoteWrite(filePath: string, kind: RemoteWriteKind = "write"): void {
+    const key = `${kind}\0${filePath}`;
     const expiresAt = Date.now() + 2000;
-    this.remoteWritePaths.set(filePath, expiresAt);
+    this.remoteWritePaths.set(key, expiresAt);
     // Auto-clear after a generous window to ensure all editor/vault events fire
     setTimeout(() => {
-      if (this.remoteWritePaths.get(filePath) === expiresAt) {
-        this.remoteWritePaths.delete(filePath);
+      if (this.remoteWritePaths.get(key) === expiresAt) {
+        this.remoteWritePaths.delete(key);
       }
     }, 2000);
   }
@@ -131,7 +138,7 @@ export class VaultWatcher {
     // let through: the coordinator recognises its own writes by content, so
     // a real edit made right after a remote write is not lost.
     const isTextModify = type === "modify" && this.filter.isTextFile(path);
-    if (!isTextModify && this._isRemoteWrite(path)) {
+    if (!isTextModify && this._isRemoteWrite(path, type)) {
       logger.debug(`Skipping remote write event: ${path}`);
       return;
     }
@@ -194,12 +201,15 @@ export class VaultWatcher {
     );
   }
 
-  private _isRemoteWrite(path: string): boolean {
-    const expiresAt = this.remoteWritePaths.get(path);
+  private _isRemoteWrite(path: string, type: FileChangeEvent["type"]): boolean {
+    const kind: RemoteWriteKind =
+      type === "delete" ? "delete" : type === "rename" ? "rename" : "write";
+    const key = `${kind}\0${path}`;
+    const expiresAt = this.remoteWritePaths.get(key);
     if (!expiresAt) return false;
 
     if (expiresAt <= Date.now()) {
-      this.remoteWritePaths.delete(path);
+      this.remoteWritePaths.delete(key);
       return false;
     }
 
