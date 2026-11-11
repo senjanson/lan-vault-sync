@@ -17,7 +17,7 @@ import { VaultWatcher } from "../watcher/vault-watcher";
 import { DiscoveryService } from "../discovery/discovery-service";
 import { FileFilter } from "../watcher/file-filter";
 import { SyncStateMachine } from "./sync-state";
-import { buildFileTree, diffFileTrees, FileTreeSnapshot } from "./file-tree";
+import { buildFileTree, diffFileTrees, FileHashCache, FileTreeSnapshot } from "./file-tree";
 import { TombstoneStore } from "./tombstones";
 import { computeFileHash } from "../binary-sync/file-hash";
 import { SyncLogService } from "../sync-log/sync-log-service";
@@ -50,6 +50,7 @@ export class SyncCoordinator {
   private stateMachine: SyncStateMachine;
   private filter: FileFilter;
   private fullSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private hashCache: FileHashCache = new Map();
   private persistTimer: ReturnType<typeof setInterval> | null = null;
   private pendingInitialBootstrapPeers = new Set<string>();
   /** Tracks file paths where we are the conflict "loser" and must NOT seed
@@ -1163,7 +1164,9 @@ export class SyncCoordinator {
   // ─── Private: Helpers ───────────────────────────────────
 
   private async _buildTree(): Promise<FileTreeSnapshot> {
-    const tree = await buildFileTree(this.vault, this.filter);
+    // Unchanged files keep their hash, so the periodic sync does not read
+    // the whole vault every time.
+    const tree = await buildFileTree(this.vault, this.filter, this.hashCache);
     for (const [path, meta] of tree.files) this.knownHashes.set(path, meta.hash);
     return tree;
   }
@@ -1282,7 +1285,7 @@ export class SyncCoordinator {
 
   private async _primeKnownHashes(): Promise<void> {
     try {
-      const tree = await buildFileTree(this.vault, this.filter);
+      const tree = await buildFileTree(this.vault, this.filter, this.hashCache);
       for (const [path, meta] of tree.files) {
         // A change seen meanwhile already recorded a newer hash.
         if (!this.knownHashes.has(path)) this.knownHashes.set(path, meta.hash);
