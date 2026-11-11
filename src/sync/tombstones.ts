@@ -47,7 +47,10 @@ export class TombstoneStore {
     if (existing && existing.deletedAt >= deletedAt) return;
     const entry: Tombstone = { path, deletedAt };
     if (hash) entry.hash = hash;
-    if (movedTo) entry.movedTo = movedTo;
+    // A copy that reappeared under a renamed file's old name and was removed
+    // again does not undo the rename: peers still need to know where it went.
+    const moved = movedTo ?? existing?.movedTo;
+    if (moved) entry.movedTo = moved;
     this.entries.set(path, entry);
     this._save();
   }
