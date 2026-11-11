@@ -40,6 +40,8 @@ interface PeerConnection {
   messageQueue: Promise<void>;
 }
 
+type DecodedMessage = ReturnType<typeof decodeMessage>;
+
 type MessageHandler = (deviceId: string, type: MessageType, payload: Uint8Array) => void | Promise<void>;
 
 export class ConnectionManager {
@@ -107,23 +109,19 @@ export class ConnectionManager {
     const client = new WSClient(url);
 
     client.onOpen((ws) => {
-      const offHandshakeAck = addSocketMessageListener(ws, async (raw) => {
-        const msg = decodeMessage(await toUint8Array(raw));
+      this._routeSocket(ws, 'outbound', (msg) => {
         if (msg.type !== MessageType.HANDSHAKE_ACK) {
           logger.warn(`Expected handshake ack from ${url}, got: ${msg.type}`);
-          ws.close();
-          return;
+          return null;
         }
 
         const payload = decodeJSON<HandshakePayload>(msg.payload);
         if (!this._isValidPeer(payload)) {
           logger.warn(`Rejected outbound peer ${payload.deviceId}: invalid handshake ack`);
-          ws.close();
-          return;
+          return null;
         }
 
-        offHandshakeAck();
-        this._setupWs(ws, {
+        return {
           deviceId: payload.deviceId,
           deviceName: payload.deviceName,
           ip: device.ip,
@@ -131,8 +129,8 @@ export class ConnectionManager {
           vaultId: payload.vaultId,
           lastSeen: Date.now(),
           acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
-        }, 'outbound', client);
-      });
+        };
+      }, client);
       ws.send(encodeHandshake(this.localInfo));
     });
 
@@ -171,27 +169,20 @@ export class ConnectionManager {
   // ─── Private ────────────────────────────────────────────
 
   private _handleInbound(ws: SocketLike, ip: string): void {
-    // Wait for handshake first message
-    const offFirstMessage = addSocketMessageListener(ws, async (raw) => {
-      const msg = decodeMessage(await toUint8Array(raw));
+    this._routeSocket(ws, 'inbound', (msg) => {
       if (msg.type !== MessageType.HANDSHAKE) {
         logger.warn('Expected handshake, got:', msg.type);
-        ws.close();
-        return;
+        return null;
       }
 
       const payload = decodeJSON<HandshakePayload>(msg.payload);
       if (!this._isValidPeer(payload)) {
         logger.warn(`Rejected peer ${payload.deviceId}: invalid handshake`);
-        ws.close();
-        return;
+        return null;
       }
 
-      // Send ack
       ws.send(encodeHandshakeAck(this.localInfo));
-
-      offFirstMessage();
-      this._setupWs(ws, {
+      return {
         deviceId: payload.deviceId,
         deviceName: payload.deviceName,
         ip,
@@ -199,7 +190,49 @@ export class ConnectionManager {
         vaultId: payload.vaultId,
         lastSeen: Date.now(),
         acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
-      }, 'inbound');
+      };
+    });
+  }
+
+  /**
+   * Handle every message of a socket through one ordered listener: the first
+   * message completes the handshake, later ones go to the peer.
+   *
+   * A single listener matters because `ws` emits all messages contained in one
+   * TCP chunk synchronously. With a separate handshake listener, the peer's
+   * first data message (sent right behind the ack) reached the handshake
+   * listener before it could unregister, which closed the connection and
+   * started an endless reconnect loop.
+   */
+  private _routeSocket(
+    ws: SocketLike,
+    direction: 'inbound' | 'outbound',
+    handshake: (msg: DecodedMessage) => DeviceInfo | null,
+    client?: WSClient,
+  ): void {
+    let deviceId: string | null = null;
+    let chain: Promise<void> = Promise.resolve();
+
+    addSocketMessageListener(ws, (raw) => {
+      chain = chain
+        .then(async () => {
+          const msg = decodeMessage(await toUint8Array(raw));
+          if (deviceId === null) {
+            const device = handshake(msg);
+            if (!device) {
+              ws.close();
+              return;
+            }
+            if (this._setupWs(ws, device, direction, client)) {
+              deviceId = device.deviceId;
+            }
+            return;
+          }
+          this._dispatch(deviceId, ws, msg);
+        })
+        .catch((err) => {
+          logger.error(`Error handling message (${direction}):`, err);
+        });
     });
   }
 
@@ -208,11 +241,11 @@ export class ConnectionManager {
     device: DeviceInfo,
     direction: 'inbound' | 'outbound',
     client?: WSClient,
-  ): void {
+  ): boolean {
     if (this.peers.has(device.deviceId)) {
       // Already connected — close duplicate
       ws.close();
-      return;
+      return false;
     }
 
     const peer: PeerConnection = {
@@ -236,37 +269,6 @@ export class ConnectionManager {
 
     this.peers.set(device.deviceId, peer);
 
-    addSocketMessageListener(ws, async (raw) => {
-      try {
-        const msg = decodeMessage(await toUint8Array(raw));
-
-        if (msg.type === MessageType.PING) {
-          ws.send(encodePong());
-          return;
-        }
-        if (msg.type === MessageType.PONG) return;
-        if (msg.type === MessageType.HANDSHAKE_ACK) {
-          // Handshake complete for outbound
-          return;
-        }
-
-        // Serialize message handling per peer to prevent race conditions.
-        // Each message waits for the previous one to finish before starting.
-        const p = this.peers.get(device.deviceId);
-        if (p) {
-          p.messageQueue = p.messageQueue.then(async () => {
-            try {
-              await this.messageHandler?.(device.deviceId, msg.type, msg.payload);
-            } catch (err) {
-              logger.error(`Error handling message from ${device.deviceId}:`, err);
-            }
-          });
-        }
-      } catch (err) {
-        logger.error(`Error decoding message from ${device.deviceId}:`, err);
-      }
-    });
-
     addSocketCloseListener(ws, () => {
       this._removePeer(device.deviceId);
     });
@@ -278,6 +280,27 @@ export class ConnectionManager {
 
     logger.info(`Peer connected: ${device.deviceId} (${direction}) @ ${device.ip}:${device.port}`);
     this.onPeerConnectedCb?.(device);
+    return true;
+  }
+
+  private _dispatch(deviceId: string, ws: SocketLike, msg: DecodedMessage): void {
+    if (msg.type === MessageType.PING) {
+      ws.send(encodePong());
+      return;
+    }
+    if (msg.type === MessageType.PONG || msg.type === MessageType.HANDSHAKE_ACK) return;
+
+    // Serialize message handling per peer to prevent race conditions.
+    // Each message waits for the previous one to finish before starting.
+    const p = this.peers.get(deviceId);
+    if (!p) return;
+    p.messageQueue = p.messageQueue.then(async () => {
+      try {
+        await this.messageHandler?.(deviceId, msg.type, msg.payload);
+      } catch (err) {
+        logger.error(`Error handling message from ${deviceId}:`, err);
+      }
+    });
   }
 
   private _removePeer(deviceId: string): void {
