@@ -82,7 +82,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     (coordinator as any).docManager = {
       applyRemoteUpdate,
-      isDocActive: vi.fn().mockReturnValue(true),
+      isDocSeeded: vi.fn().mockReturnValue(true),
       startsOtherHistory: vi.fn().mockResolvedValue(false),
     };
 
@@ -366,7 +366,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     (coordinator as any).docManager = {
       applyRemoteUpdate,
-      isDocActive: vi.fn().mockReturnValue(true),
+      isDocSeeded: vi.fn().mockReturnValue(true),
       startsOtherHistory: vi.fn().mockResolvedValue(false),
       renameDoc,
       removeDoc: vi.fn().mockResolvedValue(undefined),

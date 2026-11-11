@@ -124,3 +124,22 @@ describe('YjsDocManager doc eviction', () => {
     expect(await manager.getContent('first.md')).toBe('one two');
   });
 });
+
+describe('YjsDocManager seeding from disk', () => {
+  it('does not apply a file read over text a peer sent in the meantime', async () => {
+    const manager = createManager();
+    manager.onRemoteContent(async () => undefined);
+    // The file was read ("mine") before a peer's text for the note arrived.
+    const read = 'mine';
+    await manager.applyRemoteUpdate('n.md', createUpdate('theirs'));
+    await manager.initDocFromContentSilent('n.md', read);
+    expect(await manager.getContent('n.md')).toBe('theirs');
+  });
+
+  it('still seeds a doc that was only loaded to compare histories', async () => {
+    const manager = createManager();
+    await manager.compareHistory('n.md', Y.encodeStateVector(new Y.Doc()));
+    await manager.initDocFromContentSilent('n.md', 'on disk');
+    expect(await manager.getContent('n.md')).toBe('on disk');
+  });
+});

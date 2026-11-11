@@ -1024,7 +1024,7 @@ export class SyncCoordinator {
    * neutral origin that does NOT trigger the local-broadcast callback.
    */
   private async _ensureCrdtInitialized(filePath: string): Promise<void> {
-    if (this.docManager.isDocActive(filePath)) return;
+    if (this.docManager.isDocSeeded(filePath)) return;
     const file = this.vault.getAbstractFileByPath(filePath);
     if (!(file instanceof TFile)) return;
     const diskContent = await this.vault.cachedRead(file);

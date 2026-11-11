@@ -15,6 +15,8 @@ export class YjsDocManager {
    * contain peer changes that have not reached the editor yet.
    */
   private lastKnownContent = new Map<string, string>();
+  /** Docs that hold their note's current text; see isDocSeeded. */
+  private seeded = new WeakSet<Y.Doc>();
   private pendingDocs = new Map<string, Promise<Y.Doc>>();
   private operationQueues = new Map<string, Promise<void>>();
 
@@ -140,6 +142,7 @@ export class YjsDocManager {
   async applyLocalChange(filePath: string, newContent: string): Promise<void> {
     await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
+      this.seeded.add(doc);
       const ytext = doc.getText('content');
       const oldContent = this.lastKnownContent.get(filePath) ?? ytext.toString();
 
@@ -156,6 +159,7 @@ export class YjsDocManager {
     // outer variable) so the callback runs after the queue is released.
     const remoteContentChange = await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
+      this.seeded.add(doc);
       const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, update, remoteOrigin(fromDeviceId));
 
@@ -257,6 +261,7 @@ export class YjsDocManager {
       // dropped history would merge it into theirs. The caller sends it to
       // them as a full state instead.
       Y.applyUpdate(doc, update, result === 'adopted' ? 'remote' : remoteOrigin(fromDeviceId));
+      this.seeded.add(doc);
       const content = doc.getText('content').toString();
       if (result === 'adopted' || content !== previousContent) {
         change = {
@@ -315,6 +320,7 @@ export class YjsDocManager {
     // outer variable) so the callback runs after the queue is released.
     const remoteContentChange = await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
+      this.seeded.add(doc);
       const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, data, remoteOrigin(fromDeviceId));
 
@@ -335,6 +341,7 @@ export class YjsDocManager {
   async initDocWithContent(filePath: string, content: string): Promise<void> {
     await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
+      this.seeded.add(doc);
       const ytext = doc.getText('content');
 
       if (ytext.length === 0 && content.length > 0) {
@@ -354,8 +361,14 @@ export class YjsDocManager {
   }
 
   /** Return true if a doc is currently active (loaded) in the pool. */
-  isDocActive(filePath: string): boolean {
-    return this.pool.has(filePath);
+  /**
+   * Whether the note's doc is loaded and already holds its current text:
+   * seeded from disk, or changed since it was loaded. A doc that was only
+   * loaded (to compare histories, say) may still miss what is on disk.
+   */
+  isDocSeeded(filePath: string): boolean {
+    const doc = this.pool.get(filePath);
+    return !!doc && this.seeded.has(doc);
   }
 
   /**
@@ -371,6 +384,11 @@ export class YjsDocManager {
   async initDocFromContentSilent(filePath: string, content: string): Promise<void> {
     await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
+      // Something else filled the doc while the caller read the file (a
+      // peer's text, say); the read is stale and must not be applied as a
+      // change on top of it.
+      if (this.seeded.has(doc)) return;
+      this.seeded.add(doc);
       const ytext = doc.getText('content');
       const existing = ytext.toString();
 
