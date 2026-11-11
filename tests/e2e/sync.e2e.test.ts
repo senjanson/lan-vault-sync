@@ -751,6 +751,22 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     }
   });
 
+  it('does not double a note that two peers created on their own at the same time', async () => {
+    const C = track(await startNode(tmpRoot('c'), 'cccc', ports(), []));
+    const history = (text: string) => {
+      const d = new Y.Doc();
+      d.getText('content').insert(0, text);
+      return decodeMessage(encodeYjsSync(MessageType.YJS_UPDATE, 'n (conflict 1a2b3c).md', Y.encodeStateAsUpdate(d)));
+    };
+    const a = history('same text\n'), b = history('same text\n');
+    await Promise.all([
+      (C.coord as any)._handleMessage('aaaa', a.type, a.payload),
+      (C.coord as any)._handleMessage('bbbb', b.type, b.payload),
+    ]);
+    await sleep(500);
+    expect(C.vault.text('n (conflict 1a2b3c).md')).toBe('same text\n');
+  });
+
   it('merges edits a peer sends under the old name into the renamed note', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     const pa = ports(), ids = ['aaaa', 'bbbb'];

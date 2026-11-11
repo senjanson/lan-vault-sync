@@ -203,24 +203,52 @@ export class YjsDocManager {
    * first insert of a doc that was created on its own on another device.
    * Applied as a normal update it would add that whole text to ours.
    */
-  async startsOtherHistory(filePath: string, update: Uint8Array): Promise<boolean> {
-    return this._enqueueForPath(filePath, async () => {
-      const doc = await this.getOrCreateDoc(filePath);
-      const local = Y.decodeStateVector(Y.encodeStateVector(doc));
-      if (local.size === 0) return false;
-      for (const struct of Y.decodeUpdate(update).structs) {
-        if (
-          struct instanceof Y.Item &&
-          struct.origin === null &&
-          struct.rightOrigin === null &&
-          typeof struct.parent === 'string' &&
-          !local.has(struct.id.client)
-        ) {
-          return true;
-        }
+  private _startsOtherHistory(doc: Y.Doc, update: Uint8Array): boolean {
+    const local = Y.decodeStateVector(Y.encodeStateVector(doc));
+    if (local.size === 0) return false;
+    for (const struct of Y.decodeUpdate(update).structs) {
+      if (
+        struct instanceof Y.Item &&
+        struct.origin === null &&
+        struct.rightOrigin === null &&
+        typeof struct.parent === 'string' &&
+        !local.has(struct.id.client)
+      ) {
+        return true;
       }
-      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Apply a peer's update unless it starts another history of the note
+   * (see _startsOtherHistory); returns false, without applying it, then.
+   * The check and the apply are one step, so two peers' separate histories
+   * arriving together cannot both be applied to a doc that was empty.
+   */
+  async applyRelatedUpdate(filePath: string, update: Uint8Array, fromDeviceId?: string): Promise<boolean> {
+    let related = true;
+    const remoteContentChange = await this._enqueueForPath(filePath, async () => {
+      const doc = await this.getOrCreateDoc(filePath);
+      if (this._startsOtherHistory(doc, update)) {
+        related = false;
+        return null;
+      }
+      this.seeded.add(doc);
+      const previousContent = doc.getText('content').toString();
+      Y.applyUpdate(doc, update, remoteOrigin(fromDeviceId));
+      const content = doc.getText('content').toString();
+      return content !== previousContent ? { content, previousContent } : null;
     });
+
+    if (remoteContentChange) {
+      await this.onRemoteContentCb?.(
+        filePath,
+        remoteContentChange.content,
+        remoteContentChange.previousContent,
+      );
+    }
+    return related;
   }
 
   /**

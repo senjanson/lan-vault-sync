@@ -75,15 +75,14 @@ describe('SyncCoordinator text conflict safety', () => {
   });
 
   it('flushes pending local text before applying a remote Yjs update', async () => {
-    const applyRemoteUpdate = vi.fn().mockResolvedValue(undefined);
+    const applyRemoteUpdate = vi.fn().mockResolvedValue(true);
     const flushPendingLocalTextChange = vi
       .spyOn(coordinator as any, '_flushPendingLocalTextChange')
       .mockResolvedValue(true);
 
     (coordinator as any).docManager = {
-      applyRemoteUpdate,
+      applyRelatedUpdate: applyRemoteUpdate,
       isDocSeeded: vi.fn().mockReturnValue(true),
-      startsOtherHistory: vi.fn().mockResolvedValue(false),
     };
 
     const payload = decodeMessage(
@@ -358,16 +357,15 @@ describe('SyncCoordinator text conflict safety', () => {
   });
 
   it('redirects stale old-path text updates after a remote rename intent', async () => {
-    const applyRemoteUpdate = vi.fn().mockResolvedValue(undefined);
+    const applyRemoteUpdate = vi.fn().mockResolvedValue(true);
     const renameDoc = vi.fn().mockResolvedValue(undefined);
     const flushPendingLocalTextChange = vi
       .spyOn(coordinator as any, '_flushPendingLocalTextChange')
       .mockResolvedValue(false);
 
     (coordinator as any).docManager = {
-      applyRemoteUpdate,
+      applyRelatedUpdate: applyRemoteUpdate,
       isDocSeeded: vi.fn().mockReturnValue(true),
-      startsOtherHistory: vi.fn().mockResolvedValue(false),
       renameDoc,
       removeDoc: vi.fn().mockResolvedValue(undefined),
     };

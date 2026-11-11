@@ -464,8 +464,7 @@ export class SyncCoordinator {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
-        if (await this._receiveOtherHistory(deviceId, resolvedPath, msg.data)) break;
-        await this.docManager.handleSyncStep2(resolvedPath, msg.data, deviceId);
+        await this._receiveRemoteUpdate(deviceId, resolvedPath, msg.data);
         break;
       }
 
@@ -485,8 +484,7 @@ export class SyncCoordinator {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
-        if (await this._receiveOtherHistory(deviceId, resolvedPath, msg.data)) break;
-        await this.docManager.applyRemoteUpdate(resolvedPath, msg.data, deviceId);
+        await this._receiveRemoteUpdate(deviceId, resolvedPath, msg.data);
         break;
       }
 
@@ -1592,18 +1590,19 @@ export class SyncCoordinator {
    * devices apart), settle which history to keep instead of merging both
    * texts into one note. Returns true when the update was handled here.
    */
-  private async _receiveOtherHistory(
+  private async _receiveRemoteUpdate(
     deviceId: string,
     filePath: string,
     update: Uint8Array,
-  ): Promise<boolean> {
+  ): Promise<void> {
     await this._flushPendingLocalTextChange(filePath);
     if (!this._hasConflictLoserGuard(filePath)) {
       await this._ensureCrdtInitialized(filePath);
     }
-    if (!(await this.docManager.startsOtherHistory(filePath, update))) return false;
-    await this._applyFullState(deviceId, filePath, update);
-    return true;
+    if (!(await this.docManager.applyRelatedUpdate(filePath, update, deviceId))) {
+      // A separate history of the note: keep one of the two, never both.
+      await this._applyFullState(deviceId, filePath, update);
+    }
   }
 
   /** Apply a peer's whole doc; see YjsDocManager.applyFullState. */
