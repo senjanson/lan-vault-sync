@@ -92,3 +92,35 @@ describe('YjsDocManager forwarding peer updates', () => {
     expect(forwarded).toEqual([['n.md', 'peer-a']]);
   });
 });
+
+describe('YjsDocManager doc eviction', () => {
+  it('keeps edits made while the least recently used doc is being saved', async () => {
+    const { MAX_ACTIVE_DOCS } = await import('../../src/constants');
+    const files = new Map<string, ArrayBuffer>();
+    const vault = {
+      adapter: {
+        exists: async (p: string) => files.has(p),
+        mkdir: async () => undefined,
+        readBinary: async (p: string) => files.get(p)!,
+        // Saving takes a while, as on a phone.
+        writeBinary: async (p: string, d: ArrayBuffer) => {
+          await new Promise((r) => setTimeout(r, 30));
+          files.set(p, d);
+        },
+        remove: async (p: string) => void files.delete(p),
+      },
+    };
+    const manager = new YjsDocManager(vault as any);
+
+    await manager.applyLocalChange('first.md', 'one');
+    await new Promise((r) => setTimeout(r, 5));
+    for (let i = 0; i < MAX_ACTIVE_DOCS; i++) {
+      await manager.applyLocalChange(`n${i}.md`, 'x');
+    }
+    // first.md is now being evicted; edit it while its state is saved.
+    await manager.applyLocalChange('first.md', 'one two');
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(await manager.getContent('first.md')).toBe('one two');
+  });
+});

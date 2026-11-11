@@ -28,8 +28,21 @@ export class YjsDocManager {
     this.pool = new DocPool();
     this.persistence = new StatePersistence(vault, (vault as any).adapter);
 
-    this.pool.setEvictHandler(async (path, doc) => {
-      await this.persistence.saveDoc(path, doc);
+    // Evict inside the path's queue, so no operation on that doc is running
+    // and later ones wait for the saved state.
+    this.pool.setEvictHandler((path) => {
+      void this._enqueueForPath(path, async () => {
+        const doc = this.pool.peek(path);
+        if (!doc) {
+          this.pool.cancelEviction(path);
+          return;
+        }
+        await this.persistence.saveDoc(path, doc);
+        this.pool.evict(path, doc);
+      }).catch((err) => {
+        this.pool.cancelEviction(path);
+        logger.error(`Failed to evict CRDT doc ${path}:`, err);
+      });
     });
   }
 
@@ -451,7 +464,7 @@ export class YjsDocManager {
   }
 
   async destroy(): Promise<void> {
-    await this.pool.destroyAll();
+    await this.pool.destroyAll((path, doc) => this.persistence.saveDoc(path, doc));
     this.lastKnownContent.clear();
   }
 }
