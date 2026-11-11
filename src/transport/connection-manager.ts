@@ -47,6 +47,9 @@ type MessageHandler = (deviceId: string, type: MessageType, payload: Uint8Array)
 export class ConnectionManager {
   private server: WSServer;
   private peers = new Map<string, PeerConnection>();
+  /** Outbound clients by URL, including ones that are still (re)connecting. */
+  private clients = new Map<string, WSClient>();
+  private stopped = false;
   private messageHandler: MessageHandler | null = null;
   private localInfo: HandshakePayload;
   private onPeerConnectedCb: ((device: DeviceInfo) => void) | null = null;
@@ -90,12 +93,18 @@ export class ConnectionManager {
   }
 
   stop(): void {
+    this.stopped = true;
     for (const [, peer] of this.peers) {
       if (peer.pingTimer) clearInterval(peer.pingTimer);
-      peer.client?.close();
       peer.ws.close();
     }
     this.peers.clear();
+    // Also close clients that are not connected yet; otherwise their reconnect
+    // timers keep running and sync resumes after the service was stopped.
+    for (const client of this.clients.values()) {
+      client.close();
+    }
+    this.clients.clear();
     this.server.stop();
   }
 
@@ -106,7 +115,11 @@ export class ConnectionManager {
     if (!this._shouldInitiateConnection(device)) return;
 
     const url = `ws://${device.ip}:${device.port}`;
+    // A manual peer and its auto-discovered entry point at the same address;
+    // one client per address is enough.
+    if (this.clients.has(url)) return;
     const client = new WSClient(url);
+    this.clients.set(url, client);
 
     client.onOpen((ws) => {
       this._routeSocket(ws, 'outbound', (msg) => {
@@ -132,10 +145,6 @@ export class ConnectionManager {
         };
       }, client);
       ws.send(encodeHandshake(this.localInfo));
-    });
-
-    client.onClose(() => {
-      this._removePeer(device.deviceId);
     });
 
     client.connect();
@@ -242,9 +251,16 @@ export class ConnectionManager {
     direction: 'inbound' | 'outbound',
     client?: WSClient,
   ): boolean {
-    if (this.peers.has(device.deviceId)) {
-      // Already connected — close duplicate
+    if (this.stopped) {
       ws.close();
+      return false;
+    }
+    if (this.peers.has(device.deviceId)) {
+      // Already connected — close the duplicate. A duplicate outbound client
+      // would only keep reconnecting into the same rejection, so retire it;
+      // the existing connection has its own reconnect path.
+      ws.close();
+      if (client) this._retireClient(client);
       return false;
     }
 
@@ -270,7 +286,7 @@ export class ConnectionManager {
     this.peers.set(device.deviceId, peer);
 
     addSocketCloseListener(ws, () => {
-      this._removePeer(device.deviceId);
+      this._removePeer(device.deviceId, ws);
     });
 
     addSocketErrorListener(ws, (err) => {
@@ -293,7 +309,7 @@ export class ConnectionManager {
     // Serialize message handling per peer to prevent race conditions.
     // Each message waits for the previous one to finish before starting.
     const p = this.peers.get(deviceId);
-    if (!p) return;
+    if (!p || p.ws !== ws) return;
     p.messageQueue = p.messageQueue.then(async () => {
       try {
         await this.messageHandler?.(deviceId, msg.type, msg.payload);
@@ -303,13 +319,25 @@ export class ConnectionManager {
     });
   }
 
-  private _removePeer(deviceId: string): void {
+  /**
+   * Forget a peer when its socket closes. Only the socket that is registered
+   * for the device may remove it: a closing duplicate must not drop the live
+   * connection that replaced or preceded it.
+   */
+  private _removePeer(deviceId: string, ws: SocketLike): void {
     const peer = this.peers.get(deviceId);
-    if (!peer) return;
+    if (!peer || peer.ws !== ws) return;
     if (peer.pingTimer) clearInterval(peer.pingTimer);
     this.peers.delete(deviceId);
     logger.info(`Peer disconnected: ${deviceId}`);
     this.onPeerDisconnectedCb?.(deviceId);
+  }
+
+  private _retireClient(client: WSClient): void {
+    client.close();
+    for (const [url, c] of this.clients) {
+      if (c === client) this.clients.delete(url);
+    }
   }
 
   private _shouldInitiateConnection(device: DeviceInfo): boolean {

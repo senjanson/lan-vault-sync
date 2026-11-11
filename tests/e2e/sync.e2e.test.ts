@@ -39,3 +39,36 @@ describe('e2e sync', { timeout: 30000 }, () => {
     expect(count(A, 'Disconnected')).toBe(0);
   });
 });
+
+describe('e2e connections', { timeout: 30000 }, () => {
+  it('keeps one working connection when a manual peer is also auto-discovered', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports(), pb = pa + 1;
+    const B = track(await startNode(rb, 'bbbb', pb, []));
+    const A = track(await startNode(ra, 'aaaa', pa, [pb]));
+    // Discovery reports the same device while the manual connection is still opening.
+    (A.coord as any).discovery._handleDeviceSeen({
+      deviceId: 'bbbb', deviceName: 'bbbb', ip: '127.0.0.1', port: pb,
+      vaultId: (A.coord as any).vaultId, lastSeen: Date.now(), acceptsIncomingConnections: true,
+    });
+    await sleep(2000);
+    expect(A.coord.getConnectedDevices()).toEqual(['bbbb']);
+    await A.vault.write('after.md', 'hello from A');
+    await sleep(800);
+    expect(B.vault.text('after.md')).toBe('hello from A');
+    expect(count(A, 'Disconnected')).toBe(0);
+  });
+
+  it('stops reconnecting after the sync service is stopped', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'after-stop.md': 'must not sync after stop' });
+    const pa = ports(), pb = pa + 1;
+    const A = await startNode(ra, 'aaaa', pa, [pb]); // B is offline, A keeps retrying
+    await sleep(300);
+    await A.coord.stop();
+    const B = track(await startNode(rb, 'bbbb', pb, []));
+    await sleep(4000);
+    expect(B.coord.getConnectedDevices()).toEqual([]);
+    expect(B.vault.text('after-stop.md')).toBeNull();
+  });
+});
