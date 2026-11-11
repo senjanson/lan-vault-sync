@@ -535,6 +535,14 @@ export class SyncCoordinator {
         }
       }
 
+      if (isExistingFile && !contentChanged) {
+        // Disk already has this content (e.g. bootstrapping shared CRDT state
+        // for identical files). Rewriting would only bump the mtime, which
+        // conflict resolution relies on.
+        this._clearConflictLoserGuard(filePath);
+        return;
+      }
+
       this.watcher.markRemoteWrite(filePath);
 
       if (file instanceof TFile) {

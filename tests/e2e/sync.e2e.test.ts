@@ -13,6 +13,8 @@ vi.mock('../../src/discovery/udp-broadcast', () => ({
   },
 }));
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { count, Node, ports, seed, sleep, startNode, tmpRoot } from './harness';
 
 let nodes: Node[] = [];
@@ -85,5 +87,20 @@ describe('e2e settings', { timeout: 30000 }, () => {
     await sleep(1500);
     expect(B.coord.getState()).toBe('watching');
     expect(B.vault.text('n.md')).toBe('hi');
+  });
+});
+
+describe('e2e file writes', { timeout: 30000 }, () => {
+  it('does not rewrite files whose content is already identical', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'same.md': 'identical' });
+    seed(rb, { 'same.md': 'identical' });
+    const old = new Date('2020-01-01');
+    for (const r of [ra, rb]) fs.utimesSync(path.join(r, 'same.md'), old, old);
+    const pa = ports();
+    track(await startNode(ra, 'aaaa', pa, []));
+    track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(1500);
+    for (const r of [ra, rb]) expect(fs.statSync(path.join(r, 'same.md')).mtime.getFullYear()).toBe(2020);
   });
 });
