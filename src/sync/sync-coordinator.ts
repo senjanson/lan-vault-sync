@@ -23,6 +23,7 @@ import { computeFileHash } from "../binary-sync/file-hash";
 import { SyncLogService } from "../sync-log/sync-log-service";
 import {
   FileMeta,
+  Tombstone,
   DeviceInfo,
   FileChangeEvent,
   FileMetaSyncPayload,
@@ -374,7 +375,7 @@ export class SyncCoordinator {
     });
 
     this.binarySync.onRemoteFileRenamed(async (oldPath, newPath) => {
-      this._recordRename(oldPath, newPath);
+      await this._recordRename(oldPath, newPath);
       void this._prunePendingFolders();
       const oldIsText = this.filter.isTextFile(oldPath);
       const newIsText = this.filter.isTextFile(newPath);
@@ -598,7 +599,7 @@ export class SyncCoordinator {
 
       case "rename": {
         if (oldPath) {
-          this._recordRename(oldPath, path);
+          await this._recordRename(oldPath, path);
           const oldIsText = this.filter.isTextFile(oldPath);
           if (oldIsText && isTextFile) {
             await this.docManager.renameDoc(oldPath, path);
@@ -896,6 +897,16 @@ export class SyncCoordinator {
       if (peerTombstone && TombstoneStore.covers(peerTombstone, file)) {
         await this.binarySync.applyRemoteDelete(file.path);
         this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
+        continue;
+      }
+      // The peer renamed this note while we edited it: move our edits to
+      // the new name instead of keeping the old name as a second note.
+      const renamedTo = this._renameTarget(peerTombstone, remoteFiles, remoteDeleted);
+      if (
+        renamedTo &&
+        file.isTextFile &&
+        (await this._followRemoteRename(deviceId, file.path, renamedTo))
+      ) {
         continue;
       }
       if (file.isTextFile) {
@@ -1358,9 +1369,92 @@ export class SyncCoordinator {
   }
 
   /** A rename removes the old path for peers that were offline. */
-  private _recordRename(oldPath: string, newPath: string): void {
-    const hash = this.knownHashes.get(oldPath);
-    this.tombstones.add(oldPath, hash);
+  /** Where a peer's renamed file is now, following renames made one after another. */
+  private _renameTarget(
+    tombstone: Tombstone | undefined,
+    remoteFiles: Map<string, FileMeta>,
+    remoteDeleted: Map<string, Tombstone>,
+  ): string | null {
+    let target = tombstone?.movedTo;
+    for (let hops = 0; target && hops < 8; hops++) {
+      if (remoteFiles.has(target)) return target;
+      target = remoteDeleted.get(target)?.movedTo;
+    }
+    return null;
+  }
+
+  /**
+   * Move this device's edited copy of a note that a peer renamed to the new
+   * name: rename it here, or, when the new name already arrived, merge our
+   * edits into it. Only done when both copies share sync history, so the
+   * merge is exact. Returns false (both names are kept) otherwise.
+   */
+  private async _followRemoteRename(
+    deviceId: string,
+    oldPath: string,
+    newPath: string,
+  ): Promise<boolean> {
+    if (!this._isAllowedPath(newPath) || !this.filter.isTextFile(newPath)) return false;
+    // We deleted the new name ourselves; don't bring it back.
+    if (this.tombstones.get(newPath)) return false;
+    const file = this.vault.getAbstractFileByPath(oldPath);
+    if (!(file instanceof TFile)) return false;
+    if (!(await this.docManager.hasDocState(oldPath))) return false;
+    await this._flushPendingLocalTextChange(oldPath);
+    await this._ensureCrdtInitialized(oldPath);
+    const oldHash = await computeFileHash(await this.vault.readBinary(file));
+
+    const target = this.vault.getAbstractFileByPath(newPath);
+    if (!target) {
+      const slash = newPath.lastIndexOf("/");
+      if (slash > 0) await this._createFolderFromRemote(newPath.slice(0, slash));
+      this.watcher.markRemoteWrite(newPath, "rename");
+      await this.vault.rename(file, newPath);
+      this.knownHashes.set(oldPath, oldHash);
+      await this._recordRename(oldPath, newPath);
+      await this.docManager.renameDoc(oldPath, newPath);
+      // Fetch the peer's changes to the renamed note.
+      const ourState = await this.docManager.encodeSyncStep1(newPath);
+      this.connectionManager.sendTo(
+        deviceId,
+        encodeYjsSync(MessageType.YJS_SYNC_STEP1, newPath, ourState),
+      );
+    } else {
+      if (!(target instanceof TFile)) return false;
+      await this._flushPendingLocalTextChange(newPath);
+      await this._ensureCrdtInitialized(newPath);
+      const merged = await this.docManager.absorbDoc(oldPath, newPath);
+      if (!merged) return false;
+      await this._writeFileFromRemote(newPath, merged.content, merged.previousContent);
+      this.watcher.markRemoteWrite(oldPath, "delete");
+      await this.vault.delete(file);
+      this.tombstones.add(oldPath, oldHash, undefined, newPath);
+      this.knownHashes.delete(oldPath);
+      await this.docManager.removeDoc(oldPath);
+    }
+    // Peers may already have fetched our copy under the old name. Only that
+    // exact copy is removed; another device's edited copy is kept and moved
+    // over by that device.
+    this.connectionManager.broadcast(encodeFileDelete({ path: oldPath, hash: oldHash }));
+    this._emitEvent(`Moved edits to renamed note: ${oldPath} -> ${newPath}`);
+    return true;
+  }
+
+  private async _recordRename(oldPath: string, newPath: string): Promise<void> {
+    // The hash may not be known yet right after start; the renamed file
+    // still has the content the old name had.
+    let hash = this.knownHashes.get(oldPath);
+    if (!hash) {
+      const file = this.vault.getAbstractFileByPath(newPath);
+      if (file instanceof TFile) {
+        try {
+          hash = await computeFileHash(await this.vault.readBinary(file));
+        } catch {
+          // Gone again already; the deletion is recorded without a hash.
+        }
+      }
+    }
+    this.tombstones.add(oldPath, hash, undefined, newPath);
     this.tombstones.clear(newPath);
     this.knownHashes.delete(oldPath);
     if (hash) this.knownHashes.set(newPath, hash);

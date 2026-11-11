@@ -42,10 +42,13 @@ export class TombstoneStore {
     return Array.from(this.entries.values());
   }
 
-  add(path: string, hash?: string, deletedAt = this.now()): void {
+  add(path: string, hash?: string, deletedAt = this.now(), movedTo?: string): void {
     const existing = this.entries.get(path);
     if (existing && existing.deletedAt >= deletedAt) return;
-    this.entries.set(path, hash ? { path, deletedAt, hash } : { path, deletedAt });
+    const entry: Tombstone = { path, deletedAt };
+    if (hash) entry.hash = hash;
+    if (movedTo) entry.movedTo = movedTo;
+    this.entries.set(path, entry);
     this._save();
   }
 

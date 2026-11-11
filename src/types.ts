@@ -135,6 +135,8 @@ export interface Tombstone {
   deletedAt: number;
   /** Hash of the content that was deleted, when known. */
   hash?: string;
+  /** Set when the file was renamed or moved: its new path. */
+  movedTo?: string;
 }
 
 export interface FileMetaSyncPayload {
@@ -166,6 +168,8 @@ export interface FileChunkPayload {
 
 export interface FileDeletePayload {
   path: string;
+  /** Delete only a copy with this content hash; other versions are kept. */
+  hash?: string;
 }
 
 export interface FileRenamePayload {

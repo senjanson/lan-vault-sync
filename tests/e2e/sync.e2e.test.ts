@@ -688,3 +688,68 @@ describe('e2e folders', { timeout: 30000 }, () => {
     expect(B.vault.text('Keep/new.md')).toBe('added while apart');
   });
 });
+
+describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
+  // Devices run apart (no peers), then reconnect: B and C dial A.
+  async function phase(roots: string[], ids: string[], pa: number, connect: boolean) {
+    for (const n of nodes) await n.coord.stop();
+    nodes = [];
+    await sleep(50);
+    const out: Node[] = [];
+    for (let i = 0; i < roots.length; i++) {
+      out.push(track(await startNode(roots[i], ids[i], pa + i, connect && i > 0 ? [pa] : [])));
+    }
+    return out;
+  }
+  const notes = (root: string) => {
+    const out: string[] = [];
+    const walk = (d: string) => { for (const e of fs.readdirSync(path.join(root, d), { withFileTypes: true })) { const rel = d ? `${d}/${e.name}` : e.name; if (rel.startsWith('.obsidian')) continue; if (e.isDirectory()) walk(rel); else out.push(rel); } };
+    walk(''); return out.sort();
+  };
+
+  it('moves an offline edit to the name a peer gave the note', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports(), ids = ['aaaa', 'bbbb'];
+    seed(ra, { 'f.md': 'one\ntwo\nthree\n' });
+    let [A, B] = await phase([ra, rb], ids, pa, true);
+    await sleep(2000);
+    expect(B.vault.text('f.md')).toBe('one\ntwo\nthree\n');
+    [A, B] = await phase([ra, rb], ids, pa, false);
+    await A.vault.mv('f.md', 'dir/g.md');
+    await A.vault.write('dir/g.md', 'one\ntwo\nthree\nfrom A\n');
+    await B.vault.write('f.md', 'from B\none\ntwo\nthree\n');
+    await sleep(800);
+    [A, B] = await phase([ra, rb], ids, pa, true);
+    await sleep(4000);
+    for (const [r, n] of [[ra, A], [rb, B]] as const) {
+      expect(notes(r)).toEqual(['dir/g.md']);
+      expect(n.vault.text('dir/g.md')).toBe('from B\none\ntwo\nthree\nfrom A\n');
+    }
+  });
+
+  it('moves offline edits from two devices to the new name, with three devices', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+    const pa = ports(), ids = ['aaaa', 'bbbb', 'cccc'];
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 60; i++) files[`n${i}.md`] = `note ${i}\n`;
+    seed(ra, { ...files, 'f.md': 'one\ntwo\n', 'h.md': 'keep\n' });
+    let all = await phase([ra, rb, rc], ids, pa, true);
+    await sleep(5000);
+    for (const n of all) expect(n.vault.text('f.md')).toBe('one\ntwo\n');
+    all = await phase([ra, rb, rc], ids, pa, false);
+    await all[0].vault.mv('f.md', 'g.md');
+    await all[1].vault.write('f.md', 'one\ntwo\nfrom B\n');
+    await all[2].vault.write('f.md', 'from C\none\ntwo\n');
+    await all[2].vault.write('n5.md', 'note 5\nfrom C\n');
+    await sleep(800);
+    all = await phase([ra, rb, rc], ids, pa, true);
+    await sleep(8000);
+    const expected = notes(ra);
+    expect(expected).not.toContain('f.md');
+    for (const [i, n] of all.entries()) {
+      expect(notes([ra, rb, rc][i])).toEqual(expected);
+      expect(n.vault.text('g.md')).toBe('from C\none\ntwo\nfrom B\n');
+      expect(n.vault.text('n5.md')).toBe('note 5\nfrom C\n');
+    }
+  });
+});

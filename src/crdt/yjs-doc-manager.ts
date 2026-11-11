@@ -457,6 +457,32 @@ export class YjsDocManager {
     });
   }
 
+  /**
+   * Merge the doc at `fromPath` into the doc at `toPath`, as a local change
+   * (so peers get it), when both come from the same history: the same note
+   * kept under two paths. Returns the merged text, or null when the
+   * histories are unrelated and merging would put both texts in one note.
+   */
+  async absorbDoc(
+    fromPath: string,
+    toPath: string,
+  ): Promise<{ content: string; previousContent: string } | null> {
+    const update = await this._enqueueForPath(fromPath, async () =>
+      Y.encodeStateAsUpdate(await this.getOrCreateDoc(fromPath)),
+    );
+    return this._enqueueForPath(toPath, async () => {
+      const doc = await this.getOrCreateDoc(toPath);
+      const local = Y.decodeStateVector(Y.encodeStateVector(doc));
+      const incoming = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(update));
+      if (local.size === 0 || incoming.size === 0) return null;
+      if (![...incoming.keys()].some((client) => local.has(client))) return null;
+      const previousContent = doc.getText('content').toString();
+      Y.applyUpdate(doc, update, 'local');
+      this.seeded.add(doc);
+      return { content: doc.getText('content').toString(), previousContent };
+    });
+  }
+
   async renameDoc(oldPath: string, newPath: string): Promise<void> {
     if (oldPath === newPath) return;
 

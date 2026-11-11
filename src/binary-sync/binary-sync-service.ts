@@ -121,6 +121,11 @@ export class BinaryFileSyncService {
       case MessageType.FILE_DELETE: {
         const del = decodeJSON<FileDeletePayload>(payload);
         if (!this.isAllowedPath(del.path)) break;
+        if (del.hash) {
+          const file = this.vault.getAbstractFileByPath(del.path);
+          if (!(file instanceof TFile)) break;
+          if ((await computeFileHash(await this.vault.readBinary(file))) !== del.hash) break;
+        }
         await this._deleteFile(del.path);
         break;
       }
