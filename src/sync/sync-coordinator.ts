@@ -68,8 +68,11 @@ export class SyncCoordinator {
     string,
     { newPath: string; expiresAt: number }
   >();
-  /** Text we last wrote to disk for a remote change, to recognise its echo. */
-  private remoteWrittenText = new Map<string, string>();
+  /**
+   * Texts we recently wrote to disk for remote changes, to recognise their
+   * echoes. Obsidian can report a write after the next one has been made.
+   */
+  private remoteWrittenText = new Map<string, Array<{ text: string; at: number }>>();
   private workspace: Workspace | null;
   /** Files deleted here, so offline peers don't send them back. */
   private tombstones: TombstoneStore;
@@ -719,7 +722,7 @@ export class SyncCoordinator {
       // path's text into the file under its new name.
       if (file instanceof TFile && file.path !== filePath) return;
       this.watcher.markRemoteWrite(filePath);
-      this.remoteWrittenText.set(filePath, latestContent);
+      this._rememberRemoteWrite(filePath, latestContent);
 
       if (file instanceof TFile) {
         await this.vault.modify(file, latestContent);
@@ -792,7 +795,7 @@ export class SyncCoordinator {
       if (editor.getValue() !== current) continue;
       if (current !== latest) {
         this.watcher.markRemoteWrite(filePath);
-        this.remoteWrittenText.set(filePath, latest);
+        this._rememberRemoteWrite(filePath, latest);
         let offset = 0;
         const changes: Array<{ from: any; to?: any; text: string }> = [];
         for (const [op, text] of fastDiff(current, latest)) {
@@ -1611,9 +1614,22 @@ export class SyncCoordinator {
   private _isEchoOfRemoteWrite(path: string, content: string): boolean {
     const written = this.remoteWrittenText.get(path);
     if (written === undefined) return false;
-    if (written === content) return true;
+    const since = Date.now() - SyncCoordinator.REMOTE_WRITE_ECHO_MS;
+    // The newest write is an echo however late; earlier ones only shortly after.
+    if (written.some((w, i) => w.text === content && (i === written.length - 1 || w.at >= since))) {
+      return true;
+    }
     this.remoteWrittenText.delete(path);
     return false;
+  }
+
+  private static readonly REMOTE_WRITE_ECHO_MS = 30000;
+
+  private _rememberRemoteWrite(path: string, text: string): void {
+    const written = this.remoteWrittenText.get(path) ?? [];
+    written.push({ text, at: Date.now() });
+    if (written.length > 8) written.shift();
+    this.remoteWrittenText.set(path, written);
   }
 
   private _rememberRemoteTextRename(oldPath: string, newPath: string): void {

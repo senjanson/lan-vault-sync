@@ -718,6 +718,27 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect(B.vault.text('g.md')).toBe('one\n');
   });
 
+  it('takes a late file event for an earlier remote write as that write, not as an edit', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'f.md': 'one\n' });
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const dm = (B.coord as any).docManager;
+    await (B.coord as any)._ensureCrdtInitialized('f.md');
+    const peer = new Y.Doc();
+    Y.applyUpdate(peer, await dm.encodeFullState('f.md'));
+    const send = async (at: number, text: string) => {
+      const before = Y.encodeStateVector(peer);
+      peer.getText('content').insert(at, text);
+      const msg = decodeMessage(encodeYjsSync(MessageType.YJS_UPDATE, 'f.md', Y.encodeStateAsUpdate(peer, before)));
+      await (B.coord as any)._handleMessage('aaaa', msg.type, msg.payload);
+    };
+    await send(4, 'two\n');
+    await send(8, 'three\n');
+    // Obsidian reports the first write late, with the text it wrote then.
+    await (B.coord as any)._handleLocalFileChange({ type: 'modify', path: 'f.md', content: 'one\ntwo\n', isTextFile: true, timestamp: Date.now() });
+    expect(await dm.getContent('f.md')).toBe('one\ntwo\nthree\n');
+  });
+
   it('keeps an edit when the peer\'s text for the new name arrives while following a rename', async () => {
     const rb = tmpRoot('b');
     seed(rb, { 'f.md': 'one\n' });
