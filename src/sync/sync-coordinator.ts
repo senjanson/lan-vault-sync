@@ -454,7 +454,7 @@ export class SyncCoordinator {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
-        await this._flushPendingLocalTextChange(resolvedPath);
+        if (await this._receiveOtherHistory(deviceId, resolvedPath, msg.data)) break;
         await this.docManager.handleSyncStep2(resolvedPath, msg.data, deviceId);
         break;
       }
@@ -464,18 +464,10 @@ export class SyncCoordinator {
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
-        const result = await this.docManager.applyFullState(resolvedPath, msg.data, deviceId);
-        if (result === "kept-local") {
-          // Our doc wins; send it so the peer adopts it.
-          await this._sendFullTextState(deviceId, resolvedPath, "Resolving unrelated history");
-        } else if (result === "adopted") {
-          // Other peers may still hold the history we just dropped.
-          for (const peerId of this.connectionManager.getConnectedPeerIds()) {
-            if (peerId !== deviceId) {
-              await this._sendFullTextState(peerId, resolvedPath, "Sharing adopted history");
-            }
-          }
+        if (!this._hasConflictLoserGuard(resolvedPath)) {
+          await this._ensureCrdtInitialized(resolvedPath);
         }
+        await this._applyFullState(deviceId, resolvedPath, msg.data);
         break;
       }
 
@@ -483,7 +475,7 @@ export class SyncCoordinator {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
-        await this._flushPendingLocalTextChange(resolvedPath);
+        if (await this._receiveOtherHistory(deviceId, resolvedPath, msg.data)) break;
         await this.docManager.applyRemoteUpdate(resolvedPath, msg.data, deviceId);
         break;
       }
@@ -1387,6 +1379,46 @@ export class SyncCoordinator {
     }
 
     return resolvedPath;
+  }
+
+  /**
+   * Before applying a peer's update, make sure our doc holds what is on disk.
+   * If the update starts another history of the note (it was created on two
+   * devices apart), settle which history to keep instead of merging both
+   * texts into one note. Returns true when the update was handled here.
+   */
+  private async _receiveOtherHistory(
+    deviceId: string,
+    filePath: string,
+    update: Uint8Array,
+  ): Promise<boolean> {
+    await this._flushPendingLocalTextChange(filePath);
+    if (!this._hasConflictLoserGuard(filePath)) {
+      await this._ensureCrdtInitialized(filePath);
+    }
+    if (!(await this.docManager.startsOtherHistory(filePath, update))) return false;
+    await this._applyFullState(deviceId, filePath, update);
+    return true;
+  }
+
+  /** Apply a peer's whole doc; see YjsDocManager.applyFullState. */
+  private async _applyFullState(
+    deviceId: string,
+    filePath: string,
+    update: Uint8Array,
+  ): Promise<void> {
+    const result = await this.docManager.applyFullState(filePath, update, deviceId);
+    if (result === "kept-local") {
+      // Our doc wins; send it so the peer adopts it.
+      await this._sendFullTextState(deviceId, filePath, "Resolving unrelated history");
+    } else if (result === "adopted") {
+      // Other peers may still hold the history we just dropped.
+      for (const peerId of this.connectionManager.getConnectedPeerIds()) {
+        if (peerId !== deviceId) {
+          await this._sendFullTextState(peerId, filePath, "Sharing adopted history");
+        }
+      }
+    }
   }
 
   private _shouldBootstrapSharedTextState(deviceId: string): boolean {

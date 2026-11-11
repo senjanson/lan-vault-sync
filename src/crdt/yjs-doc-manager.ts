@@ -195,6 +195,31 @@ export class YjsDocManager {
   }
 
   /**
+   * Whether `update` holds the start of another history of this note: the
+   * first insert of a doc that was created on its own on another device.
+   * Applied as a normal update it would add that whole text to ours.
+   */
+  async startsOtherHistory(filePath: string, update: Uint8Array): Promise<boolean> {
+    return this._enqueueForPath(filePath, async () => {
+      const doc = await this.getOrCreateDoc(filePath);
+      const local = Y.decodeStateVector(Y.encodeStateVector(doc));
+      if (local.size === 0) return false;
+      for (const struct of Y.decodeUpdate(update).structs) {
+        if (
+          struct instanceof Y.Item &&
+          struct.origin === null &&
+          struct.rightOrigin === null &&
+          typeof struct.parent === 'string' &&
+          !local.has(struct.id.client)
+        ) {
+          return true;
+        }
+      }
+      return false;
+    });
+  }
+
+  /**
    * Apply a peer's complete doc state. Related histories merge as usual. For
    * unrelated histories the winning doc is kept: either ours (returns
    * 'kept-local', the caller sends our state back) or theirs, which replaces

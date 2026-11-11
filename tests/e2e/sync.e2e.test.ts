@@ -300,6 +300,26 @@ describe('e2e unrelated histories', { timeout: 30000 }, () => {
     expect(a).toBe(B.vault.text('x.md'));
     expect(['v1\nedited on A\n', 'v1\nedited on B\n']).toContain(a);
   });
+  it('does not duplicate notes when three devices with the same notes first sync together', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+    for (const r of [ra, rb, rc]) seed(r, { 'base.md': 'same\n', 'sub/two.md': 'one\ntwo\n' });
+    const pa = ports(), pb = pa + 1, pc = pa + 2;
+    const all = await Promise.all([
+      startNode(ra, 'aaaa', pa, [pb, pc]),
+      startNode(rb, 'bbbb', pb, [pa, pc]),
+      startNode(rc, 'cccc', pc, [pa, pb]),
+    ]);
+    all.forEach(track);
+    await sleep(5000);
+    for (const n of all) {
+      expect(n.vault.text('base.md')).toBe('same\n');
+      expect(n.vault.text('sub/two.md')).toBe('one\ntwo\n');
+    }
+    // Edits still reach everyone.
+    await all[2].vault.write('base.md', 'same\nfrom C\n');
+    await sleep(1500);
+    for (const n of all) expect(n.vault.text('base.md')).toBe('same\nfrom C\n');
+  });
 });
 
 describe('e2e offline deletes', { timeout: 30000 }, () => {
