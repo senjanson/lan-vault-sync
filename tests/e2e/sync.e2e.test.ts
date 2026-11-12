@@ -640,7 +640,7 @@ describe('e2e pairing key', { timeout: 30000 }, () => {
     const old = await connectRaw(pa, { deviceId: 'old', vaultId: (A.coord as any).vaultId, nonce: undefined });
     expect(old.isClosed()).toBe(true);
     expect(count(A, 'Refused')).toBe(1);
-    expect(A.events.some((e) => e.includes('version too old'))).toBe(true);
+    expect(A.events.some((e) => e.includes('plugin version is older'))).toBe(true);
   });
 
   it('accepts the same key typed with other case and spacing', async () => {
