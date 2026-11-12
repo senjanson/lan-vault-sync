@@ -62,6 +62,7 @@ export class SyncCoordinator {
    *  initialising it from disk would cause duplication when the update is
    *  applied. */
   private renameFollowQueue: Promise<unknown> = Promise.resolve();
+  private renamesInProgress = new Map<string, Promise<unknown>>();
   private conflictLoserPaths = new Map<string, Set<string>>();
   private localFileChangeQueue: Promise<void> = Promise.resolve();
   private recentRemoteTextRenames = new Map<
@@ -415,6 +416,7 @@ export class SyncCoordinator {
       case MessageType.YJS_SYNC_STEP1: {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
+        await this._renameSettled(msg.filePath);
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         // Renamed here: the peer learns the new name from our file list. The
         // request carries a state vector, not changes to merge.
@@ -476,6 +478,7 @@ export class SyncCoordinator {
       case MessageType.YJS_SYNC_STEP2: {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
+        await this._renameSettled(msg.filePath);
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._receiveRemoteUpdate(deviceId, resolvedPath, msg.data);
         break;
@@ -484,6 +487,7 @@ export class SyncCoordinator {
       case MessageType.YJS_FULL_STATE: {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
+        await this._renameSettled(msg.filePath);
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._flushPendingLocalTextChange(resolvedPath);
         if (!this._hasConflictLoserGuard(resolvedPath)) {
@@ -496,6 +500,7 @@ export class SyncCoordinator {
       case MessageType.YJS_UPDATE: {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
+        await this._renameSettled(msg.filePath);
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
         await this._receiveRemoteUpdate(deviceId, resolvedPath, msg.data);
         break;
@@ -1536,7 +1541,23 @@ export class SyncCoordinator {
       this._followRemoteRenameNow(deviceId, oldPath, newPath),
     );
     this.renameFollowQueue = run.catch(() => undefined);
+    const settled = this.renameFollowQueue;
+    for (const path of [oldPath, newPath]) this.renamesInProgress.set(path, settled);
+    void settled.then(() => {
+      for (const path of [oldPath, newPath]) {
+        if (this.renamesInProgress.get(path) === settled) this.renamesInProgress.delete(path);
+      }
+    });
     return run;
+  }
+
+  /**
+   * Wait while a note is moved to or from `path`. Text for the note that
+   * arrives then would otherwise start a doc of its own under the new name,
+   * apart from the one being moved there, or bring the old name back.
+   */
+  private async _renameSettled(path: string): Promise<void> {
+    await this.renamesInProgress.get(path);
   }
 
   private async _followRemoteRenameNow(

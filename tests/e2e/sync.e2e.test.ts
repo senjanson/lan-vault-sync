@@ -803,6 +803,35 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect(B.vault.text('g.md')).toBe('one\n');
   });
 
+  it('keeps an edit when a peer\'s text for the new name arrives while the note is renamed', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'f.md': 'one\n' });
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const dm = (B.coord as any).docManager;
+    await (B.coord as any)._ensureCrdtInitialized('f.md');
+    const peer = new Y.Doc();
+    Y.applyUpdate(peer, await dm.encodeFullState('f.md'));
+    peer.getText('content').insert(0, 'from A\n');
+    await B.vault.write('f.md', 'one\nfrom B\n');
+    await (B.coord as any)._flushPendingLocalTextChange('f.md');
+    await dm.applyLocalChange('f.md', 'one\nfrom B\n');
+    // Another peer's text for the new name comes in just after the file
+    // took the new name.
+    const record = (B.coord as any)._recordRename.bind(B.coord);
+    let receiving: Promise<void> | undefined;
+    (B.coord as any)._recordRename = async (a: string, b: string) => {
+      const msg = decodeMessage(encodeYjsSync(MessageType.YJS_SYNC_STEP2, 'g.md', Y.encodeStateAsUpdate(peer)));
+      receiving = (B.coord as any)._handleMessage('cccc', msg.type, msg.payload);
+      await sleep(200);
+      return record(a, b);
+    };
+    expect(await (B.coord as any)._followRemoteRename('aaaa', 'f.md', 'g.md')).toBe(true);
+    await receiving;
+    await sleep(600);
+    expect(B.vault.text('g.md')).toBe('from A\none\nfrom B\n');
+    expect(await dm.getContent('g.md')).toBe('from A\none\nfrom B\n');
+  });
+
   it('keeps the renamed note when two peers lead to following the same rename at once', async () => {
     const rb = tmpRoot('b');
     seed(rb, { 'f.md': 'one\nfrom B\n' });
