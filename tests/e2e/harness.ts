@@ -135,27 +135,47 @@ export const count = (n: Node, prefix: string) => n.events.filter((e) => e.start
 
 /**
  * A raw protocol client, used to act as an untrusted device on the LAN. With
- * a key it completes the pairing check (a device that knows the key).
+ * a key it completes the pairing check (a device that knows the key), after
+ * which send() encrypts and received messages are decrypted.
  */
 export async function connectRaw(port: number, handshake: Record<string, unknown>, key?: string) {
   const { encodeHandshake, encodeAuth, decodeMessage, decodeJSON } = await import('../../src/transport/protocol');
   const { authProof, authMessage, randomNonce } = await import('../../src/transport/auth');
+  const { SecureChannel } = await import('../../src/transport/secure-channel');
+  const { PROTOCOL_VERSION } = await import('../../src/constants');
   const WS = (globalThis as any).require('ws');
   const ws = new WS(`ws://127.0.0.1:${port}`);
   const received: Array<{ type: number; payload: Uint8Array }> = [];
   let closed = false;
+  let channel: InstanceType<typeof SecureChannel> | null = null;
+  let chain: Promise<unknown> = Promise.resolve();
   const nonce = randomNonce();
-  ws.on('message', async (raw: Buffer) => {
-    const msg = decodeMessage(new Uint8Array(raw));
-    received.push(msg);
-    if (key && msg.type === 0x01) {
-      const ack = decodeJSON<{ nonce?: string }>(msg.payload);
-      if (ack.nonce) ws.send(encodeAuth({ proof: await authProof(key, authMessage(ack.nonce, nonce, String(handshake.deviceId))) }));
-    }
+  ws.on('message', (raw: Buffer) => {
+    chain = chain.then(async () => {
+      if (channel) {
+        received.push(decodeMessage(await channel.open(new Uint8Array(raw))));
+        return;
+      }
+      const msg = decodeMessage(new Uint8Array(raw));
+      received.push(msg);
+      if (key && msg.type === 0x01) {
+        const ack = decodeJSON<{ nonce?: string }>(msg.payload);
+        if (ack.nonce) {
+          ws.send(encodeAuth({ proof: await authProof(key, authMessage(ack.nonce, nonce, String(handshake.deviceId))) }));
+          channel = await SecureChannel.derive(key, nonce, ack.nonce, true);
+        }
+      }
+    }).catch(() => undefined);
   });
   ws.on('close', () => { closed = true; });
   await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
-  ws.send(encodeHandshake({ deviceName: 'rogue', port: 1, nonce, ...handshake } as any));
+  ws.send(encodeHandshake({ deviceName: 'rogue', port: 1, nonce, protocolVersion: PROTOCOL_VERSION, ...handshake } as any));
   await sleep(300);
-  return { ws, received, isClosed: () => closed, send: (data: Uint8Array) => ws.send(data) };
+  let sendChain: Promise<unknown> = Promise.resolve();
+  const send = (data: Uint8Array) => {
+    if (!channel) { ws.send(data); return; }
+    const sealed = channel.seal(data);
+    sendChain = sendChain.then(async () => ws.send(await sealed));
+  };
+  return { ws, received, isClosed: () => closed, send, sendPlain: (data: Uint8Array) => ws.send(data) };
 }

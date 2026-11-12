@@ -306,8 +306,10 @@ export class SyncCoordinator {
     this.connectionManager.onAuthFailed((failure) => {
       this._emitEvent(
         failure.reason === "outdated"
-          ? `Refused ${failure.deviceName} (${failure.address}): plugin version too old`
-          : `Refused ${failure.deviceName} (${failure.address}): sync key does not match`,
+          ? `Refused ${failure.deviceName} (${failure.address}): its plugin version is older, update it there`
+          : failure.reason === "newer"
+            ? `Refused ${failure.deviceName} (${failure.address}): its plugin version is newer, update it here`
+            : `Refused ${failure.deviceName} (${failure.address}): sync key does not match`,
       );
       this.onAuthFailedCb?.(failure);
     });

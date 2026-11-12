@@ -80,6 +80,8 @@ describe('ConnectionManager liveness', () => {
     };
     return sock;
   }
+  // Passes messages through unchanged, so the test can read what is sent.
+  const plainChannel = { seal: async (d: Uint8Array) => d, open: async (d: Uint8Array) => d };
   const peer: DeviceInfo = {
     deviceId: 'device-c', deviceName: 'C', ip: '10.0.0.3', port: 50000,
     vaultId: 'vault-1', lastSeen: 0, acceptsIncomingConnections: true,
@@ -92,7 +94,7 @@ describe('ConnectionManager liveness', () => {
       const disconnected: string[] = [];
       manager.onPeerDisconnected((id: string) => disconnected.push(id));
       const ws = fakeSocket();
-      manager._setupWs(ws, peer, 'inbound');
+      manager._setupWs(ws, peer, plainChannel, 'inbound');
       expect(manager.isConnectedTo('device-c')).toBe(true);
 
       await vi.advanceTimersByTimeAsync(WS_PING_INTERVAL_MS * 5);
@@ -111,7 +113,7 @@ describe('ConnectionManager liveness', () => {
     try {
       const manager = createManager() as any;
       const ws = fakeSocket();
-      manager._routeSocket(ws, 'inbound', () => peer);
+      manager._routeSocket(ws, 'inbound', () => ({ device: peer, channel: plainChannel }));
       ws.emit('message', encodePing());
       await vi.advanceTimersByTimeAsync(0);
       expect(manager.isConnectedTo('device-c')).toBe(true);

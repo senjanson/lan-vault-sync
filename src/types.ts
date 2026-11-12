@@ -118,6 +118,8 @@ export interface HandshakePayload {
   nonce?: string;
   /** HMAC over the other side's nonce (handshake ack only). */
   proof?: string;
+  /** Sync protocol version; plugin 0.3 and older send none (version 1). */
+  protocolVersion?: number;
 }
 
 export interface AuthPayload {

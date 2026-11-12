@@ -33,7 +33,8 @@ import {
   MessageType,
   LANSyncSettings,
 } from '../types';
-import { WS_PING_INTERVAL_MS } from '../constants';
+import { PROTOCOL_VERSION, WS_PING_INTERVAL_MS } from '../constants';
+import { SecureChannel } from './secure-channel';
 import { logger } from '../logger';
 import { supportsIncomingConnections } from '../utils/runtime';
 
@@ -49,20 +50,32 @@ interface PeerConnection {
   pingTimer?: ReturnType<typeof setInterval>;
   /** Pings sent since the peer last sent anything. */
   missedPings: number;
+  /** Encrypts and decrypts this connection's messages. */
+  channel: SecureChannel;
+  /** Sends in order: encryption is asynchronous. */
+  sendChain: Promise<void>;
   /** Per-peer message queue to serialize async message handling */
   messageQueue: Promise<void>;
 }
 
 type DecodedMessage = ReturnType<typeof decodeMessage>;
 
-/** Result of one handshake step: the peer, a rejection, or "wait for more". */
-type HandshakeStep = DeviceInfo | null | 'continue';
+interface PairedPeer {
+  device: DeviceInfo;
+  channel: SecureChannel;
+}
+
+/** Result of one handshake step: the paired peer, a rejection, or "wait for more". */
+type HandshakeStep = PairedPeer | null | 'continue';
 
 export interface AuthFailure {
   deviceName: string;
   address: string;
-  /** 'outdated' when the peer runs a version without pairing keys. */
-  reason: 'key-mismatch' | 'outdated';
+  /**
+   * 'outdated' when the peer runs an older protocol version, 'newer' when
+   * this device does.
+   */
+  reason: 'key-mismatch' | 'outdated' | 'newer';
 }
 
 /** Unauthenticated sockets are closed after this long. */
@@ -181,6 +194,7 @@ export class ConnectionManager {
           logger.warn(`Rejected outbound peer ${payload.deviceId}: invalid handshake ack`);
           return null;
         }
+        if (!this._checkVersion(payload, address)) return null;
 
         // The listening side must prove it knows the sync key before we
         // send it anything.
@@ -203,16 +217,19 @@ export class ConnectionManager {
         );
 
         return {
-          deviceId: payload.deviceId,
-          deviceName: payload.deviceName,
-          ip: device.ip,
-          port: payload.port,
-          vaultId: payload.vaultId,
-          lastSeen: Date.now(),
-          acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
+          device: {
+            deviceId: payload.deviceId,
+            deviceName: payload.deviceName,
+            ip: device.ip,
+            port: payload.port,
+            vaultId: payload.vaultId,
+            lastSeen: Date.now(),
+            acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
+          },
+          channel: await SecureChannel.derive(key, nonce, payload.nonce, true),
         };
       }, client);
-      ws.send(encodeHandshake({ ...this.localInfo, nonce }));
+      ws.send(encodeHandshake({ ...this.localInfo, nonce, protocolVersion: PROTOCOL_VERSION }));
     });
 
     client.connect();
@@ -238,18 +255,24 @@ export class ConnectionManager {
   /** Send raw bytes to a specific peer */
   sendTo(deviceId: string, data: Uint8Array): void {
     const peer = this.peers.get(deviceId);
-    if (peer && peer.ws.readyState === SOCKET_OPEN) {
-      peer.ws.send(data);
-    }
+    if (peer) this._send(peer, data);
   }
 
   /** Broadcast raw bytes to all connected peers */
   broadcast(data: Uint8Array): void {
-    for (const [, peer] of this.peers) {
-      if (peer.ws.readyState === SOCKET_OPEN) {
-        peer.ws.send(data);
-      }
-    }
+    for (const peer of this.peers.values()) this._send(peer, data);
+  }
+
+  /** Encrypt and send, keeping the order in which messages were given. */
+  private _send(peer: PeerConnection, data: Uint8Array): void {
+    if (peer.ws.readyState !== SOCKET_OPEN) return;
+    const sealed = peer.channel.seal(data);
+    peer.sendChain = peer.sendChain
+      .then(async () => {
+        const frame = await sealed;
+        if (peer.ws.readyState === SOCKET_OPEN) peer.ws.send(frame);
+      })
+      .catch((err) => logger.error(`Failed to send to ${peer.deviceId}:`, err));
   }
 
   getConnectedPeerIds(): string[] {
@@ -314,12 +337,13 @@ export class ConnectionManager {
           this._authFailed(payload.deviceName, ip, 'outdated');
           return null;
         }
+        if (!this._checkVersion(payload, ip)) return null;
         if (!key) return null;
 
         // Prove we know the key, then wait for the peer to do the same.
         const serverNonce = randomNonce();
         const proof = await authProof(key, ackMessage(payload.nonce, serverNonce, this.settings.deviceId));
-        ws.send(encodeHandshakeAck({ ...this.localInfo, nonce: serverNonce, proof }));
+        ws.send(encodeHandshakeAck({ ...this.localInfo, nonce: serverNonce, proof, protocolVersion: PROTOCOL_VERSION }));
         pending = {
           clientNonce: payload.nonce,
           serverNonce,
@@ -349,8 +373,19 @@ export class ConnectionManager {
         this._authFailed(pending.device.deviceName, ip, 'key-mismatch');
         return null;
       }
-      return pending.device;
+      return {
+        device: pending.device,
+        channel: await SecureChannel.derive(key, pending.clientNonce, pending.serverNonce, false),
+      };
     });
+  }
+
+  /** Both sides must speak the same protocol; tell the user which to update. */
+  private _checkVersion(payload: HandshakePayload, address: string): boolean {
+    const version = typeof payload.protocolVersion === 'number' ? payload.protocolVersion : 1;
+    if (version === PROTOCOL_VERSION) return true;
+    this._authFailed(payload.deviceName, address, version < PROTOCOL_VERSION ? 'outdated' : 'newer');
+    return false;
   }
 
   private _authFailed(deviceName: string, address: string, reason: AuthFailure['reason']): void {
@@ -375,6 +410,7 @@ export class ConnectionManager {
     client?: WSClient,
   ): void {
     let deviceId: string | null = null;
+    let channel: SecureChannel | null = null;
     let rejected = false;
     let chain: Promise<void> = Promise.resolve();
 
@@ -391,7 +427,22 @@ export class ConnectionManager {
       chain = chain
         .then(async () => {
           if (rejected) return;
-          const msg = decodeMessage(await toUint8Array(raw));
+          const bytes = await toUint8Array(raw);
+          if (channel) {
+            // Paired: everything from here on is encrypted.
+            let plain: Uint8Array;
+            try {
+              plain = await channel.open(bytes);
+            } catch (err) {
+              logger.warn(`Closing connection with ${deviceId}: message could not be decrypted`, err);
+              rejected = true;
+              ws.close();
+              return;
+            }
+            this._dispatch(deviceId!, ws, decodeMessage(plain));
+            return;
+          }
+          const msg = decodeMessage(bytes);
           if (deviceId === null) {
             const step = await handshake(msg);
             if (step === 'continue') return;
@@ -401,14 +452,13 @@ export class ConnectionManager {
               return;
             }
             clearTimeout(timeout);
-            if (this._setupWs(ws, step, direction, client)) {
-              deviceId = step.deviceId;
+            if (this._setupWs(ws, step.device, step.channel, direction, client)) {
+              deviceId = step.device.deviceId;
+              channel = step.channel;
             } else {
               rejected = true;
             }
-            return;
           }
-          this._dispatch(deviceId, ws, msg);
         })
         .catch((err) => {
           logger.error(`Error handling message (${direction}):`, err);
@@ -423,6 +473,7 @@ export class ConnectionManager {
   private _setupWs(
     ws: SocketLike,
     device: DeviceInfo,
+    channel: SecureChannel,
     direction: 'inbound' | 'outbound',
     client?: WSClient,
   ): boolean {
@@ -461,6 +512,8 @@ export class ConnectionManager {
       direction,
       client,
       missedPings: 0,
+      channel,
+      sendChain: Promise.resolve(),
       messageQueue: Promise.resolve(),
     };
 
@@ -475,7 +528,7 @@ export class ConnectionManager {
       }
       if (ws.readyState === SOCKET_OPEN) {
         peer.missedPings++;
-        ws.send(encodePing());
+        this._send(peer, encodePing());
       }
     }, WS_PING_INTERVAL_MS);
 
@@ -496,16 +549,16 @@ export class ConnectionManager {
   }
 
   private _dispatch(deviceId: string, ws: SocketLike, msg: DecodedMessage): void {
+    const p = this.peers.get(deviceId);
+    if (!p || p.ws !== ws) return;
     if (msg.type === MessageType.PING) {
-      ws.send(encodePong());
+      this._send(p, encodePong());
       return;
     }
     if (msg.type === MessageType.PONG || msg.type === MessageType.HANDSHAKE_ACK) return;
 
     // Serialize message handling per peer to prevent race conditions.
     // Each message waits for the previous one to finish before starting.
-    const p = this.peers.get(deviceId);
-    if (!p || p.ws !== ws) return;
     p.messageQueue = p.messageQueue.then(async () => {
       try {
         await this.messageHandler?.(deviceId, msg.type, msg.payload);

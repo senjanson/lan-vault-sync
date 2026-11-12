@@ -286,8 +286,10 @@ export default class LANSyncPlugin extends Plugin {
     const name = failure.deviceName || failure.address;
     new Notice(
       failure.reason === "outdated"
-        ? `LAN Sync: ${name} runs an older version of the plugin. Update it on that device to sync.`
-        : `LAN Sync: ${name} has a different sync key. Use the same key on both devices (Settings → LAN Vault Sync → Sync key).`,
+        ? `LAN Sync: ${name} runs an older version of LAN Vault Sync. Update the plugin on that device to sync with it.`
+        : failure.reason === "newer"
+          ? `LAN Sync: ${name} runs a newer version of LAN Vault Sync. Update the plugin on this device to sync with it.`
+          : `LAN Sync: ${name} has a different sync key. Use the same key on both devices (Settings → LAN Vault Sync → Sync key).`,
       10000,
     );
   }
