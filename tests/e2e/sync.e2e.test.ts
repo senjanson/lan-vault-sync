@@ -920,6 +920,21 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     }
   });
 
+  it('keeps one copy when three devices renamed the same note to different names', async () => {
+    const ids = ['aaaa', 'bbbb', 'cccc'];
+    const roots = ids.map((id) => tmpRoot(id));
+    const pa = ports();
+    seed(roots[0], { 'r.md': 'r\n' });
+    let n = await phase(roots, ids, pa, true);
+    await sleep(2500);
+    n = await phase(roots, ids, pa, false);
+    for (const [i, x] of n.entries()) { await x.vault.mv('r.md', `r-${ids[i][0]}.md`); await sleep(20); }
+    await sleep(800);
+    n = await phase(roots, ids, pa, true);
+    await sleep(6000);
+    for (const r of roots) expect(notes(r)).toEqual(['r-c.md']);
+  });
+
   it('does not double a note that two peers created on their own at the same time', async () => {
     const C = track(await startNode(tmpRoot('c'), 'cccc', ports(), []));
     const history = (text: string) => {

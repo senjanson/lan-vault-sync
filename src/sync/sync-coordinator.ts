@@ -920,10 +920,16 @@ export class SyncCoordinator {
       }
       // The peer renamed this note while we edited it: move our edits to
       // the new name instead of keeping the old name as a second note.
-      const renamedTo =
-        this._renameTarget(peerTombstone, remoteFiles, remoteDeleted) ??
-        this._laterRenameOfSameFile(file.path, remoteFiles, remoteDeleted);
+      const movedTo = this._renameTarget(peerTombstone, remoteFiles, remoteDeleted);
+      const later = movedTo ? null : this._laterRenameOfSameFile(file.path, remoteFiles, remoteDeleted);
+      const renamedTo = movedTo ?? later?.target;
       if (renamedTo && (await this._followRemoteRename(deviceId, file.path, renamedTo))) {
+        // Take on the rename that won, so that a third device which renamed
+        // the note too compares with it and not with our own, older one.
+        if (later) {
+          const t = later.theirs;
+          this.tombstones.add(t.path, t.hash, t.deletedAt, t.movedTo);
+        }
         continue;
       }
       if (file.isTextFile) {
@@ -1458,19 +1464,21 @@ export class SyncCoordinator {
     path: string,
     remoteFiles: Map<string, FileMeta>,
     remoteDeleted: Map<string, Tombstone>,
-  ): string | null {
-    const ours = this.tombstones.list().find((t) => t.movedTo === path);
-    if (!ours) return null;
-    const theirs = remoteDeleted.get(ours.path);
-    if (!theirs?.movedTo || theirs.movedTo === path) return null;
-    // The same file: both records name the content that was renamed.
-    if (!ours.hash || ours.hash !== theirs.hash) return null;
-    const target = this._renameTarget(theirs, remoteFiles, remoteDeleted);
-    if (!target || target === path) return null;
-    const theirsWins =
-      theirs.deletedAt > ours.deletedAt ||
-      (theirs.deletedAt === ours.deletedAt && target < path);
-    return theirsWins ? target : null;
+  ): { target: string; theirs: Tombstone } | null {
+    for (const ours of this.tombstones.list()) {
+      if (ours.movedTo !== path) continue;
+      const theirs = remoteDeleted.get(ours.path);
+      if (!theirs?.movedTo || theirs.movedTo === path) continue;
+      // The same file: both records name the content that was renamed.
+      if (!ours.hash || ours.hash !== theirs.hash) continue;
+      const target = this._renameTarget(theirs, remoteFiles, remoteDeleted);
+      if (!target || target === path) continue;
+      const theirsWins =
+        theirs.deletedAt > ours.deletedAt ||
+        (theirs.deletedAt === ours.deletedAt && target < path);
+      return theirsWins ? { target, theirs } : null;
+    }
+    return null;
   }
 
   /**
