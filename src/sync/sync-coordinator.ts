@@ -582,8 +582,14 @@ export class SyncCoordinator {
       case MessageType.FILE_DELETE: {
         // A peer moved its copy on. If ours has not arrived yet, remember
         // where it went, so that the copy is moved there too when it does.
+        // A record we already have stays as it is: when it is our own
+        // rename, the peer only followed it, and a new time and hash would
+        // make it look like a later rename of another file.
         const del = decodeJSON<FileDeletePayload>(payload);
-        if (del.hash && del.movedTo && this._isAllowedPath(del.path) && !this.vault.getAbstractFileByPath(del.path)) {
+        if (
+          del.hash && del.movedTo && this._isAllowedPath(del.path) &&
+          !this.vault.getAbstractFileByPath(del.path) && !this.tombstones.get(del.path)
+        ) {
           this.tombstones.add(del.path, del.hash, undefined, del.movedTo);
         }
         await this.binarySync.handleMessage(deviceId, type, payload);
