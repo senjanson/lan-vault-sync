@@ -38,6 +38,9 @@ export class BinaryFileSyncService {
   /** Chunked files being received, keyed by `${deviceId}\n${path}`. */
   private incoming = new Map<string, IncomingFile>();
   private isDeletedCb: ((path: string, hash: string) => boolean) | null = null;
+  private holdsOtherContentCb:
+    | ((path: string, hash: string) => Promise<boolean>)
+    | null = null;
   private onRemoteFileStoredCb: ((path: string, hash: string) => void) | null =
     null;
   private onRemoteFileWrittenCb:
@@ -65,6 +68,14 @@ export class BinaryFileSyncService {
   /** Tells whether this exact file (path and hash) was deleted here. */
   setDeletedCheck(cb: (path: string, hash: string) => boolean): void {
     this.isDeletedCb = cb;
+  }
+
+  /**
+   * Tells whether the file holds more than the given content beyond what is
+   * on disk, e.g. a note's text that was merged but not written yet.
+   */
+  setHoldsOtherContent(cb: (path: string, hash: string) => Promise<boolean>): void {
+    this.holdsOtherContentCb = cb;
   }
 
   onRemoteFileStored(cb: (path: string, hash: string) => void): void {
@@ -126,7 +137,7 @@ export class BinaryFileSyncService {
           if (!(file instanceof TFile)) break;
           if ((await computeFileHash(await this.vault.readBinary(file))) !== del.hash) break;
         }
-        await this._deleteFile(del.path);
+        await this._deleteFile(del.path, del.hash);
         break;
       }
       case MessageType.FILE_RENAME: {
@@ -352,7 +363,11 @@ export class BinaryFileSyncService {
     await this._deleteFile(path);
   }
 
-  private async _deleteFile(path: string): Promise<void> {
+  /**
+   * Delete a file, backed up first. With `hash`, only that exact copy is
+   * deleted: the file may change while it is backed up.
+   */
+  private async _deleteFile(path: string, hash?: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
       if (file instanceof TFile) {
@@ -384,11 +399,22 @@ export class BinaryFileSyncService {
         logger.warn(`Not deleting ${path}: it was renamed to ${file.path}`);
         return;
       }
+      if (hash && file instanceof TFile && !(await this._isCopy(file, path, hash))) {
+        logger.warn(`Not deleting ${path}: it changed while it was backed up`);
+        return;
+      }
       this.onRemoteFileWrittenCb?.(path, "delete");
       await this.vault.delete(file);
       await this.onRemoteFileDeletedCb?.(path);
       logger.debug(`Deleted file: ${path}`);
     }
+  }
+
+  private async _isCopy(file: TFile, path: string, hash: string): Promise<boolean> {
+    if ((await computeFileHash(await this.vault.readBinary(file))) !== hash) return false;
+    if (await this.holdsOtherContentCb?.(path, hash)) return false;
+    // Checked again: it may have been renamed meanwhile.
+    return file.path === path;
   }
 
   private async _renameFile(oldPath: string, newPath: string): Promise<void> {

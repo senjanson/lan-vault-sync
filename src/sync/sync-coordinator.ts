@@ -346,6 +346,12 @@ export class SyncCoordinator {
     this.binarySync.setDeletedCheck(
       (path, hash) => this.tombstones.get(path)?.hash === hash,
     );
+    // A note's text may hold edits that are not on disk yet, e.g. merged
+    // in from a renamed copy; such a note is not the copy a peer deletes.
+    this.binarySync.setHoldsOtherContent(async (path, hash) => {
+      if (!this.filter.isTextFile(path) || !(await this.docManager.hasDocState(path))) return false;
+      return (await this._hashText(await this.docManager.getContent(path))) !== hash;
+    });
     this.binarySync.onRemoteFileStored((path, hash) => {
       this.knownHashes.set(path, hash);
     });

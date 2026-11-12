@@ -17,7 +17,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as Y from 'yjs';
 import { TFolder } from 'obsidian';
-import { decodeMessage, encodeFileData, encodeFileRequest, encodeYjsSync } from '../../src/transport/protocol';
+import { decodeMessage, encodeFileData, encodeFileDelete, encodeFileRequest, encodeYjsSync } from '../../src/transport/protocol';
+import { computeFileHash } from '../../src/binary-sync/file-hash';
 import { MessageType } from '../../src/types';
 import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot } from './harness';
 
@@ -761,6 +762,33 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect(B.vault.exists('f.md')).toBe(false);
     expect(B.vault.text('sub/g.md')).toBe('one\nfrom B\n');
     expect(await dm.getContent('sub/g.md')).toBe('one\nfrom B\n');
+  });
+
+  it('keeps edits merged into a note while a peer\'s deletion of its old copy is applied', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'f.md': 'one\n', 'g.md': 'one\n' });
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const dm = (B.coord as any).docManager;
+    await (B.coord as any)._ensureCrdtInitialized('f.md');
+    // A peer renamed the note to g.md; we have its copy and our edited f.md.
+    Y.applyUpdate(await dm.getOrCreateDoc('g.md'), await dm.encodeFullState('f.md'));
+    await B.vault.write('f.md', 'one\nfrom B\n');
+    await (B.coord as any)._flushPendingLocalTextChange('f.md');
+    await dm.applyLocalChange('f.md', 'one\nfrom B\n');
+    // Another peer moved the note on and removes the unedited copy of g.md;
+    // backing it up takes a while.
+    const backups = (B.coord as any).binarySync.backupService;
+    const backup = backups.backupBinaryFile.bind(backups);
+    backups.backupBinaryFile = async (...a: unknown[]) => { await sleep(300); return backup(...a); };
+    const hash = await computeFileHash(new TextEncoder().encode('one\n').buffer);
+    const del = decodeMessage(encodeFileDelete({ path: 'g.md', hash }));
+    const deleting = (B.coord as any)._handleMessage('cccc', del.type, del.payload);
+    await sleep(50);
+    expect(await (B.coord as any)._followRemoteRename('aaaa', 'f.md', 'g.md')).toBe(true);
+    await deleting;
+    await sleep(500);
+    expect(B.vault.exists('g.md') ? B.vault.text('g.md') : await dm.getContent('g.md')).toBe('one\nfrom B\n');
+    expect(notes(rb).map((p) => B.vault.text(p)).join('')).toContain('from B');
   });
 
   it('keeps the renamed note when two peers lead to following the same rename at once', async () => {
