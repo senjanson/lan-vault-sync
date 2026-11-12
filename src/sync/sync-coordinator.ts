@@ -122,6 +122,7 @@ export class SyncCoordinator {
       (path) => this.filter.isTextFile(path),
     );
     this.workspace = options?.workspace ?? null;
+    this.docManager.setKeepsWrittenContent((path) => this._openEditors(path).length > 0);
     this.watcher = new VaultWatcher(
       vault,
       settings.ignoredPaths,

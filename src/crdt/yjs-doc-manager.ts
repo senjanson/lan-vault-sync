@@ -35,6 +35,8 @@ export class YjsDocManager {
     | ((filePath: string, content: string, previousContent: string | undefined) => Promise<void> | void)
     | null = null;
 
+  private keepsWrittenContent: (filePath: string) => boolean = () => false;
+
   constructor(private vault: Vault) {
     this.pool = new DocPool();
     this.persistence = new StatePersistence(vault, (vault as any).adapter);
@@ -55,12 +57,27 @@ export class YjsDocManager {
         // The saved state is the note's text: loaded again, it needs no
         // seeding from the file, which may lag behind it.
         if (this.seeded.has(doc)) this.evictedSeeded.add(path);
+        // The file's last written text is only kept for loaded docs. A doc
+        // loaded again holds that same text, which then serves as the base
+        // for the next local edit. Kept while the doc holds text that is
+        // not written yet, or while the note is open in an editor.
+        if (
+          !this.keepsWrittenContent(path) &&
+          this.lastKnownContent.get(path) === doc.getText('content').toString()
+        ) {
+          this.lastKnownContent.delete(path);
+        }
         this.pool.evict(path, doc);
       }).catch((err) => {
         this.pool.cancelEviction(path);
         logger.error(`Failed to evict CRDT doc ${path}:`, err);
       });
     });
+  }
+
+  /** Tell which notes must keep their last written text when unloaded. */
+  setKeepsWrittenContent(cb: (filePath: string) => boolean): void {
+    this.keepsWrittenContent = cb;
   }
 
   /** Register callback: fired when a local edit produces a Yjs update to broadcast */
