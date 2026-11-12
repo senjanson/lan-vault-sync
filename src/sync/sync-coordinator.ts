@@ -63,6 +63,7 @@ export class SyncCoordinator {
    *  applied. */
   private renameFollowQueue: Promise<unknown> = Promise.resolve();
   private renamesInProgress = new Map<string, Promise<unknown>>();
+  private remoteWriteQueues = new Map<string, Promise<void>>();
   private conflictLoserPaths = new Map<string, Set<string>>();
   private localFileChangeQueue: Promise<void> = Promise.resolve();
   private recentRemoteTextRenames = new Map<
@@ -635,7 +636,28 @@ export class SyncCoordinator {
 
   // ─── Private: Write remote content to file ──────────────
 
-  private async _writeFileFromRemote(
+  /**
+   * Write a note's text from its doc. One write per note at a time: two
+   * writes of a new note both created it, and the second, with the later
+   * text, failed because the file existed by then, leaving the file behind
+   * the doc.
+   */
+  private _writeFileFromRemote(
+    filePath: string,
+    content: string,
+    previousContent: string | undefined,
+  ): Promise<void> {
+    const run = (this.remoteWriteQueues.get(filePath) ?? Promise.resolve()).then(() =>
+      this._writeFileFromRemoteNow(filePath, content, previousContent),
+    );
+    this.remoteWriteQueues.set(filePath, run);
+    void run.then(() => {
+      if (this.remoteWriteQueues.get(filePath) === run) this.remoteWriteQueues.delete(filePath);
+    });
+    return run;
+  }
+
+  private async _writeFileFromRemoteNow(
     filePath: string,
     content: string,
     previousContent: string | undefined,

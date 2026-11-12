@@ -849,6 +849,24 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect(await dm.getContent('f.md')).toBe('one\ntwo\n');
   });
 
+  it('writes the latest text when two peers\' text for a new note is written at once', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, {});
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const dm = (B.coord as any).docManager;
+    const doc = await dm.getOrCreateDoc('n.md');
+    doc.getText('content').insert(0, 'one\n');
+    // Creating the file takes a while.
+    const create = B.vault.create.bind(B.vault);
+    (B.vault as any).create = async (p: string, c: string) => { await sleep(200); return create(p, c); };
+    const first = (B.coord as any)._writeFileFromRemote('n.md', 'one\n', '');
+    await sleep(50);
+    doc.getText('content').insert(4, 'two\n');
+    const second = (B.coord as any)._writeFileFromRemote('n.md', 'one\ntwo\n', 'one\n');
+    await Promise.all([first, second]);
+    expect(B.vault.text('n.md')).toBe('one\ntwo\n');
+  });
+
   it('keeps the renamed note when two peers lead to following the same rename at once', async () => {
     const rb = tmpRoot('b');
     seed(rb, { 'f.md': 'one\nfrom B\n' });
