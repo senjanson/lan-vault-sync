@@ -101,7 +101,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
     // ─── Sync key ───────────────────────────────────────
     new Setting(containerEl).setName("Sync key").setHeading();
     containerEl.createEl("p", {
-      text: "Only devices with the same sync key can connect to each other. Scanning this device's QR code copies the key; otherwise enter the same key on every device. Note that synced data is still sent unencrypted on your network.",
+      text: "Only devices with the same sync key can connect to each other. Scanning this device's QR code copies the key; otherwise enter the same key on every device. Synced data is encrypted with this key.",
       cls: "setting-item-description",
     });
     let keyInput: { setValue(v: string): unknown } | null = null;

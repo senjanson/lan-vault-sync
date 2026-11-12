@@ -74,6 +74,12 @@ Device A (Mac)                        Device B (iPhone / iPad)
 3. Copy the three downloaded files into that folder.
 4. In Obsidian, go to **Settings → Community Plugins**, toggle off **Restricted Mode**, and enable **LAN Vault Sync**.
 
+### Upgrading to 0.4
+
+- **Update every device at the same time.** Version 0.4 encrypts sync traffic, so it does not sync with 0.3 or older. A device with an older version is refused with a notice that names it.
+- **Set command hotkeys again.** The commands were renamed to follow Obsidian's guidelines, so hotkeys set for the old ones no longer apply.
+- The first connection after the update sends every note once more; later connections only send notes that differ.
+
 ---
 
 ## Usage
@@ -171,7 +177,7 @@ Version 0.4 renamed these commands, so hotkeys set for them before must be set a
 
 - All traffic is **LAN-only**. No data is sent to any external server.
 - Only devices that know the sync key can connect; the key itself is never sent over the network.
-- Synced data is still sent as plain, unencrypted WebSocket (`ws://`) traffic within your local network. Do not enable this plugin on public or untrusted networks.
+- Since version 0.4, synced data is encrypted (AES-256-GCM) with keys derived from the sync key, fresh for each connection. Others on the network cannot read or change it.
 - No analytics, telemetry, or account required.
 
 ---
