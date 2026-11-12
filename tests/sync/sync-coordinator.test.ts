@@ -75,13 +75,14 @@ describe('SyncCoordinator text conflict safety', () => {
   });
 
   it('flushes pending local text before applying a remote Yjs update', async () => {
-    const applyRemoteUpdate = vi.fn().mockResolvedValue(undefined);
+    const applyRemoteUpdate = vi.fn().mockResolvedValue(true);
     const flushPendingLocalTextChange = vi
       .spyOn(coordinator as any, '_flushPendingLocalTextChange')
       .mockResolvedValue(true);
 
     (coordinator as any).docManager = {
-      applyRemoteUpdate,
+      applyRelatedUpdate: applyRemoteUpdate,
+      isDocSeeded: vi.fn().mockReturnValue(true),
     };
 
     const payload = decodeMessage(
@@ -91,7 +92,7 @@ describe('SyncCoordinator text conflict safety', () => {
     await (coordinator as any)._handleMessage('peer-1', MessageType.YJS_UPDATE, payload);
 
     expect(flushPendingLocalTextChange).toHaveBeenCalledWith('note.md');
-    expect(applyRemoteUpdate).toHaveBeenCalledWith('note.md', new Uint8Array([1, 2, 3]));
+    expect(applyRemoteUpdate).toHaveBeenCalledWith('note.md', new Uint8Array([1, 2, 3]), 'peer-1');
     expect(flushPendingLocalTextChange.mock.invocationCallOrder[0]).toBeLessThan(
       applyRemoteUpdate.mock.invocationCallOrder[0],
     );
@@ -132,6 +133,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     (coordinator as any).watcher = {
       consumePendingModify: vi.fn().mockReturnValue(true),
+      takePendingModify: vi.fn().mockReturnValue({}),
       markRemoteWrite,
     };
     (coordinator as any).docManager = {
@@ -171,6 +173,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     (coordinator as any).watcher = {
       consumePendingModify: vi.fn().mockReturnValue(true),
+      takePendingModify: vi.fn().mockReturnValue({}),
       markRemoteWrite,
     };
     (coordinator as any).docManager = {
@@ -201,6 +204,8 @@ describe('SyncCoordinator text conflict safety', () => {
     (coordinator as any).connectionManager = { sendTo };
     (coordinator as any).docManager = {
       removeDoc: vi.fn().mockResolvedValue(undefined),
+      hasDocState: vi.fn().mockResolvedValue(false),
+      crdtDigest: vi.fn().mockResolvedValue(undefined),
     };
     buildSpy.mockResolvedValueOnce({
       files: new Map([
@@ -303,6 +308,7 @@ describe('SyncCoordinator text conflict safety', () => {
     (coordinator as any).connectionManager = { sendTo };
     (coordinator as any).watcher = {
       consumePendingModify,
+      takePendingModify: vi.fn().mockReturnValue(null),
       markRemoteWrite: vi.fn(),
     };
     (coordinator as any).backupService = {
@@ -310,6 +316,7 @@ describe('SyncCoordinator text conflict safety', () => {
     };
     (coordinator as any).docManager = {
       hasDocState: vi.fn().mockResolvedValue(false),
+      crdtDigest: vi.fn().mockResolvedValue(undefined),
     };
 
     buildSpy.mockResolvedValueOnce({
@@ -352,14 +359,15 @@ describe('SyncCoordinator text conflict safety', () => {
   });
 
   it('redirects stale old-path text updates after a remote rename intent', async () => {
-    const applyRemoteUpdate = vi.fn().mockResolvedValue(undefined);
+    const applyRemoteUpdate = vi.fn().mockResolvedValue(true);
     const renameDoc = vi.fn().mockResolvedValue(undefined);
     const flushPendingLocalTextChange = vi
       .spyOn(coordinator as any, '_flushPendingLocalTextChange')
       .mockResolvedValue(false);
 
     (coordinator as any).docManager = {
-      applyRemoteUpdate,
+      applyRelatedUpdate: applyRemoteUpdate,
+      isDocSeeded: vi.fn().mockReturnValue(true),
       renameDoc,
       removeDoc: vi.fn().mockResolvedValue(undefined),
     };
@@ -377,7 +385,7 @@ describe('SyncCoordinator text conflict safety', () => {
     await (coordinator as any)._handleMessage('peer-1', MessageType.YJS_UPDATE, payload);
 
     expect(flushPendingLocalTextChange).toHaveBeenCalledWith('note.md');
-    expect(applyRemoteUpdate).toHaveBeenCalledWith('note.md', new Uint8Array([1, 2, 3]));
+    expect(applyRemoteUpdate).toHaveBeenCalledWith('note.md', new Uint8Array([1, 2, 3]), 'peer-1');
   });
 
   it('migrates CRDT state on local text rename instead of deleting it', async () => {
@@ -473,5 +481,55 @@ describe('SyncCoordinator text conflict safety', () => {
     await (coordinator as any).binarySync.onRemoteFileDeletedCb?.('note.md');
 
     expect((coordinator as any)._hasConflictLoserGuard('note.md')).toBe(false);
+  });
+});
+
+describe('SyncCoordinator open editor writes', () => {
+  function fakeEditor(initial: string) {
+    let value = initial;
+    const offsetToPos = (offset: number) => offset;
+    return {
+      getValue: () => value,
+      offsetToPos,
+      transaction: vi.fn(({ changes }: { changes: Array<{ from: number; to?: number; text: string }> }) => {
+        for (const change of [...changes].sort((a, b) => b.from - a.from)) {
+          value = value.slice(0, change.from) + change.text + value.slice(change.to ?? change.from);
+        }
+      }),
+    };
+  }
+
+  it('applies a peer edit to the open editor instead of rewriting the file under unsaved typing', async () => {
+    const vault = new FakeVault();
+    vault.setText('note.md', 'L1\nL2\n');
+    const editor = fakeEditor('L1\nL2\n');
+    const workspace = {
+      on: vi.fn(),
+      offref: vi.fn(),
+      getLeavesOfType: () => [{ view: { file: { path: 'note.md' }, editor } }],
+    };
+    const coordinator = new SyncCoordinator(
+      vault as any,
+      { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] },
+      { workspace: workspace as any },
+    );
+    const docManager = (coordinator as any).docManager;
+    await docManager.applyLocalChange('note.md', 'L1\nL2\n');
+    docManager.markWritten('note.md', 'L1\nL2\n');
+
+    // A peer appends to line 2 while the user types on line 1 (not yet saved).
+    const peer = new (await import('yjs')).Doc();
+    const Y = await import('yjs');
+    Y.applyUpdate(peer, await docManager.encodeFullState('note.md'));
+    peer.getText('content').insert(5, ' B');
+    const update = Y.encodeStateAsUpdate(peer, await docManager.encodeSyncStep1('note.md'));
+    editor.transaction({ changes: [{ from: 2, text: ' C' }] });
+    const modify = vi.spyOn(vault, 'modify');
+
+    await docManager.applyRemoteUpdate('note.md', update, 'peer-1');
+
+    expect(modify).not.toHaveBeenCalled();
+    expect(editor.getValue()).toBe('L1 C\nL2 B\n');
+    expect(await docManager.getContent('note.md')).toBe('L1 C\nL2 B\n');
   });
 });

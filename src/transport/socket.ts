@@ -5,6 +5,8 @@ export interface SocketLike {
   binaryType?: SocketBinaryType;
   send(data: Uint8Array): void;
   close(): void;
+  /** Drop the connection at once, without a closing handshake (ws only). */
+  terminate?(): void;
   addEventListener?(event: string, listener: EventListenerOrEventListenerObject): void;
   removeEventListener?(event: string, listener: EventListenerOrEventListenerObject): void;
   on?(event: string, listener: (...args: any[]) => void): void;
@@ -12,6 +14,12 @@ export interface SocketLike {
 }
 
 export const SOCKET_OPEN = 1;
+
+/** The TCP socket under an incoming connection (Node only). */
+export interface RawSocket {
+  on(event: 'data', listener: (chunk: { length: number }) => void): void;
+  removeListener(event: 'data', listener: (chunk: { length: number }) => void): void;
+}
 
 export function setSocketBinaryType(socket: SocketLike): void {
   try {
@@ -58,7 +66,11 @@ export function addSocketMessageListener(
 
 export async function toUint8Array(data: unknown): Promise<Uint8Array> {
   if (data instanceof Uint8Array) {
-    return data;
+    // Node Buffers are Uint8Arrays whose slice() shares memory; normalise to a
+    // plain view so later slice() calls copy as callers expect.
+    return data.constructor === Uint8Array
+      ? data
+      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   }
 
   if (data instanceof ArrayBuffer) {
@@ -97,4 +109,16 @@ function addSocketListener(
   }
 
   throw new Error('Unsupported WebSocket implementation');
+}
+
+/**
+ * A readable message for a socket error. The ws library and browsers pass an
+ * event object rather than an Error, which logs as "[object Object]".
+ */
+export function describeSocketError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  const e = err as { error?: unknown; message?: unknown } | null;
+  if (e?.error instanceof Error) return e.error.message;
+  if (typeof e?.message === 'string' && e.message) return e.message;
+  return 'connection error';
 }

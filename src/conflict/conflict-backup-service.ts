@@ -122,16 +122,18 @@ export class ConflictBackupService {
     return `${safeTime}-${this.sequence}-${this._keyForPath(filePath)}`;
   }
 
+  /**
+   * Short tag for the backup folder name (FNV-1a of the path). The folder must
+   * stay well under the 255-byte name limit; the full path is kept under
+   * files/ and in metadata.json.
+   */
   private _keyForPath(filePath: string): string {
-    const bytes = new TextEncoder().encode(filePath);
-    let binary = "";
-    for (const byte of bytes) {
-      binary += String.fromCharCode(byte);
+    let hash = 0x811c9dc5;
+    for (const byte of new TextEncoder().encode(filePath)) {
+      hash ^= byte;
+      hash = Math.imul(hash, 0x01000193) >>> 0;
     }
-    return btoa(binary)
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
+    return hash.toString(16).padStart(8, "0");
   }
 
   private _toArrayBuffer(content: Uint8Array): ArrayBuffer {

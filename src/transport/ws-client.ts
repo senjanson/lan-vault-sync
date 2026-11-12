@@ -4,6 +4,7 @@ import { canUseNodeRuntime } from "../utils/runtime";
 import {
   addSocketCloseListener,
   addSocketErrorListener,
+  describeSocketError,
   addSocketMessageListener,
   addSocketOpenListener,
   setSocketBinaryType,
@@ -70,7 +71,7 @@ export class WSClient {
       });
 
       addSocketErrorListener(this.ws, (err) => {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = describeSocketError(err);
         logger.error(`WS client error (${this.url}):`, message);
         // close event will fire after error
       });
@@ -91,6 +92,19 @@ export class WSClient {
     }, this.reconnectDelay);
 
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
+  }
+
+  /**
+   * Try again right away if a reconnect is waiting, for example when the app
+   * comes back to the foreground or the network returns. The backoff can
+   * otherwise keep a device waiting up to RECONNECT_MAX_MS.
+   */
+  reconnectNow(): void {
+    if (this.intentionallyClosed || !this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectDelay = RECONNECT_BASE_MS;
+    this._doConnect();
   }
 
   send(data: Uint8Array): void {

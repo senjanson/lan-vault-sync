@@ -1,10 +1,12 @@
 import { PLUGIN_ID } from '../constants';
 
 /**
- * Build the obsidian:// URI that, when opened, adds a manual peer.
+ * Build the obsidian:// URI that, when opened, adds a manual peer and (after
+ * the user confirms) takes over this device's sync key.
  */
-export function buildPeerURI(ip: string, port: number): string {
-  return `obsidian://${PLUGIN_ID}?address=${ip}:${port}`;
+export function buildPeerURI(ip: string, port: number, syncKey?: string): string {
+  const base = `obsidian://${PLUGIN_ID}?address=${ip}:${port}`;
+  return syncKey ? `${base}&key=${encodeURIComponent(syncKey)}` : base;
 }
 
 /**
@@ -27,14 +29,13 @@ export async function renderQRCode(
   });
 
   container.empty();
-  container.innerHTML = svg;
-
-  // Ensure the SVG adapts to the container
-  const svgEl = container.querySelector('svg');
-  if (svgEl) {
-    svgEl.setAttribute('width', '200');
-    svgEl.setAttribute('height', '200');
-    svgEl.style.display = 'block';
-    svgEl.style.margin = '0 auto';
-  }
+  // Parsed as SVG rather than set through innerHTML, which Obsidian's plugin
+  // review does not allow.
+  const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement;
+  if (parsed?.nodeName !== 'svg') return;
+  const svgEl = container.appendChild(document.importNode(parsed, true)) as unknown as SVGElement;
+  svgEl.setAttribute('width', '200');
+  svgEl.setAttribute('height', '200');
+  svgEl.style.display = 'block';
+  svgEl.style.margin = '0 auto';
 }

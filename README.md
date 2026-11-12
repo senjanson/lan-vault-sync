@@ -74,6 +74,12 @@ Device A (Mac)                        Device B (iPhone / iPad)
 3. Copy the three downloaded files into that folder.
 4. In Obsidian, go to **Settings → Community Plugins**, toggle off **Restricted Mode**, and enable **LAN Vault Sync**.
 
+### Upgrading to 0.4
+
+- **Update every device at the same time.** Version 0.4 encrypts sync traffic, so it does not sync with 0.3 or older. A device with an older version is refused with a notice that names it.
+- **Set command hotkeys again.** The commands were renamed to follow Obsidian's guidelines, so hotkeys set for the old ones no longer apply.
+- The first connection after the update sends every note once more; later connections only send notes that differ.
+
 ---
 
 ## Usage
@@ -88,19 +94,23 @@ Device A (Mac)                        Device B (iPhone / iPad)
 
 The easiest way to connect a phone or tablet — no typing required:
 
-1. On the **desktop (Mac / Windows / Linux)**: open **Settings → LAN Vault Sync** and find the **QR Code Pairing** section. A QR code is displayed automatically.
+1. On the **desktop (Mac / Windows / Linux)**: open **Settings → LAN Vault Sync** and find the **Pair with QR code** section. A QR code is displayed automatically.
 2. On your **phone / tablet**: scan the QR code with the system camera (or any QR scanner).
-3. The camera will prompt you to open Obsidian. Confirm — the plugin automatically adds the desktop's IP:port as a peer and shows a notification.
+3. The camera will prompt you to open Obsidian, and the plugin asks whether to pair with that device. Confirm, and it adds the desktop's IP:port as a peer and takes over the **sync key** from the QR code.
 
 > **Tip:** If your desktop has multiple network interfaces (e.g. Wi-Fi + Ethernet), use the dropdown above the QR code to select the correct IP before scanning.
+
+### Sync Key
+
+Only devices with the **same sync key** can connect to each other. Each device creates a random key on first start (**Settings → LAN Vault Sync → Sync Key**). QR pairing copies the key; when adding a peer by hand, enter the same key on both devices. A notice appears when keys don't match. All devices need a plugin version with sync keys.
 
 ### Manual Peer Connection
 
 Auto-discovery uses UDP broadcast, which is blocked on some managed Wi-Fi networks (guest networks, corporate networks). In that case:
 
 1. On **Device A**: open plugin settings and note the displayed **IP address** and **port** (default: `53712`).
-2. On **Device B**: go to **Settings → LAN Vault Sync → Manual Peers** → enter `192.168.x.x:53712`.
-3. Alternatively, use the command palette: **LAN Vault Sync: Add Manual Peer**.
+2. On **Device B**: go to **Settings → LAN Vault Sync → Devices by address** → enter `192.168.x.x:53712`.
+3. Alternatively, use the command palette: **LAN Vault Sync: Add device by address**.
 
 ### Status Bar
 
@@ -116,9 +126,12 @@ The plugin shows a status indicator in the Obsidian status bar:
 
 Open the command palette (`Cmd/Ctrl + P`) and search for:
 
-- **LAN Vault Sync: Toggle** — start or stop the sync service
-- **LAN Vault Sync: Open Sync Panel** — open the sidebar panel with connected peers and sync log
-- **LAN Vault Sync: Add Manual Peer** — add a peer by `IP:port`
+- **LAN Vault Sync: Turn sync on or off** — start or stop the sync service
+- **LAN Vault Sync: Open sync panel** — open the sidebar panel with connected peers and sync log
+- **LAN Vault Sync: Add device by address** — add a peer by `IP:port`
+- **LAN Vault Sync: Open sync log** — open the sync log
+
+Version 0.4 renamed these commands, so hotkeys set for them before must be set again.
 
 ---
 
@@ -157,13 +170,14 @@ Open the command palette (`Cmd/Ctrl + P`) and search for:
 
 - Mobile devices (iOS / Android) act as WebSocket **clients** only — they cannot run a server due to OS restrictions.
 - A desktop device must be reachable on the network to act as a server for mobile clients.
-- Auto-discovery may not work on mobile; use **QR Code Pairing** or **Manual Peers** as a fallback.
+- Auto-discovery may not work on mobile; use **Pair with QR code** or **Devices by address** as a fallback.
 - Sync resumes automatically when the Obsidian app returns to the foreground.
 
 ### Privacy & Security
 
 - All traffic is **LAN-only**. No data is sent to any external server.
-- Communication is plain WebSocket (`ws://`) within your local network. Do not enable this plugin on public or untrusted networks.
+- Only devices that know the sync key can connect; the key itself is never sent over the network.
+- Since version 0.4, synced data is encrypted (AES-256-GCM) with keys derived from the sync key, fresh for each connection. Others on the network cannot read or change it.
 - No analytics, telemetry, or account required.
 
 ---

@@ -95,16 +95,59 @@ describe("VaultWatcher", () => {
     });
   });
 
-  it("suppresses both editor and vault events for remote writes", () => {
+  it("lets text edits through after a remote write", () => {
+    // The coordinator recognises echoes of its own writes by content, so a
+    // real edit typed right after a remote write must still reach it.
     const file = createFile("note.md");
     const editor = {
-      getValue: () => "remote content",
+      getValue: () => "typed after remote write",
     };
 
     watcher.markRemoteWrite("note.md");
     workspace.trigger("editor-change", editor, { file });
-    vault.trigger("modify", file);
     vi.advanceTimersByTime(DEBOUNCE_MS);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].content).toBe("typed after remote write");
+  });
+
+  it("still suppresses non-text events for remote writes", () => {
+    const file = createFile("image.png");
+
+    watcher.markRemoteWrite("image.png");
+    vault.trigger("modify", file);
+    vault.trigger("create", file);
+    vi.advanceTimersByTime(DEBOUNCE_MS);
+
+    expect(events).toHaveLength(0);
+  });
+
+  it("emits a user delete made right after a remote write", () => {
+    const file = createFile("note.md");
+
+    watcher.markRemoteWrite("note.md");
+    vault.trigger("delete", file);
+    watcher.markRemoteWrite("image.png", "delete");
+    vault.trigger("delete", createFile("image.png"));
+
+    expect(events.map((e) => [e.type, e.path])).toEqual([["delete", "note.md"]]);
+  });
+});
+
+describe("VaultWatcher stop", () => {
+  it("stops listening to editor changes", () => {
+    vi.useFakeTimers();
+    const vault = new FakeVault();
+    const workspace = new FakeWorkspace();
+    const watcher = new VaultWatcher(vault as any, [], workspace as any);
+    const events: FileChangeEvent[] = [];
+    watcher.onFileChanged((event) => events.push(event));
+    watcher.start();
+    watcher.stop();
+
+    workspace.trigger("editor-change", { getValue: () => "x" }, { file: createFile("note.md") });
+    vi.advanceTimersByTime(DEBOUNCE_MS);
+    vi.useRealTimers();
 
     expect(events).toHaveLength(0);
   });

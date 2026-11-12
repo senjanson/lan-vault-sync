@@ -2,6 +2,8 @@ import { Vault, TFile } from "obsidian";
 import { ConnectionManager } from "../transport/connection-manager";
 import { ConflictBackupService } from "../conflict/conflict-backup-service";
 import {
+  decodeFileChunk,
+  encodeFileChunk,
   encodeFileData,
   encodeFileDelete,
   encodeFileRename,
@@ -14,16 +16,39 @@ import {
   FileDeletePayload,
   FileRenamePayload,
   FileMeta,
+  Tombstone,
   MessageType,
 } from "../types";
 import { computeFileHash } from "./file-hash";
 import { logger } from "../logger";
-import { ensureParentDirectory } from "../utils/path-utils";
+import {
+  CHUNK_SIZE,
+  CHUNKED_FILE_THRESHOLD,
+  MAX_SYNC_FILE_SIZE,
+} from "../constants";
+import { ensureParentDirectory, isSafeSyncPath } from "../utils/path-utils";
+
+interface IncomingFile {
+  path: string;
+  mtime: number;
+  data: Uint8Array;
+  received: number;
+}
 
 export class BinaryFileSyncService {
-  private onRemoteFileWrittenCb: ((path: string) => void) | null = null;
+  /** Chunked files being received, keyed by `${deviceId}\n${path}`. */
+  private incoming = new Map<string, IncomingFile>();
+  private isDeletedCb: ((path: string, hash: string) => boolean) | null = null;
+  private holdsOtherContentCb:
+    | ((path: string, hash: string) => Promise<boolean>)
+    | null = null;
+  private onRemoteFileStoredCb: ((path: string, hash: string) => void) | null =
+    null;
+  private onRemoteFileWrittenCb:
+    | ((path: string, kind?: "write" | "delete" | "rename") => void)
+    | null = null;
   private onRemoteFileDeletedCb:
-    | ((path: string) => Promise<void> | void)
+    | ((path: string, movedTo?: string, record?: Tombstone) => Promise<void> | void)
     | null = null;
   private onRemoteFileRenamedCb:
     | ((oldPath: string, newPath: string) => Promise<void> | void)
@@ -36,13 +61,35 @@ export class BinaryFileSyncService {
     private vault: Vault,
     private connectionManager: ConnectionManager,
     private backupService: ConflictBackupService,
+    private isAllowedPath: (path: string) => boolean = isSafeSyncPath,
+    private isTextPath: (path: string) => boolean = () => false,
   ) {}
 
-  onRemoteFileWritten(cb: (path: string) => void): void {
+  /** Called with the content hash once a peer's file has been written. */
+  /** Tells whether this exact file (path and hash) was deleted here. */
+  setDeletedCheck(cb: (path: string, hash: string) => boolean): void {
+    this.isDeletedCb = cb;
+  }
+
+  /**
+   * Tells whether the file holds more than the given content beyond what is
+   * on disk, e.g. a note's text that was merged but not written yet.
+   */
+  setHoldsOtherContent(cb: (path: string, hash: string) => Promise<boolean>): void {
+    this.holdsOtherContentCb = cb;
+  }
+
+  onRemoteFileStored(cb: (path: string, hash: string) => void): void {
+    this.onRemoteFileStoredCb = cb;
+  }
+
+  onRemoteFileWritten(
+    cb: (path: string, kind?: "write" | "delete" | "rename") => void,
+  ): void {
     this.onRemoteFileWrittenCb = cb;
   }
 
-  onRemoteFileDeleted(cb: (path: string) => Promise<void> | void): void {
+  onRemoteFileDeleted(cb: (path: string, movedTo?: string, record?: Tombstone) => Promise<void> | void): void {
     this.onRemoteFileDeletedCb = cb;
   }
 
@@ -67,25 +114,36 @@ export class BinaryFileSyncService {
     switch (type) {
       case MessageType.FILE_REQUEST: {
         const path = decodeFileRequest(payload);
-        if (!this._isSafePath(path)) break;
+        if (!this.isAllowedPath(path)) break;
         await this._sendFile(deviceId, path);
         break;
       }
       case MessageType.FILE_DATA: {
         const data = decodeFileData(payload);
-        if (!this._isSafePath(data.path)) break;
+        if (!this.isAllowedPath(data.path)) break;
         await this._receiveFile(data.path, data.content, data.mtime);
+        break;
+      }
+      case MessageType.FILE_CHUNK: {
+        const chunk = decodeFileChunk(payload);
+        if (!this.isAllowedPath(chunk.path)) break;
+        await this._receiveChunk(deviceId, chunk);
         break;
       }
       case MessageType.FILE_DELETE: {
         const del = decodeJSON<FileDeletePayload>(payload);
-        if (!this._isSafePath(del.path)) break;
-        await this._deleteFile(del.path);
+        if (!this.isAllowedPath(del.path)) break;
+        if (del.hash) {
+          const file = this.vault.getAbstractFileByPath(del.path);
+          if (!(file instanceof TFile)) break;
+          if ((await computeFileHash(await this.vault.readBinary(file))) !== del.hash) break;
+        }
+        await this._deleteFile(del.path, del.hash, del.movedTo);
         break;
       }
       case MessageType.FILE_RENAME: {
         const ren = decodeJSON<FileRenamePayload>(payload);
-        if (!this._isSafePath(ren.oldPath) || !this._isSafePath(ren.newPath))
+        if (!this.isAllowedPath(ren.oldPath) || !this.isAllowedPath(ren.newPath))
           break;
         await this._renameFile(ren.oldPath, ren.newPath);
         break;
@@ -99,12 +157,9 @@ export class BinaryFileSyncService {
     if (!(file instanceof TFile)) return;
 
     const content = await this.vault.readBinary(file);
-    const msg = encodeFileData({
-      path,
-      content: new Uint8Array(content),
-      mtime: file.stat.mtime,
-    });
-    this.connectionManager.broadcast(msg);
+    for (const msg of this._encodeFile(path, new Uint8Array(content), file.stat.mtime)) {
+      this.connectionManager.broadcast(msg);
+    }
   }
 
   /** Send a file deletion to all peers */
@@ -131,12 +186,9 @@ export class BinaryFileSyncService {
     if (!(file instanceof TFile)) return;
 
     const content = await this.vault.readBinary(file);
-    const msg = encodeFileData({
-      path,
-      content: new Uint8Array(content),
-      mtime: file.stat.mtime,
-    });
-    this.connectionManager.sendTo(deviceId, msg);
+    for (const msg of this._encodeFile(path, new Uint8Array(content), file.stat.mtime)) {
+      this.connectionManager.sendTo(deviceId, msg);
+    }
   }
 
   /** Build metadata list of all non-text files in the vault */
@@ -161,14 +213,6 @@ export class BinaryFileSyncService {
 
   // ─── Private ────────────────────────────────────────────
 
-  private _isSafePath(filePath: string): boolean {
-    if (!filePath) return false;
-    if (filePath.startsWith("/") || filePath.startsWith("\\")) return false;
-    if (filePath.includes("..")) return false;
-    if (filePath.includes("\0")) return false;
-    return true;
-  }
-
   private async _sendFile(deviceId: string, path: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) {
@@ -177,12 +221,76 @@ export class BinaryFileSyncService {
     }
 
     const content = await this.vault.readBinary(file);
-    const msg = encodeFileData({
-      path,
-      content: new Uint8Array(content),
-      mtime: file.stat.mtime,
-    });
-    this.connectionManager.sendTo(deviceId, msg);
+    for (const msg of this._encodeFile(path, new Uint8Array(content), file.stat.mtime)) {
+      this.connectionManager.sendTo(deviceId, msg);
+    }
+  }
+
+  /** Drop partially received files from a peer that went away. */
+  dropIncoming(deviceId: string): void {
+    for (const key of this.incoming.keys()) {
+      if (key.startsWith(`${deviceId}\n`)) this.incoming.delete(key);
+    }
+  }
+
+  /**
+   * Encode a file as one FILE_DATA message, or as FILE_CHUNK messages when it
+   * is large: a single message over ~100 MiB is refused by the ws library and
+   * closed the connection, so big files never synced.
+   */
+  private _encodeFile(path: string, content: Uint8Array, mtime: number): Uint8Array[] {
+    if (content.byteLength <= CHUNKED_FILE_THRESHOLD) {
+      return [encodeFileData({ path, content, mtime })];
+    }
+    const messages: Uint8Array[] = [];
+    for (let offset = 0; offset < content.byteLength; offset += CHUNK_SIZE) {
+      messages.push(
+        encodeFileChunk({
+          path,
+          mtime,
+          totalSize: content.byteLength,
+          offset,
+          content: content.subarray(offset, offset + CHUNK_SIZE),
+        }),
+      );
+    }
+    return messages;
+  }
+
+  private async _receiveChunk(
+    deviceId: string,
+    chunk: { path: string; mtime: number; totalSize: number; offset: number; content: Uint8Array },
+  ): Promise<void> {
+    const key = `${deviceId}\n${chunk.path}`;
+    const { totalSize, offset, content } = chunk;
+    if (
+      !Number.isSafeInteger(totalSize) || totalSize <= 0 || totalSize > MAX_SYNC_FILE_SIZE ||
+      !Number.isSafeInteger(offset) || offset < 0 || offset + content.byteLength > totalSize
+    ) {
+      logger.warn(`Ignoring malformed file chunk for ${chunk.path}`);
+      this.incoming.delete(key);
+      return;
+    }
+
+    let entry = this.incoming.get(key);
+    if (offset === 0 || !entry || entry.data.byteLength !== totalSize) {
+      // A new transfer of this file starts (a stale partial one is dropped).
+      if (offset !== 0) return;
+      entry = { path: chunk.path, mtime: chunk.mtime, data: new Uint8Array(totalSize), received: 0 };
+      this.incoming.set(key, entry);
+    }
+    if (offset !== entry.received) {
+      logger.warn(`Out-of-order chunk for ${chunk.path}; dropping transfer`);
+      this.incoming.delete(key);
+      return;
+    }
+
+    entry.data.set(content, offset);
+    entry.received += content.byteLength;
+    if (entry.received === totalSize) {
+      this.incoming.delete(key);
+      await this._receiveFile(entry.path, entry.data, entry.mtime);
+    }
   }
 
   private async _receiveFile(
@@ -191,9 +299,21 @@ export class BinaryFileSyncService {
     _mtime: number,
   ): Promise<void> {
     try {
+      const existing = this.vault.getAbstractFileByPath(path);
+      // Text files only come this way when they are new and empty (an empty
+      // note has no CRDT content to send). An existing note's content is
+      // synced through its CRDT document, never overwritten here.
+      if (existing instanceof TFile && this.isTextPath(path)) return;
+      // A peer that has not yet seen our deletion may still send the file
+      // as it was when we deleted it; that must not bring it back.
+      if (
+        !existing &&
+        this.isDeletedCb?.(path, await computeFileHash(toExactArrayBuffer(content)))
+      ) {
+        return;
+      }
       // Mark remote write BEFORE modifying vault to prevent echo-back
       this.onRemoteFileWrittenCb?.(path);
-      const existing = this.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) {
         const currentContent = new Uint8Array(
           await this.vault.readBinary(existing),
@@ -223,21 +343,36 @@ export class BinaryFileSyncService {
             "remote-file-overwrite",
           );
         }
-        await this.vault.modifyBinary(existing, content.buffer as ArrayBuffer);
+        await this.vault.modifyBinary(existing, toExactArrayBuffer(content));
       } else {
         const adapter = (this.vault as any).adapter;
         if (adapter) {
           await ensureParentDirectory(adapter, path);
         }
-        await this.vault.createBinary(path, content.buffer as ArrayBuffer);
+        await this.vault.createBinary(path, toExactArrayBuffer(content));
       }
+      this.onRemoteFileStoredCb?.(path, await computeFileHash(toExactArrayBuffer(content)));
       logger.debug(`Received binary file: ${path}`);
     } catch (err) {
       logger.error(`Failed to write binary file ${path}:`, err);
     }
   }
 
-  private async _deleteFile(path: string): Promise<void> {
+  /** Delete a local file because a peer deleted it (backed up first). */
+  /**
+   * Delete a file a peer deleted while this device was away. `record` is
+   * the peer's deletion record, kept as this device's own in the same step.
+   */
+  async applyRemoteDelete(path: string, record?: Tombstone): Promise<void> {
+    if (!this.isAllowedPath(path)) return;
+    await this._deleteFile(path, undefined, record?.movedTo, record);
+  }
+
+  /**
+   * Delete a file, backed up first. With `hash`, only that exact copy is
+   * deleted: the file may change while it is backed up.
+   */
+  private async _deleteFile(path: string, hash?: string, movedTo?: string, record?: Tombstone): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
       if (file instanceof TFile) {
@@ -263,11 +398,28 @@ export class BinaryFileSyncService {
         );
         this.onBackupCreatedCb?.(path, backup.backupId, "remote-file-delete");
       }
-      this.onRemoteFileWrittenCb?.(path);
+      // Obsidian moves the file object itself on rename: if the file was
+      // renamed while it was backed up, it is no longer this path's file.
+      if (file.path !== path) {
+        logger.warn(`Not deleting ${path}: it was renamed to ${file.path}`);
+        return;
+      }
+      if (hash && file instanceof TFile && !(await this._isCopy(file, path, hash))) {
+        logger.warn(`Not deleting ${path}: it changed while it was backed up`);
+        return;
+      }
+      this.onRemoteFileWrittenCb?.(path, "delete");
       await this.vault.delete(file);
-      await this.onRemoteFileDeletedCb?.(path);
+      await this.onRemoteFileDeletedCb?.(path, movedTo, record);
       logger.debug(`Deleted file: ${path}`);
     }
+  }
+
+  private async _isCopy(file: TFile, path: string, hash: string): Promise<boolean> {
+    if ((await computeFileHash(await this.vault.readBinary(file))) !== hash) return false;
+    if (await this.holdsOtherContentCb?.(path, hash)) return false;
+    // Checked again: it may have been renamed meanwhile.
+    return file.path === path;
   }
 
   private async _renameFile(oldPath: string, newPath: string): Promise<void> {
@@ -313,8 +465,8 @@ export class BinaryFileSyncService {
       );
     }
 
-    this.onRemoteFileWrittenCb?.(oldPath);
-    this.onRemoteFileWrittenCb?.(newPath);
+    this.onRemoteFileWrittenCb?.(oldPath, "rename");
+    this.onRemoteFileWrittenCb?.(newPath, "rename");
     const adapter = (this.vault as any).adapter;
     if (adapter) {
       await ensureParentDirectory(adapter, newPath);
@@ -331,4 +483,15 @@ export class BinaryFileSyncService {
     }
     return true;
   }
+}
+
+/**
+ * Copy exactly the bytes of a view. `view.buffer` alone may be a larger shared
+ * buffer (Node's ws hands out Buffers that are slices of one chunk).
+ */
+function toExactArrayBuffer(view: Uint8Array): ArrayBuffer {
+  return view.buffer.slice(
+    view.byteOffset,
+    view.byteOffset + view.byteLength,
+  ) as ArrayBuffer;
 }

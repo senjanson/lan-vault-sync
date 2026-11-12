@@ -8,7 +8,14 @@ export interface FileTreeSnapshot {
   timestamp: number;
 }
 
-export async function buildFileTree(vault: Vault, filter: FileFilter): Promise<FileTreeSnapshot> {
+/** Hashes from earlier builds, reused while a file's size and mtime stay the same. */
+export type FileHashCache = Map<string, { mtime: number; size: number; hash: string }>;
+
+export async function buildFileTree(
+  vault: Vault,
+  filter: FileFilter,
+  cache?: FileHashCache,
+): Promise<FileTreeSnapshot> {
   const files = new Map<string, FileMeta>();
   const allFiles = vault.getFiles();
 
@@ -17,13 +24,19 @@ export async function buildFileTree(vault: Vault, filter: FileFilter): Promise<F
 
     const isText = filter.isTextFile(file.path);
     let hash = '';
+    const cached = cache?.get(file.path);
 
-    try {
-      const data = await vault.readBinary(file);
-      hash = await computeFileHash(data);
-    } catch {
-      // File may have been deleted between listing and reading
-      continue;
+    if (cached && cached.mtime === file.stat.mtime && cached.size === file.stat.size) {
+      hash = cached.hash;
+    } else {
+      try {
+        const data = await vault.readBinary(file);
+        hash = await computeFileHash(data);
+      } catch {
+        // File may have been deleted between listing and reading
+        continue;
+      }
+      cache?.set(file.path, { mtime: file.stat.mtime, size: file.stat.size, hash });
     }
 
     files.set(file.path, {
@@ -33,6 +46,10 @@ export async function buildFileTree(vault: Vault, filter: FileFilter): Promise<F
       size: file.stat.size,
       isTextFile: isText,
     });
+  }
+
+  if (cache) {
+    for (const path of cache.keys()) if (!files.has(path)) cache.delete(path);
   }
 
   return { files, timestamp: Date.now() };

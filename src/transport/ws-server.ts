@@ -2,16 +2,16 @@ import type { WebSocket as WsWebSocket } from 'ws';
 import type { IncomingMessage } from 'http';
 import { logger } from '../logger';
 import { supportsIncomingConnections } from '../utils/runtime';
-import { SocketLike } from './socket';
+import { RawSocket, SocketLike } from './socket';
 
 export class WSServer {
   // Use 'any' for the runtime type since WebSocketServer is loaded via conditional require
   private wss: any = null;
-  private onConnectionCb: ((ws: SocketLike, ip: string) => void) | null = null;
+  private onConnectionCb: ((ws: SocketLike, ip: string, raw?: RawSocket) => void) | null = null;
 
   constructor(private port: number) {}
 
-  onConnection(cb: (ws: SocketLike, ip: string) => void): void {
+  onConnection(cb: (ws: SocketLike, ip: string, raw?: RawSocket) => void): void {
     this.onConnectionCb = cb;
   }
 
@@ -41,7 +41,7 @@ export class WSServer {
       this.wss.on('connection', (ws: WsWebSocket, req: IncomingMessage) => {
         const ip = req.socket.remoteAddress || 'unknown';
         logger.info(`Incoming WS connection from ${ip}`);
-        this.onConnectionCb?.(ws as unknown as SocketLike, ip);
+        this.onConnectionCb?.(ws as unknown as SocketLike, ip, req.socket as unknown as RawSocket);
       });
     });
   }

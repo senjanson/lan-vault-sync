@@ -53,14 +53,31 @@ export const TEXT_EXTENSIONS = new Set([
 
 export const CRDT_STATE_DIR = ".obsidian/plugins/lan-vault-sync/crdt-state";
 export const CONFLICT_BACKUP_DIR = ".obsidian/plugins/lan-vault-sync/conflicts";
+export const TOMBSTONE_FILE = ".obsidian/plugins/lan-vault-sync/deleted-files.json";
+/** Files and their hashes as of the last time sync ran. */
+export const FILE_INDEX_FILE = ".obsidian/plugins/lan-vault-sync/synced-files.json";
+/** How long a deletion is remembered for peers that were offline. */
+export const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const MAX_ACTIVE_DOCS = 50;
 export const DEBOUNCE_MS = 200;
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 30000;
-export const CHUNK_SIZE = 64 * 1024; // 64 KB
+/** Binary files larger than this are sent in FILE_CHUNK messages. A single
+ *  message must stay well below the ws library's 100 MiB payload limit. */
+export const CHUNKED_FILE_THRESHOLD = 8 * 1024 * 1024; // 8 MB
+export const CHUNK_SIZE = 1024 * 1024; // 1 MB per FILE_CHUNK message
+/** Largest binary file accepted from a peer. */
+export const MAX_SYNC_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 
 export const WS_PING_INTERVAL_MS = 10000;
+
+/**
+ * Version of the sync protocol. Devices only connect when theirs match.
+ * 1: plain messages (plugin 0.3 and older, which send no version).
+ * 2: encrypted messages, CRDT digests in the file list.
+ */
+export const PROTOCOL_VERSION = 2;
 
 export const SYNC_LOG_VIEW_TYPE = "lan-vault-sync-log-view";
 export const MAX_SYNC_LOG_ENTRIES = 500;

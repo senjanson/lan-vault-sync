@@ -8,7 +8,12 @@ import {
   WS_PORT_MAX,
 } from "./constants";
 import { setDebugEnabled } from "./logger";
+import { parsePeerAddress } from "./discovery/manual-peers";
 import { SyncCoordinator } from "./sync/sync-coordinator";
+import { generateSyncKey, normalizeSyncKey } from "./transport/auth";
+import type { AuthFailure } from "./transport/connection-manager";
+import { confirmDialog } from "./ui/confirm-modal";
+import { textInputDialog } from "./ui/text-input-modal";
 import { ConflictBackupService } from "./conflict/conflict-backup-service";
 import { SyncLogService } from "./sync-log/sync-log-service";
 import { StatusBar } from "./ui/status-bar";
@@ -40,6 +45,11 @@ export default class LANSyncPlugin extends Plugin {
   private syncLogView: SyncLogView | null = null;
   private backupService: ConflictBackupService | null = null;
   syncLogService: SyncLogService | null = null;
+  /** Last notice time per refused address, so retries don't spam notices. */
+  private authNoticeAt = new Map<string, number>();
+  private startTimer: ReturnType<typeof setTimeout> | null = null;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private unloaded = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -53,6 +63,13 @@ export default class LANSyncPlugin extends Plugin {
     // Default device name
     if (!this.settings.deviceName) {
       this.settings.deviceName = `Device-${this.settings.deviceId.slice(0, 6)}`;
+      await this.saveSettings();
+    }
+
+    // Only devices that share this key can connect. Every install gets its
+    // own random key; pairing copies it to the other devices.
+    if (!this.settings.syncKey) {
+      this.settings.syncKey = generateSyncKey();
       await this.saveSettings();
     }
 
@@ -93,8 +110,8 @@ export default class LANSyncPlugin extends Plugin {
 
     // Commands
     this.addCommand({
-      id: "lan-vault-sync-toggle",
-      name: "Toggle LAN Vault Sync",
+      id: "toggle-sync",
+      name: "Turn sync on or off",
       callback: async () => {
         this.settings.enabled = !this.settings.enabled;
         await this.saveSettings();
@@ -107,44 +124,78 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lan-vault-sync-open-panel",
-      name: "Open Sync Panel",
+      id: "open-sync-panel",
+      name: "Open sync panel",
       callback: () => this.activateView(),
     });
 
     this.addCommand({
-      id: "lan-vault-sync-open-sync-log",
-      name: "Open Sync Log",
+      id: "open-sync-log",
+      name: "Open sync log",
       callback: () => this.activateSyncLogView(),
     });
 
     this.addCommand({
-      id: "lan-vault-sync-add-peer",
-      name: "Add Manual Peer",
+      id: "add-device-by-address",
+      name: "Add device by address",
       callback: async () => {
-        // Simple prompt for adding a peer
-        const input = prompt("Enter peer address (ip:port):");
-        if (input) {
-          await this.addManualPeer(input);
+        const input = await textInputDialog(
+          this.app,
+          "Add a device by address",
+          "192.168.1.20:53712",
+          "Add",
+        );
+        if (!input) return;
+        if (await this.addManualPeer(input)) {
+          new Notice(`LAN Sync: Peer ${input} added`);
+        } else {
+          new Notice(`LAN Sync: Invalid address ${input}. Use ip:port, for example 192.168.1.20:53712.`);
         }
       },
     });
 
-    // Protocol handler: obsidian://lan-vault-sync?address=ip:port
+    // Protocol handler: obsidian://lan-vault-sync?address=ip:port&key=...
     // Note: Obsidian overwrites params.action with the handler name ("lan-vault-sync"),
     // so we cannot use a custom action parameter — just check for address directly.
     this.registerObsidianProtocolHandler(PLUGIN_ID, async (params) => {
       await this.handleProtocolParams(params);
     });
 
+    // A phone suspends the app in the background and its connections drop.
+    // Reconnect as soon as it is back rather than waiting out the backoff.
+    const reconnect = () => this.coordinator?.reconnectNow();
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (document.visibilityState === "visible") reconnect();
+    });
+    this.registerDomEvent(window, "online", reconnect);
+
     // Auto-start if enabled
     if (this.settings.enabled) {
       // Delay to let Obsidian finish loading
-      setTimeout(() => this.startSync(), 2000);
+      // Cleared on unload, so disabling the plugin right after enabling it
+      // does not leave a sync server running.
+      // Wait for the layout: until then Obsidian reports every existing file
+      // as newly created, which would be taken for local changes.
+      this.app.workspace.onLayoutReady(() => {
+        if (this.unloaded) return;
+        this.startTimer = setTimeout(() => {
+          this.startTimer = null;
+          void this.startSync();
+        }, 2000);
+      });
     }
   }
 
   async onunload(): Promise<void> {
+    this.unloaded = true;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+    if (this.startTimer) {
+      clearTimeout(this.startTimer);
+      this.startTimer = null;
+    }
     await this.stopSync();
     await this.syncLogService?.flush();
   }
@@ -159,10 +210,11 @@ export default class LANSyncPlugin extends Plugin {
   }
 
   async addManualPeer(address: string): Promise<boolean> {
-    const normalized = address.trim();
-    if (!normalized || !normalized.includes(":")) {
+    const parsed = parsePeerAddress(address);
+    if (!parsed) {
       return false;
     }
+    const normalized = `${parsed.ip}:${parsed.port}`;
 
     if (!this.settings.manualPeers.includes(normalized)) {
       this.settings.manualPeers.push(normalized);
@@ -180,15 +232,66 @@ export default class LANSyncPlugin extends Plugin {
   private async handleProtocolParams(
     params: Record<string, string>,
   ): Promise<void> {
-    if (params.address) {
-      const address = params.address.trim();
-      const added = await this.addManualPeer(address);
-      if (added) {
-        new Notice(`LAN Sync: Peer ${address} added via QR code`);
-      } else {
-        new Notice(`LAN Sync: Failed to add peer. Invalid address: ${address}`);
-      }
+    if (!params.address) return;
+    const address = params.address.trim();
+    if (!parsePeerAddress(address)) {
+      new Notice(`LAN Sync: Failed to add peer. Invalid address: ${address}`);
+      return;
     }
+
+    // Any web page or message can open an obsidian:// link, so nothing is
+    // changed without the user's confirmation.
+    const key = params.key ? params.key.trim() : "";
+    const changesKey =
+      !!key && normalizeSyncKey(key) !== normalizeSyncKey(this.settings.syncKey);
+    const lines = [`Add the device at ${address} as a sync peer?`];
+    if (changesKey) {
+      lines.push(
+        "This also sets this device's sync key to the one in the link. Other devices that use the current key will stop syncing with this one until they get the new key.",
+      );
+    }
+    lines.push("Only continue if you opened this link yourself, for example by scanning the QR code on your own device.");
+    const ok = await confirmDialog(this.app, "Pair with device", lines, "Pair");
+    if (!ok) return;
+
+    if (changesKey) {
+      await this.setSyncKey(key);
+    }
+    const added = await this.addManualPeer(address);
+    if (added) {
+      new Notice(`LAN Sync: Peer ${address} added`);
+    } else {
+      new Notice(`LAN Sync: Failed to add peer. Invalid address: ${address}`);
+    }
+  }
+
+  /** Change the pairing key and reconnect with it. */
+  async setSyncKey(key: string): Promise<boolean> {
+    const trimmed = key.trim();
+    if (normalizeSyncKey(trimmed).length < 8) return false;
+    if (trimmed === this.settings.syncKey) return true;
+    this.settings.syncKey = trimmed;
+    await this.saveSettings();
+    if (this.coordinator) {
+      await this.startSync();
+    }
+    return true;
+  }
+
+  private notifyAuthFailure(failure: AuthFailure): void {
+    const now = Date.now();
+    const last = this.authNoticeAt.get(failure.address) ?? 0;
+    if (now - last < 10 * 60_000) return;
+    this.authNoticeAt.set(failure.address, now);
+    const name = failure.deviceName || failure.address;
+    new Notice(
+      failure.reason === "outdated"
+        ? `LAN Sync: ${name} runs an older version of LAN Vault Sync. Update the plugin on that device to sync with it.`
+        : failure.reason === "newer"
+          ? `LAN Sync: ${name} runs a newer version of LAN Vault Sync. Update the plugin on this device to sync with it.`
+          : `LAN Sync: ${name} has a different sync key. Use the same key on both devices (Settings → LAN Vault Sync → Sync key).`,
+      10000,
+    );
   }
 
   async removeManualPeer(address: string): Promise<void> {
@@ -202,6 +305,30 @@ export default class LANSyncPlugin extends Plugin {
 
     this.settings.manualPeers = nextPeers;
     await this.saveSettings();
+    this.coordinator?.removeManualPeer(normalized);
+  }
+
+  /**
+   * Restart a running sync shortly after a setting it reads at start (device
+   * name, port) changed. Waits for typing to stop, so each keystroke does not
+   * reconnect.
+   */
+  restartSyncSoon(): void {
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (this.coordinator && !this.unloaded) void this.startSync();
+    }, 1500);
+  }
+
+  /** Apply an edited sync check interval to the running sync. */
+  applySyncInterval(): void {
+    this.coordinator?.setSyncInterval(this.settings.syncIntervalMs);
+  }
+
+  /** Push edited ignored paths to the running sync service. */
+  applyIgnoredPaths(): void {
+    this.coordinator?.updateIgnoredPaths(this.settings.ignoredPaths);
   }
 
   async startSync(): Promise<void> {
@@ -222,12 +349,16 @@ export default class LANSyncPlugin extends Plugin {
       this.syncView?.setDevices(this.coordinator?.getDiscoveredDevices() ?? []);
     });
 
+    this.coordinator.onAuthFailed((failure) => this.notifyAuthFailure(failure));
+
     this.coordinator.onSyncEvent((msg: string) => {
       this.syncView?.addLog(msg);
       this.syncView?.setDevices(this.coordinator?.getDiscoveredDevices() ?? []);
     });
 
     await this.coordinator.start();
+    const error = this.coordinator.getStartError();
+    if (error) new Notice(`LAN Sync: ${error}`, 15000);
   }
 
   async stopSync(): Promise<void> {

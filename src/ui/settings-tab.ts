@@ -3,6 +3,7 @@ import type LANSyncPlugin from "../main";
 import { getLocalIPv4Addresses } from "../utils/network";
 import { supportsIncomingConnections } from "../utils/runtime";
 import { buildPeerURI, renderQRCode } from "./qr-code";
+import { generateSyncKey } from "../transport/auth";
 
 function makeCopyable(el: HTMLElement, getText: () => string): void {
   el.addClass("lan-sync-copyable");
@@ -44,10 +45,9 @@ export class LANSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
     const canAcceptIncoming = supportsIncomingConnections();
 
-    containerEl.createEl("h2", { text: "LAN Vault Sync Settings" });
 
     new Setting(containerEl)
-      .setName("Enable Sync")
+      .setName("Enable sync")
       .setDesc("Turn LAN Vault Sync on or off.")
       .addToggle((toggle) =>
         toggle
@@ -64,7 +64,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Device Name")
+      .setName("Device name")
       .setDesc("A friendly name for this device.")
       .addText((text) =>
         text
@@ -73,6 +73,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.deviceName = value;
             await this.plugin.saveSettings();
+            this.plugin.restartSyncSoon();
           }),
       );
 
@@ -80,7 +81,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       .setName("Port")
       .setDesc(
         canAcceptIncoming
-          ? "WebSocket port for sync (change requires restart)."
+          ? "WebSocket port for sync. Other devices that use a manual address must be given the new port."
           : "This device cannot accept incoming connections. Keep this port aligned with your desktop peers if needed.",
       )
       .addText((text) =>
@@ -92,12 +93,51 @@ export class LANSyncSettingTab extends PluginSettingTab {
             if (!isNaN(port) && port > 1024 && port < 65536) {
               this.plugin.settings.port = port;
               await this.plugin.saveSettings();
+              this.plugin.restartSyncSoon();
             }
           }),
       );
 
+    // ─── Sync key ───────────────────────────────────────
+    new Setting(containerEl).setName("Sync key").setHeading();
+    containerEl.createEl("p", {
+      text: "Only devices with the same sync key can connect to each other. Scanning this device's QR code copies the key; otherwise enter the same key on every device. Synced data is encrypted with this key.",
+      cls: "setting-item-description",
+    });
+    let keyInput: { setValue(v: string): unknown } | null = null;
+    new Setting(containerEl)
+      .setName("Sync key")
+      .setDesc("Changing it reconnects with the new key when you leave the field.")
+      .addText((text) => {
+        keyInput = text;
+        text.setValue(this.plugin.settings.syncKey);
+        text.inputEl.addEventListener("change", async () => {
+          const ok = await this.plugin.setSyncKey(text.getValue());
+          if (!ok) {
+            new Notice("LAN Sync: the sync key needs at least 8 letters or digits");
+            text.setValue(this.plugin.settings.syncKey);
+          } else {
+            this.display();
+          }
+        });
+      })
+      .addButton((button) =>
+        button.setButtonText("Copy").onClick(async () => {
+          await navigator.clipboard.writeText(this.plugin.settings.syncKey);
+          new Notice("LAN Sync: sync key copied");
+        }),
+      )
+      .addButton((button) =>
+        button.setButtonText("New key").onClick(async () => {
+          await this.plugin.setSyncKey(generateSyncKey());
+          keyInput?.setValue(this.plugin.settings.syncKey);
+          new Notice("LAN Sync: new sync key set. Pair your other devices again.");
+          this.display();
+        }),
+      );
+
     // ─── QR Code (Share This Device) ───────────────────
-    containerEl.createEl("h3", { text: "QR Code Pairing" });
+    new Setting(containerEl).setName("Pair with QR code").setHeading();
     if (!canAcceptIncoming) {
       containerEl.createEl("p", {
         text: "This device is running in outbound-only mode. On iPhone/iPad, please scan the QR code shown on a desktop device or add the desktop peer manually.",
@@ -129,7 +169,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
           selectedIP = ip;
           // Always read the current port from settings (may have changed on this page)
           const currentPort = this.plugin.settings.port;
-          const uri = buildPeerURI(ip, currentPort);
+          const uri = buildPeerURI(ip, currentPort, this.plugin.settings.syncKey);
           qrInfo.empty();
           const addrEl = qrInfo.createEl("p", {
             text: `Address: ${ip}:${currentPort}`,
@@ -146,7 +186,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
 
         if (ips.length > 1) {
           new Setting(qrWrapper)
-            .setName("Network Interface")
+            .setName("Network interface")
             .setDesc("Select which IP address to use.")
             .addDropdown((drop) => {
               for (const ip of ips) {
@@ -168,7 +208,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
     }
 
     // ─── Manual Peers ───────────────────────────────────
-    containerEl.createEl("h3", { text: "Manual Peers" });
+    new Setting(containerEl).setName("Devices by address").setHeading();
     containerEl.createEl("p", {
       text: "Add peers manually if auto-discovery doesn't work. Format: ip:port",
       cls: "setting-item-description",
@@ -179,7 +219,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
 
     let peerTextInput: import("obsidian").TextComponent;
     new Setting(containerEl)
-      .setName("Add Peer")
+      .setName("Add device")
       .addText((text) => {
         peerTextInput = text;
         text.setPlaceholder("192.168.1.100:53712");
@@ -202,10 +242,10 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     // ─── Ignored Paths ──────────────────────────────────
-    containerEl.createEl("h3", { text: "Ignored Paths" });
+    new Setting(containerEl).setName("Ignored paths").setHeading();
 
     new Setting(containerEl)
-      .setName("Ignored Paths")
+      .setName("Ignored paths")
       .setDesc(
         "Paths to exclude from sync (one per line). Paths ending with / match directories.",
       )
@@ -219,11 +259,12 @@ export class LANSyncSettingTab extends PluginSettingTab {
               .map((s) => s.trim())
               .filter(Boolean);
             await this.plugin.saveSettings();
+            this.plugin.applyIgnoredPaths();
           }),
       );
 
     // ─── Manual Sync ─────────────────────────────────────
-    containerEl.createEl("h3", { text: "Manual Sync" });
+    new Setting(containerEl).setName("Manual sync").setHeading();
 
     const syncContainer = containerEl.createDiv({
       cls: "lan-sync-manual-sync",
@@ -245,11 +286,11 @@ export class LANSyncSettingTab extends PluginSettingTab {
     let isSyncing = false;
 
     new Setting(syncContainer)
-      .setName("Full Sync")
+      .setName("Full sync")
       .setDesc("Manually trigger a full sync with all connected peers.")
       .addButton((btn) => {
         btn
-          .setButtonText("Sync Now")
+          .setButtonText("Sync now")
           .setCta()
           .onClick(async () => {
             if (isSyncing) return;
@@ -279,16 +320,16 @@ export class LANSyncSettingTab extends PluginSettingTab {
             } finally {
               isSyncing = false;
               btn.setDisabled(false);
-              btn.setButtonText("Sync Now");
+              btn.setButtonText("Sync now");
             }
           });
       });
 
     // ─── Advanced ───────────────────────────────────────
-    containerEl.createEl("h3", { text: "Advanced" });
+    new Setting(containerEl).setName("Advanced").setHeading();
 
     new Setting(containerEl)
-      .setName("Sync Check Interval")
+      .setName("Sync check interval")
       .setDesc(
         "Interval for periodic full sync check (in seconds). 0 to disable.",
       )
@@ -300,12 +341,13 @@ export class LANSyncSettingTab extends PluginSettingTab {
             if (!isNaN(secs) && secs >= 0) {
               this.plugin.settings.syncIntervalMs = secs * 1000;
               await this.plugin.saveSettings();
+              this.plugin.applySyncInterval();
             }
           }),
       );
 
     new Setting(containerEl)
-      .setName("Debug Logging")
+      .setName("Debug logging")
       .setDesc("Enable verbose logging in the developer console.")
       .addToggle((toggle) =>
         toggle
@@ -317,10 +359,10 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     // ─── Sync Log ───────────────────────────────────────
-    containerEl.createEl("h3", { text: "Sync Log" });
+    new Setting(containerEl).setName("Sync log").setHeading();
 
     new Setting(containerEl)
-      .setName("Enable Sync Log")
+      .setName("Enable sync log")
       .setDesc("Record all sync operations for review and restoration.")
       .addToggle((toggle) =>
         toggle
@@ -332,7 +374,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Max Log Entries")
+      .setName("Max log entries")
       .setDesc("Maximum number of sync log entries to keep.")
       .addText((text) =>
         text
@@ -347,7 +389,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Open Sync Log")
+      .setName("Open sync log")
       .setDesc("View all sync operations in a side panel.")
       .addButton((btn) =>
         btn.setButtonText("Open").onClick(() => {
@@ -356,7 +398,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Clear Sync Log")
+      .setName("Clear sync log")
       .setDesc("Delete all sync log entries.")
       .addButton((btn) =>
         btn
