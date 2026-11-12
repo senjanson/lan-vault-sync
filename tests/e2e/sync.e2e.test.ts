@@ -867,6 +867,26 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect(B.vault.text('n.md')).toBe('one\ntwo\n');
   });
 
+  it('does not save a doc again when it is evicted unchanged', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'f.md': 'one\n' });
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const dm = (B.coord as any).docManager;
+    const evictAll = async (from: number) => { for (let k = from; k < from + 60; k++) await dm.getOrCreateDoc(`other${k}.md`); await sleep(300); };
+    await (B.coord as any)._ensureCrdtInitialized('f.md');
+    await evictAll(0);
+    const saved: string[] = [];
+    const save = dm.persistence.saveDoc.bind(dm.persistence);
+    dm.persistence.saveDoc = async (p: string, d: unknown) => { saved.push(p); return save(p, d); };
+    await dm.getOrCreateDoc('f.md');
+    await evictAll(100);
+    expect(saved).not.toContain('f.md');
+    (await dm.getOrCreateDoc('f.md')).getText('content').insert(4, 'two\n');
+    await evictAll(200);
+    expect(saved).toContain('f.md');
+    expect(await dm.getContent('f.md')).toBe('one\ntwo\n');
+  });
+
   it('keeps the renamed note when two peers lead to following the same rename at once', async () => {
     const rb = tmpRoot('b');
     seed(rb, { 'f.md': 'one\nfrom B\n' });

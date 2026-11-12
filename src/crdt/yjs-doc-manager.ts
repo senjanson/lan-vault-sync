@@ -19,6 +19,8 @@ export class YjsDocManager {
   private seeded = new WeakSet<Y.Doc>();
   /** Paths whose doc was seeded when it was evicted from the pool. */
   private evictedSeeded = new Set<string>();
+  /** Docs loaded from their saved state and not changed since. */
+  private unchanged = new WeakSet<Y.Doc>();
   private pendingDocs = new Map<string, Promise<Y.Doc>>();
   private operationQueues = new Map<string, Promise<void>>();
 
@@ -46,7 +48,10 @@ export class YjsDocManager {
           this.pool.cancelEviction(path);
           return;
         }
-        await this.persistence.saveDoc(path, doc);
+        // A doc that did not change since it was loaded is saved already.
+        // Resaving it cost a write for each doc touched, thousands when a
+        // peer connects.
+        if (!this.unchanged.has(doc)) await this.persistence.saveDoc(path, doc);
         // The saved state is the note's text: loaded again, it needs no
         // seeding from the file, which may lag behind it.
         if (this.seeded.has(doc)) this.evictedSeeded.add(path);
@@ -106,11 +111,12 @@ export class YjsDocManager {
 
     const doc = new Y.Doc();
     // Try to restore persisted state
-    await this.persistence.loadDoc(filePath, doc);
+    if (await this.persistence.loadDoc(filePath, doc)) this.unchanged.add(doc);
     if (this.evictedSeeded.delete(filePath)) this.seeded.add(doc);
 
     // Listen for updates originating locally
     doc.on('update', (update: Uint8Array, origin: any) => {
+      this.unchanged.delete(doc);
       if (origin === 'local') {
         this.onLocalUpdateCb?.(filePath, update);
       } else if (origin instanceof RemoteOrigin) {
