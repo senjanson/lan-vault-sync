@@ -1012,6 +1012,29 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect([notes(ra), notes(rb)]).toEqual([['dir2/x.md'], ['dir2/x.md']]);
   });
 
+  it('keeps a note renamed after a deletion that a third device passed on', async () => {
+    const ids = ['aaaa', 'bbbb', 'cccc'];
+    const [ra, rb, rc] = ids.map((id) => tmpRoot(id));
+    const pa = ports();
+    seed(ra, { 'f.md': 'f\n' });
+    let n = await phase([ra, rb, rc], ids, pa, true);
+    await sleep(2500);
+    n = await phase([ra, rb, rc], ids, pa, false);
+    await n[0].vault.rm('f.md');
+    await sleep(50);
+    // B renames the note after A deleted it, so the rename wins.
+    await n[1].vault.mv('f.md', 'g.md');
+    await sleep(500);
+    // C learns of the deletion first...
+    n = await phase([ra, rc], ['aaaa', 'cccc'], pa, true);
+    await sleep(2500);
+    expect(notes(rc)).toEqual([]);
+    // ...and then meets B.
+    n = await phase([rb, rc], ['bbbb', 'cccc'], pa, true);
+    await sleep(3000);
+    expect([notes(rb), notes(rc)]).toEqual([['g.md'], ['g.md']]);
+  });
+
   it('does not double a note that two peers created on their own at the same time', async () => {
     const C = track(await startNode(tmpRoot('c'), 'cccc', ports(), []));
     const history = (text: string) => {

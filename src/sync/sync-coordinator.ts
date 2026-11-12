@@ -929,11 +929,13 @@ export class SyncCoordinator {
       const peerTombstone = remoteDeleted.get(file.path);
       if (peerTombstone && TombstoneStore.covers(peerTombstone, file)) {
         await this.binarySync.applyRemoteDelete(file.path);
-        // Moved on the peer: keep that, so that it is not taken as a deletion.
-        if (peerTombstone.movedTo && !this.vault.getAbstractFileByPath(file.path)) {
+        // Keep the peer's record as it is: when the file was deleted, and
+        // where it went if it was moved. A record made now would count as a
+        // deletion later than renames made meanwhile.
+        if (!this.vault.getAbstractFileByPath(file.path)) {
+          const hash = peerTombstone.hash ?? this.tombstones.get(file.path)?.hash;
           this.tombstones.clear(file.path);
-          const t = peerTombstone;
-          this.tombstones.add(t.path, t.hash, t.deletedAt, t.movedTo);
+          this.tombstones.add(file.path, hash, peerTombstone.deletedAt, peerTombstone.movedTo);
         }
         this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
         continue;
