@@ -779,6 +779,8 @@ export class SyncCoordinator {
         }
         await this.vault.create(filePath, latestContent);
         this.watcher.markRemoteWrite(filePath);
+        // The note is back: a record that it was deleted here no longer holds.
+        this.tombstones.clear(filePath);
       }
       await this._markWritten(filePath, latestContent);
 

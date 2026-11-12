@@ -887,6 +887,24 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect(await dm.getContent('f.md')).toBe('one\ntwo\n');
   });
 
+  it('moves a note to a name that was deleted here and then came back from a peer', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'f.md': 'one\n' });
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const dm = (B.coord as any).docManager;
+    await (B.coord as any)._ensureCrdtInitialized('f.md');
+    // g.md was deleted here, then a peer's edited copy of it came back.
+    (B.coord as any).tombstones.add('g.md', 'aaaa');
+    Y.applyUpdate(await dm.getOrCreateDoc('g.md'), await dm.encodeFullState('f.md'));
+    await (B.coord as any)._writeFileFromRemote('g.md', 'one\n', undefined);
+    expect((B.coord as any).tombstones.get('g.md')).toBeUndefined();
+    // So the peer's move of f.md to g.md is followed.
+    expect(await (B.coord as any)._followRemoteRename('aaaa', 'f.md', 'g.md')).toBe(true);
+    await sleep(300);
+    expect(B.vault.exists('f.md')).toBe(false);
+    expect(B.vault.text('g.md')).toBe('one\n');
+  });
+
   it('keeps the renamed note when two peers lead to following the same rename at once', async () => {
     const rb = tmpRoot('b');
     seed(rb, { 'f.md': 'one\nfrom B\n' });
