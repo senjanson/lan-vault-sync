@@ -214,6 +214,18 @@ describe('e2e ignored paths', { timeout: 30000 }, () => {
 });
 
 describe('e2e settings changes', { timeout: 30000 }, () => {
+  it('applies a new sync check interval without a restart', async () => {
+    const A = track(await startNode(tmpRoot('a'), 'aaaa', ports(), []));
+    const runs = vi.spyOn(A.coord as any, '_periodicFullSync').mockResolvedValue(undefined);
+    A.coord.setSyncInterval(100);
+    await sleep(450);
+    expect(runs.mock.calls.length).toBeGreaterThanOrEqual(3);
+    A.coord.setSyncInterval(0);
+    const n = runs.mock.calls.length;
+    await sleep(300);
+    expect(runs.mock.calls.length).toBe(n);
+  });
+
   it('applies new ignored paths and peer removal without a restart', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     const pa = ports(), pb = pa + 1;

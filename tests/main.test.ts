@@ -77,3 +77,37 @@ describe('reconnecting', () => {
     await plugin.onunload();
   });
 });
+
+describe('settings changes', () => {
+  it('restarts a running sync once typing in a setting stops', async () => {
+    vi.useFakeTimers();
+    try {
+      const plugin = createPlugin() as any;
+      const startSync = vi.spyOn(plugin, 'startSync').mockResolvedValue(undefined);
+      plugin.coordinator = {};
+      plugin.restartSyncSoon();
+      vi.advanceTimersByTime(500);
+      plugin.restartSyncSoon();
+      vi.advanceTimersByTime(1000);
+      expect(startSync).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1000);
+      expect(startSync).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not start sync that is off', async () => {
+    vi.useFakeTimers();
+    try {
+      const plugin = createPlugin() as any;
+      const startSync = vi.spyOn(plugin, 'startSync').mockResolvedValue(undefined);
+      plugin.coordinator = null;
+      plugin.restartSyncSoon();
+      vi.advanceTimersByTime(5000);
+      expect(startSync).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

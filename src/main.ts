@@ -48,6 +48,7 @@ export default class LANSyncPlugin extends Plugin {
   /** Last notice time per refused address, so retries don't spam notices. */
   private authNoticeAt = new Map<string, number>();
   private startTimer: ReturnType<typeof setTimeout> | null = null;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private unloaded = false;
 
   async onload(): Promise<void> {
@@ -187,6 +188,10 @@ export default class LANSyncPlugin extends Plugin {
 
   async onunload(): Promise<void> {
     this.unloaded = true;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     if (this.startTimer) {
       clearTimeout(this.startTimer);
       this.startTimer = null;
@@ -299,6 +304,24 @@ export default class LANSyncPlugin extends Plugin {
     this.settings.manualPeers = nextPeers;
     await this.saveSettings();
     this.coordinator?.removeManualPeer(normalized);
+  }
+
+  /**
+   * Restart a running sync shortly after a setting it reads at start (device
+   * name, port) changed. Waits for typing to stop, so each keystroke does not
+   * reconnect.
+   */
+  restartSyncSoon(): void {
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (this.coordinator && !this.unloaded) void this.startSync();
+    }, 1500);
+  }
+
+  /** Apply an edited sync check interval to the running sync. */
+  applySyncInterval(): void {
+    this.coordinator?.setSyncInterval(this.settings.syncIntervalMs);
   }
 
   /** Push edited ignored paths to the running sync service. */

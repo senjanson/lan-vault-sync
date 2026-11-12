@@ -74,6 +74,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.deviceName = value;
             await this.plugin.saveSettings();
+            this.plugin.restartSyncSoon();
           }),
       );
 
@@ -81,7 +82,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       .setName("Port")
       .setDesc(
         canAcceptIncoming
-          ? "WebSocket port for sync (change requires restart)."
+          ? "WebSocket port for sync. Other devices that use a manual address must be given the new port."
           : "This device cannot accept incoming connections. Keep this port aligned with your desktop peers if needed.",
       )
       .addText((text) =>
@@ -93,6 +94,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
             if (!isNaN(port) && port > 1024 && port < 65536) {
               this.plugin.settings.port = port;
               await this.plugin.saveSettings();
+              this.plugin.restartSyncSoon();
             }
           }),
       );
@@ -340,6 +342,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
             if (!isNaN(secs) && secs >= 0) {
               this.plugin.settings.syncIntervalMs = secs * 1000;
               await this.plugin.saveSettings();
+              this.plugin.applySyncInterval();
             }
           }),
       );

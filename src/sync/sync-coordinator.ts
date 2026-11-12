@@ -90,6 +90,7 @@ export class SyncCoordinator {
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
   private startError: string | null = null;
+  private running = false;
   private onSyncEventCb: ((msg: string) => void) | null = null;
   private onAuthFailedCb: ((failure: AuthFailure) => void) | null = null;
 
@@ -203,12 +204,8 @@ export class SyncCoordinator {
       void this._primeKnownHashes();
 
       // Start periodic full sync
-      if (this.settings.syncIntervalMs > 0) {
-        this.fullSyncTimer = setInterval(
-          () => this._periodicFullSync(),
-          this.settings.syncIntervalMs,
-        );
-      }
+      this.running = true;
+      this.setSyncInterval(this.settings.syncIntervalMs);
 
       // Periodically persist CRDT state
       this.persistTimer = setInterval(() => {
@@ -230,6 +227,7 @@ export class SyncCoordinator {
   }
 
   async stop(): Promise<void> {
+    this.running = false;
     if (this.fullSyncTimer) {
       clearInterval(this.fullSyncTimer);
       this.fullSyncTimer = null;
@@ -250,6 +248,17 @@ export class SyncCoordinator {
 
     this.stateMachine.transition("idle");
     this._emitEvent("Sync service stopped");
+  }
+
+  /** Change how often the file lists are compared, without a restart. */
+  setSyncInterval(ms: number): void {
+    if (this.fullSyncTimer) {
+      clearInterval(this.fullSyncTimer);
+      this.fullSyncTimer = null;
+    }
+    if (this.running && ms > 0) {
+      this.fullSyncTimer = setInterval(() => this._periodicFullSync(), ms);
+    }
   }
 
   /** Retry waiting connections now (app back in the foreground, network back). */
