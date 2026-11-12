@@ -126,6 +126,12 @@ export async function startNode(root: string, deviceId: string, port: number, pe
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Wait until `done()` holds, for at most `ms`; slow machines get the time they need. */
+export async function until(done: () => boolean, ms = 8000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!done() && Date.now() < end) await sleep(50);
+}
+
 let nextPort = 42000 + Math.floor(Math.random() * 15000);
 /** Reserve a block of three consecutive ports for one scenario. */
 export const ports = () => { nextPort += 3; return nextPort; };

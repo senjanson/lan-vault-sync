@@ -20,7 +20,7 @@ import { TFolder } from 'obsidian';
 import { decodeMessage, encodeFileData, encodeFileDelete, encodeFileRequest, encodeYjsSync } from '../../src/transport/protocol';
 import { computeFileHash } from '../../src/binary-sync/file-hash';
 import { MessageType } from '../../src/types';
-import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot } from './harness';
+import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot, until } from './harness';
 
 let nodes: Node[] = [];
 const track = (n: Node) => (nodes.push(n), n);
@@ -61,7 +61,7 @@ describe('e2e connections', { timeout: 30000 }, () => {
     await sleep(2000);
     expect(A.coord.getConnectedDevices()).toEqual(['bbbb']);
     await A.vault.write('after.md', 'hello from A');
-    await sleep(800);
+    await until(() => B.vault.text('after.md') === 'hello from A');
     expect(B.vault.text('after.md')).toBe('hello from A');
     expect(count(A, 'Disconnected')).toBe(0);
   });
@@ -115,7 +115,7 @@ describe('e2e settings', { timeout: 30000 }, () => {
     const B = track(await startNode(rb, 'bbbb', pb, [], {
       manualPeers: ['192.168.1.5:abc', `127.0.0.1:${pa}`],
     }));
-    await sleep(1500);
+    await until(() => B.vault.text('n.md') === 'hi');
     expect(B.coord.getState()).toBe('watching');
     expect(B.vault.text('n.md')).toBe('hi');
   });
