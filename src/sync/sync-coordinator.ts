@@ -416,7 +416,9 @@ export class SyncCoordinator {
         const msg = decodeYjsSync(payload);
         if (!this._isAllowedPath(msg.filePath)) break;
         const resolvedPath = this._resolveRecentRemoteTextRename(msg.filePath);
-        if (await this._applyToRenamed(deviceId, resolvedPath, msg.data)) break;
+        // Renamed here: the peer learns the new name from our file list. The
+        // request carries a state vector, not changes to merge.
+        if (this._renamedTextTarget(resolvedPath)) break;
         await this._flushPendingLocalTextChange(resolvedPath);
         // Ensure the local doc is seeded from disk so we don't respond with an
         // empty state when we have content the remote peer hasn't seen yet.

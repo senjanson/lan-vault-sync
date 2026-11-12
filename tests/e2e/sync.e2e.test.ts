@@ -791,6 +791,18 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect(notes(rb).map((p) => B.vault.text(p)).join('')).toContain('from B');
   });
 
+  it('answers a sync request for a renamed note\'s old name without an error', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'f.md': 'one\n' });
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    await (B.coord as any)._ensureCrdtInitialized('f.md');
+    await B.vault.mv('f.md', 'g.md');
+    await sleep(300);
+    const msg = decodeMessage(encodeYjsSync(MessageType.YJS_SYNC_STEP1, 'f.md', Y.encodeStateVector(new Y.Doc())));
+    await expect((B.coord as any)._handleMessage('aaaa', msg.type, msg.payload)).resolves.toBeUndefined();
+    expect(B.vault.text('g.md')).toBe('one\n');
+  });
+
   it('keeps the renamed note when two peers lead to following the same rename at once', async () => {
     const rb = tmpRoot('b');
     seed(rb, { 'f.md': 'one\nfrom B\n' });
