@@ -1143,6 +1143,9 @@ export class SyncCoordinator {
         if (!remote || !local.isTextFile) continue;
         if (local.hash !== remote.hash) continue;
         if (!this._shouldBootstrapSharedTextState(deviceId)) continue;
+        // Both already hold the same history; nothing to exchange. The
+        // digests come from the file lists both sides built just now.
+        if (local.crdt && local.crdt === remote.crdt) continue;
 
         await this._sendFullTextState(
           deviceId,
@@ -1308,7 +1311,13 @@ export class SyncCoordinator {
     // Unchanged files keep their hash, so the periodic sync does not read
     // the whole vault every time.
     const tree = await buildFileTree(this.vault, this.filter, this.hashCache);
-    for (const [path, meta] of tree.files) this.knownHashes.set(path, meta.hash);
+    for (const [path, meta] of tree.files) {
+      this.knownHashes.set(path, meta.hash);
+      if (meta.isTextFile) {
+        const crdt = await this.docManager.crdtDigest(path);
+        tree.files.set(path, crdt ? { ...meta, crdt } : { ...meta, crdt: undefined });
+      }
+    }
     return tree;
   }
 

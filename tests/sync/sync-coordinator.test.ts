@@ -205,6 +205,7 @@ describe('SyncCoordinator text conflict safety', () => {
     (coordinator as any).docManager = {
       removeDoc: vi.fn().mockResolvedValue(undefined),
       hasDocState: vi.fn().mockResolvedValue(false),
+      crdtDigest: vi.fn().mockResolvedValue(undefined),
     };
     buildSpy.mockResolvedValueOnce({
       files: new Map([
@@ -315,6 +316,7 @@ describe('SyncCoordinator text conflict safety', () => {
     };
     (coordinator as any).docManager = {
       hasDocState: vi.fn().mockResolvedValue(false),
+      crdtDigest: vi.fn().mockResolvedValue(undefined),
     };
 
     buildSpy.mockResolvedValueOnce({

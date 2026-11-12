@@ -28,6 +28,13 @@ export class DiskVault {
       readBinary: async (p: string) => { const b = fs.readFileSync(abs(p)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); },
       remove: async (p: string) => fs.rmSync(abs(p)),
       rename: async (a: string, b: string) => fs.renameSync(abs(a), abs(b)),
+      list: async (p: string) => {
+        const entries = fs.existsSync(abs(p)) ? fs.readdirSync(abs(p), { withFileTypes: true }) : [];
+        return {
+          files: entries.filter((e) => e.isFile()).map((e) => `${p}/${e.name}`),
+          folders: entries.filter((e) => e.isDirectory()).map((e) => `${p}/${e.name}`),
+        };
+      },
     };
     this.scan('');
   }

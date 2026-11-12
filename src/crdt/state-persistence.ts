@@ -12,8 +12,93 @@ import { computeFileHash } from '../binary-sync/file-hash';
  * limit for long (especially CJK) paths, so their state was never saved.
  * Files with the former names are still read and migrated on save.
  */
+/** Saved alongside the states: path -> [state file, digest of its doc]. */
+const DIGEST_INDEX = `${CRDT_STATE_DIR}/digests.json`;
+
+/**
+ * A short fingerprint of a doc's history: its state vector and delete set,
+ * which Yjs encodes the same way on every device. Two devices with the same
+ * digest hold the same doc, so they need not send it to each other.
+ */
+export async function docDigest(doc: Y.Doc): Promise<string | undefined> {
+  if (doc.store.clients.size === 0) return undefined;
+  const bytes = Y.encodeSnapshot(Y.snapshot(doc));
+  const hash = await computeFileHash(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+  );
+  return hash.slice(0, 32);
+}
+
 export class StatePersistence {
+  private digests: Map<string, [string, string]> | null = null;
+  private digestsLoading: Promise<Map<string, [string, string]>> | null = null;
+  private digestsDirty = false;
+
   constructor(private vault: Vault, private adapter: any) {}
+
+  /** The digest of the saved history of a note, if it has one. */
+  async digestOf(filePath: string): Promise<string | undefined> {
+    return (await this._digestIndex()).get(filePath)?.[1];
+  }
+
+  /** Write the digest index if it changed. */
+  async flushDigests(): Promise<void> {
+    if (!this.digests || !this.digestsDirty) return;
+    this.digestsDirty = false;
+    try {
+      await ensureParentDirectory(this.adapter, DIGEST_INDEX);
+      await this.adapter.write(DIGEST_INDEX, JSON.stringify(Object.fromEntries(this.digests)));
+    } catch (err) {
+      this.digestsDirty = true;
+      logger.error('Failed to save CRDT digests:', err);
+    }
+  }
+
+  /**
+   * Load the index, keeping only entries whose state file still exists. An
+   * entry can outlive its file if the app stopped before the index was
+   * written; a digest without the history behind it must never be reported.
+   * An entry can also be older than its file, which only means a note is
+   * sent again.
+   */
+  private _digestIndex(): Promise<Map<string, [string, string]>> {
+    if (this.digests) return Promise.resolve(this.digests);
+    if (!this.digestsLoading) {
+      this.digestsLoading = (async () => {
+        const index = new Map<string, [string, string]>();
+        try {
+          if (await this._exists(DIGEST_INDEX)) {
+            const saved = JSON.parse(await this.adapter.read(DIGEST_INDEX)) as Record<string, [string, string]>;
+            const listed = await this.adapter.list(CRDT_STATE_DIR);
+            const files = new Set<string>(listed?.files ?? []);
+            for (const [path, entry] of Object.entries(saved)) {
+              if (Array.isArray(entry) && files.has(entry[0])) index.set(path, entry);
+            }
+          }
+        } catch (err) {
+          logger.warn('Ignoring unreadable CRDT digests:', err);
+        }
+        // Entries recorded while the index was loading are newer.
+        if (this.digests) for (const [k, v] of this.digests) index.set(k, v);
+        this.digests = index;
+        return index;
+      })();
+    }
+    return this.digestsLoading;
+  }
+
+  private async _setDigest(filePath: string, entry: [string, string] | null): Promise<void> {
+    const index = await this._digestIndex();
+    const old = index.get(filePath);
+    if (entry) {
+      if (old && old[0] === entry[0] && old[1] === entry[1]) return;
+      index.set(filePath, entry);
+    } else {
+      if (!old) return;
+      index.delete(filePath);
+    }
+    this.digestsDirty = true;
+  }
 
   private _legacyKeyForPath(filePath: string): string {
     const bytes = new TextEncoder().encode(filePath);
@@ -68,6 +153,8 @@ export class StatePersistence {
 
       await this.adapter.writeBinary(stateFile, state.buffer.slice(state.byteOffset, state.byteOffset + state.byteLength));
       await this._removeIfExists(this._legacyStateFilePath(filePath));
+      const digest = await docDigest(doc);
+      await this._setDigest(filePath, digest ? [stateFile, digest] : null);
     } catch (err) {
       logger.error(`Failed to save CRDT state for ${filePath}:`, err);
     }
@@ -80,6 +167,10 @@ export class StatePersistence {
         const buffer: ArrayBuffer = await this.adapter.readBinary(stateFile);
         const update = new Uint8Array(buffer);
         Y.applyUpdate(doc, update);
+        if (stateFile === (await this._stateFilePath(filePath))) {
+          const digest = await docDigest(doc);
+          await this._setDigest(filePath, digest ? [stateFile, digest] : null);
+        }
         return true;
       }
     } catch (err) {
@@ -90,6 +181,7 @@ export class StatePersistence {
 
   async deleteDoc(filePath: string): Promise<void> {
     try {
+      await this._setDigest(filePath, null);
       await this._removeIfExists(await this._stateFilePath(filePath));
       await this._removeIfExists(this._legacyStateFilePath(filePath));
     } catch (err) {
@@ -101,6 +193,9 @@ export class StatePersistence {
     if (oldPath === newPath) return;
 
     try {
+      const moved = (await this._digestIndex()).get(oldPath);
+      await this._setDigest(oldPath, null);
+      await this._setDigest(newPath, null);
       const oldStateFile = await this._existingStateFile(oldPath);
       if (!oldStateFile) {
         return;
@@ -113,12 +208,12 @@ export class StatePersistence {
 
       if (typeof this.adapter.rename === 'function') {
         await this.adapter.rename(oldStateFile, newStateFile);
-        return;
+      } else {
+        const buffer: ArrayBuffer = await this.adapter.readBinary(oldStateFile);
+        await this.adapter.writeBinary(newStateFile, buffer);
+        await this._removeIfExists(oldStateFile);
       }
-
-      const buffer: ArrayBuffer = await this.adapter.readBinary(oldStateFile);
-      await this.adapter.writeBinary(newStateFile, buffer);
-      await this._removeIfExists(oldStateFile);
+      if (moved && moved[0] === oldStateFile) await this._setDigest(newPath, [newStateFile, moved[1]]);
     } catch (err) {
       logger.error(`Failed to rename CRDT state from ${oldPath} to ${newPath}:`, err);
     }

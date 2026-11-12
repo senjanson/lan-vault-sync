@@ -69,6 +69,8 @@ export interface FileMeta {
   mtime: number;
   size: number;
   isTextFile: boolean;
+  /** Fingerprint of a note's CRDT history, if it has one (protocol 2). */
+  crdt?: string;
 }
 
 // ─── Sync state ──────────────────────────────────────────

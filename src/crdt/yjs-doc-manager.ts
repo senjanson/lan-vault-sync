@@ -2,7 +2,7 @@ import { Vault } from 'obsidian';
 import * as Y from 'yjs';
 import diff from 'fast-diff';
 import { DocPool } from './doc-pool';
-import { StatePersistence } from './state-persistence';
+import { docDigest, StatePersistence } from './state-persistence';
 import { applyDiffToYText, applyRebasedEdit } from './text-diff';
 import { logger } from '../logger';
 
@@ -484,6 +484,17 @@ export class YjsDocManager {
     });
   }
 
+  /**
+   * Fingerprint of the note's CRDT history (see docDigest): of the loaded
+   * doc if there is one, else of the saved state. Undefined when it has none.
+   */
+  async crdtDigest(filePath: string): Promise<string | undefined> {
+    const doc = this.pool.get(filePath);
+    if (doc) return docDigest(doc);
+    if (this.pendingDocs.has(filePath)) return undefined;
+    return this.persistence.digestOf(filePath);
+  }
+
   async hasDocState(filePath: string): Promise<boolean> {
     if (this.pool.has(filePath)) return true;
     return this.persistence.hasDoc(filePath);
@@ -553,6 +564,7 @@ export class YjsDocManager {
     for (const [path, doc] of docs) {
       await this.persistence.saveDoc(path, doc);
     }
+    await this.persistence.flushDigests();
   }
 
   /** Get all tracked file paths */
@@ -562,6 +574,7 @@ export class YjsDocManager {
 
   async destroy(): Promise<void> {
     await this.pool.destroyAll((path, doc) => this.persistence.saveDoc(path, doc));
+    await this.persistence.flushDigests();
     this.lastKnownContent.clear();
   }
 }
