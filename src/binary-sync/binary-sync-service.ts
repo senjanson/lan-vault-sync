@@ -47,7 +47,7 @@ export class BinaryFileSyncService {
     | ((path: string, kind?: "write" | "delete" | "rename") => void)
     | null = null;
   private onRemoteFileDeletedCb:
-    | ((path: string) => Promise<void> | void)
+    | ((path: string, movedTo?: string) => Promise<void> | void)
     | null = null;
   private onRemoteFileRenamedCb:
     | ((oldPath: string, newPath: string) => Promise<void> | void)
@@ -88,7 +88,7 @@ export class BinaryFileSyncService {
     this.onRemoteFileWrittenCb = cb;
   }
 
-  onRemoteFileDeleted(cb: (path: string) => Promise<void> | void): void {
+  onRemoteFileDeleted(cb: (path: string, movedTo?: string) => Promise<void> | void): void {
     this.onRemoteFileDeletedCb = cb;
   }
 
@@ -137,7 +137,7 @@ export class BinaryFileSyncService {
           if (!(file instanceof TFile)) break;
           if ((await computeFileHash(await this.vault.readBinary(file))) !== del.hash) break;
         }
-        await this._deleteFile(del.path, del.hash);
+        await this._deleteFile(del.path, del.hash, del.movedTo);
         break;
       }
       case MessageType.FILE_RENAME: {
@@ -367,7 +367,7 @@ export class BinaryFileSyncService {
    * Delete a file, backed up first. With `hash`, only that exact copy is
    * deleted: the file may change while it is backed up.
    */
-  private async _deleteFile(path: string, hash?: string): Promise<void> {
+  private async _deleteFile(path: string, hash?: string, movedTo?: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
       if (file instanceof TFile) {
@@ -405,7 +405,7 @@ export class BinaryFileSyncService {
       }
       this.onRemoteFileWrittenCb?.(path, "delete");
       await this.vault.delete(file);
-      await this.onRemoteFileDeletedCb?.(path);
+      await this.onRemoteFileDeletedCb?.(path, movedTo);
       logger.debug(`Deleted file: ${path}`);
     }
   }

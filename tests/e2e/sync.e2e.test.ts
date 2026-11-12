@@ -935,6 +935,25 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     for (const r of roots) expect(notes(r)).toEqual(['r-c.md']);
   });
 
+  it('keeps a note deleted after a peer moved it deleted', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports(), ids = ['aaaa', 'bbbb'];
+    seed(ra, { 'dir/x.md': 'x\n', 'dir/y.md': 'y\n', 'dir/z.png': Buffer.from([1, 2, 3]) });
+    let [A, B] = await phase([ra, rb], ids, pa, true);
+    await sleep(2000);
+    [A, B] = await phase([ra, rb], ids, pa, false);
+    // A renames the folder, which moves each file in it.
+    for (const f of ['x.md', 'y.md', 'z.png']) await A.vault.mv(`dir/${f}`, `dir2/${f}`);
+    await sleep(20);
+    // B deletes two of the files afterwards.
+    await B.vault.rm('dir/y.md');
+    await B.vault.rm('dir/z.png');
+    await sleep(800);
+    [A, B] = await phase([ra, rb], ids, pa, true);
+    await sleep(4000);
+    expect([notes(ra), notes(rb)]).toEqual([['dir2/x.md'], ['dir2/x.md']]);
+  });
+
   it('does not double a note that two peers created on their own at the same time', async () => {
     const C = track(await startNode(tmpRoot('c'), 'cccc', ports(), []));
     const history = (text: string) => {

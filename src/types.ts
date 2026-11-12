@@ -170,6 +170,8 @@ export interface FileDeletePayload {
   path: string;
   /** Delete only a copy with this content hash; other versions are kept. */
   hash?: string;
+  /** The file was renamed to this path; the deletion only follows that. */
+  movedTo?: string;
 }
 
 export interface FileRenamePayload {

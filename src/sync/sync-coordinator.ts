@@ -356,9 +356,9 @@ export class SyncCoordinator {
       this.knownHashes.set(path, hash);
     });
 
-    this.binarySync.onRemoteFileDeleted(async (path) => {
+    this.binarySync.onRemoteFileDeleted(async (path, movedTo) => {
       // Remember the deletion too, for peers that are offline right now.
-      this.tombstones.add(path, this.knownHashes.get(path));
+      this.tombstones.add(path, this.knownHashes.get(path), undefined, movedTo);
       this.knownHashes.delete(path);
       void this._prunePendingFolders();
       if (!this.filter.isTextFile(path)) return;
@@ -881,6 +881,13 @@ export class SyncCoordinator {
       }
       // Here, unchanged, when sync last ran, but the file is gone now:
       // it was deleted while sync was not running, e.g. with the app closed.
+      // The peer moved a file that we deleted later, unchanged.
+      const deleted = this._deletedAfterRename(file, remoteDeleted.values(), (p) => this.tombstones.get(p));
+      if (deleted) {
+        this.tombstones.add(file.path, file.hash, deleted.deletedAt);
+        this._emitEvent(`Skipping deleted file: ${file.path}`);
+        continue;
+      }
       if (!ownTombstone && (await this._wasDeletedWhileStopped(file))) {
         this.connectionManager.sendTo(deviceId, encodeFileDelete({ path: file.path }));
         this._emitEvent(`Deleted while sync was off: ${file.path}`);
@@ -914,6 +921,18 @@ export class SyncCoordinator {
       // The peer deleted this file while we were away.
       const peerTombstone = remoteDeleted.get(file.path);
       if (peerTombstone && TombstoneStore.covers(peerTombstone, file)) {
+        await this.binarySync.applyRemoteDelete(file.path);
+        // Moved on the peer: keep that, so that it is not taken as a deletion.
+        if (peerTombstone.movedTo && !this.vault.getAbstractFileByPath(file.path)) {
+          this.tombstones.clear(file.path);
+          const t = peerTombstone;
+          this.tombstones.add(t.path, t.hash, t.deletedAt, t.movedTo);
+        }
+        this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
+        continue;
+      }
+      // We moved this file, and the peer deleted it later, unchanged.
+      if (this._deletedAfterRename(file, this.tombstones.list(), (p) => remoteDeleted.get(p))) {
         await this.binarySync.applyRemoteDelete(file.path);
         this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
         continue;
@@ -1456,6 +1475,26 @@ export class SyncCoordinator {
   }
 
   /**
+   * The deletion of a file's old name made after the file was renamed to
+   * `file.path`, when the file is unchanged since: the later of the two
+   * wins, as between two renames. `renames` are one side's records, and
+   * `deletionOf` looks up the other side's.
+   */
+  private _deletedAfterRename(
+    file: FileMeta,
+    renames: Iterable<Tombstone>,
+    deletionOf: (path: string) => Tombstone | undefined,
+  ): Tombstone | null {
+    for (const moved of renames) {
+      if (moved.movedTo !== file.path || !moved.hash) continue;
+      const deleted = deletionOf(moved.path);
+      if (!deleted || deleted.movedTo || deleted.hash !== moved.hash) continue;
+      if (file.hash === deleted.hash && deleted.deletedAt > moved.deletedAt) return deleted;
+    }
+    return null;
+  }
+
+  /**
    * When we renamed a file to `path` and the peer renamed the same file to
    * another name, the later rename wins (ties go to the smaller name), so
    * one copy is kept instead of one under each name.
@@ -1571,7 +1610,7 @@ export class SyncCoordinator {
     // Peers may already have fetched our copy under the old name. Only that
     // exact copy is removed; another device's edited copy is kept and moved
     // over by that device.
-    this.connectionManager.broadcast(encodeFileDelete({ path: oldPath, hash: oldHash }));
+    this.connectionManager.broadcast(encodeFileDelete({ path: oldPath, hash: oldHash, movedTo: newPath }));
     this._emitEvent(`Moved edits to renamed note: ${oldPath} -> ${newPath}`);
     return true;
   }
