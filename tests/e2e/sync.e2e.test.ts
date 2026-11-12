@@ -832,6 +832,23 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect(await dm.getContent('g.md')).toBe('from A\none\nfrom B\n');
   });
 
+  it('keeps a note\'s text when its doc is evicted before the text is written', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'f.md': 'one\n' });
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const dm = (B.coord as any).docManager;
+    await (B.coord as any)._ensureCrdtInitialized('f.md');
+    // A peer's change is in the doc; the file is not written yet.
+    const doc = await dm.getOrCreateDoc('f.md');
+    doc.getText('content').insert(4, 'two\n');
+    // Many other notes are opened, so the doc is saved and dropped.
+    for (let k = 0; k < 60; k++) await dm.getOrCreateDoc(`other${k}.md`);
+    await sleep(500);
+    expect(dm.pool.has('f.md')).toBe(false);
+    await (B.coord as any)._ensureCrdtInitialized('f.md');
+    expect(await dm.getContent('f.md')).toBe('one\ntwo\n');
+  });
+
   it('keeps the renamed note when two peers lead to following the same rename at once', async () => {
     const rb = tmpRoot('b');
     seed(rb, { 'f.md': 'one\nfrom B\n' });

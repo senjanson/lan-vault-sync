@@ -17,6 +17,8 @@ export class YjsDocManager {
   private lastKnownContent = new Map<string, string>();
   /** Docs that hold their note's current text; see isDocSeeded. */
   private seeded = new WeakSet<Y.Doc>();
+  /** Paths whose doc was seeded when it was evicted from the pool. */
+  private evictedSeeded = new Set<string>();
   private pendingDocs = new Map<string, Promise<Y.Doc>>();
   private operationQueues = new Map<string, Promise<void>>();
 
@@ -45,6 +47,9 @@ export class YjsDocManager {
           return;
         }
         await this.persistence.saveDoc(path, doc);
+        // The saved state is the note's text: loaded again, it needs no
+        // seeding from the file, which may lag behind it.
+        if (this.seeded.has(doc)) this.evictedSeeded.add(path);
         this.pool.evict(path, doc);
       }).catch((err) => {
         this.pool.cancelEviction(path);
@@ -102,6 +107,7 @@ export class YjsDocManager {
     const doc = new Y.Doc();
     // Try to restore persisted state
     await this.persistence.loadDoc(filePath, doc);
+    if (this.evictedSeeded.delete(filePath)) this.seeded.add(doc);
 
     // Listen for updates originating locally
     doc.on('update', (update: Uint8Array, origin: any) => {
@@ -280,6 +286,7 @@ export class YjsDocManager {
       if (relation === 'remote-wins') {
         result = 'adopted';
         this.pool.delete(filePath);
+        this.evictedSeeded.delete(filePath);
         this.lastKnownContent.delete(filePath);
         await this.persistence.deleteDoc(filePath);
         doc = await this.getOrCreateDoc(filePath);
@@ -480,6 +487,7 @@ export class YjsDocManager {
   async removeDoc(filePath: string): Promise<void> {
     await this._enqueueForPath(filePath, async () => {
       this.pool.delete(filePath);
+      this.evictedSeeded.delete(filePath);
       this.lastKnownContent.delete(filePath);
       await this.persistence.deleteDoc(filePath);
     });
@@ -519,6 +527,8 @@ export class YjsDocManager {
         if (this.pool.has(oldPath)) {
           this.pool.rename(oldPath, newPath);
         }
+        this.evictedSeeded.delete(newPath);
+        if (this.evictedSeeded.delete(oldPath)) this.evictedSeeded.add(newPath);
 
         const content = this.lastKnownContent.get(oldPath);
         if (content !== undefined) {
