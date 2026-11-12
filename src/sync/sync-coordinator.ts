@@ -23,6 +23,7 @@ import { computeFileHash } from "../binary-sync/file-hash";
 import { SyncLogService } from "../sync-log/sync-log-service";
 import {
   FileMeta,
+  FileDeletePayload,
   Tombstone,
   DeviceInfo,
   FileChangeEvent,
@@ -540,9 +541,19 @@ export class SyncCoordinator {
         break;
       }
 
+      case MessageType.FILE_DELETE: {
+        // A peer moved its copy on. If ours has not arrived yet, remember
+        // where it went, so that the copy is moved there too when it does.
+        const del = decodeJSON<FileDeletePayload>(payload);
+        if (del.hash && del.movedTo && this._isAllowedPath(del.path) && !this.vault.getAbstractFileByPath(del.path)) {
+          this.tombstones.add(del.path, del.hash, undefined, del.movedTo);
+        }
+        await this.binarySync.handleMessage(deviceId, type, payload);
+        break;
+      }
+
       case MessageType.FILE_REQUEST:
       case MessageType.FILE_DATA:
-      case MessageType.FILE_DELETE:
       case MessageType.FILE_RENAME:
       case MessageType.FILE_CHUNK:
         await this.binarySync.handleMessage(deviceId, type, payload);
@@ -973,7 +984,7 @@ export class SyncCoordinator {
       const movedTo = this._renameTarget(peerTombstone, remoteFiles, remoteDeleted);
       const later = movedTo ? null : this._laterRenameOfSameFile(file.path, remoteFiles, remoteDeleted);
       const renamedTo = movedTo ?? later?.target;
-      if (renamedTo && (await this._followRemoteRename(deviceId, file.path, renamedTo))) {
+      if (renamedTo && (await this._followRemoteRename(deviceId, file.path, renamedTo, movedTo ? peerTombstone : undefined))) {
         // Take on the rename that won, so that a third device which renamed
         // the note too compares with it and not with our own, older one.
         if (later) {
@@ -1557,12 +1568,17 @@ export class SyncCoordinator {
    * edits into it. Only done when both copies share sync history, so the
    * merge is exact. Returns false (both names are kept) otherwise.
    */
-  private _followRemoteRename(deviceId: string, oldPath: string, newPath: string): Promise<boolean> {
+  private _followRemoteRename(
+    deviceId: string,
+    oldPath: string,
+    newPath: string,
+    record?: Tombstone,
+  ): Promise<boolean> {
     // One at a time: tree syncs with several peers can lead to following the
     // same rename at once, and Obsidian moves the very file object, so a
     // second follow would see the moved file as the new name's note.
     const run = this.renameFollowQueue.then(() =>
-      this._followRemoteRenameNow(deviceId, oldPath, newPath),
+      this._followRemoteRenameNow(deviceId, oldPath, newPath, record),
     );
     this.renameFollowQueue = run.catch(() => undefined);
     const settled = this.renameFollowQueue;
@@ -1588,6 +1604,7 @@ export class SyncCoordinator {
     deviceId: string,
     oldPath: string,
     newPath: string,
+    record?: Tombstone,
   ): Promise<boolean> {
     const isText = this.filter.isTextFile(oldPath);
     if (!this._isAllowedPath(newPath) || this.filter.isTextFile(newPath) !== isText) return false;
@@ -1625,6 +1642,7 @@ export class SyncCoordinator {
       this.watcher.markRemoteWrite(oldPath, "delete");
       await this.vault.delete(file);
       this.tombstones.add(oldPath, oldHash, undefined, newPath);
+      this._keepRenameRecord(oldPath, record);
       this.knownHashes.delete(oldPath);
       await this.docManager.removeDoc(oldPath);
     } else if (!target) {
@@ -1635,6 +1653,7 @@ export class SyncCoordinator {
       await this.vault.rename(file, newPath);
       this.knownHashes.set(oldPath, oldHash);
       await this._recordRename(oldPath, newPath);
+      this._keepRenameRecord(oldPath, record);
       if (isText) {
         await this.docManager.renameDoc(oldPath, newPath);
         // Fetch the peer's changes to the renamed note.
@@ -1660,6 +1679,18 @@ export class SyncCoordinator {
     this.connectionManager.broadcast(encodeFileDelete({ path: oldPath, hash: oldHash, movedTo: newPath }));
     this._emitEvent(`Moved edits to renamed note: ${oldPath} -> ${newPath}`);
     return true;
+  }
+
+  /**
+   * After following a peer's rename, record it as the peer did: when it was
+   * made and what was renamed. Recorded as made now, with this device's
+   * edited content, it would beat any other rename of the note made
+   * meanwhile, and no longer be seen as a rename of the same note.
+   */
+  private _keepRenameRecord(oldPath: string, record: Tombstone | undefined): void {
+    if (!record?.movedTo || record.path !== oldPath) return;
+    this.tombstones.clear(oldPath);
+    this.tombstones.add(oldPath, record.hash, record.deletedAt, record.movedTo);
   }
 
   private async _recordRename(oldPath: string, newPath: string): Promise<void> {

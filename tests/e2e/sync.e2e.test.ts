@@ -952,6 +952,37 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     }
   });
 
+  it('keeps one copy when a note is moved, deleted, renamed and edited on four devices', async () => {
+    const ids = ['aaaa', 'bbbb', 'cccc', 'dddd', 'eeee'];
+    const roots = ids.map((id) => tmpRoot(id));
+    const pa = ports();
+    const base: Record<string, string> = {};
+    for (let k = 0; k < 6; k++) base[`q${k}.md`] = `head q${k}\nmid\ntail\n`;
+    seed(roots[0], base);
+    let n = await phase(roots, ids, pa, true);
+    await sleep(4000);
+    n = await phase(roots, ids, pa, false);
+    for (let k = 0; k < 6; k++) await n[0].vault.mv(`q${k}.md`, `sub/q${k}.md`);
+    await sleep(30);
+    for (let k = 0; k < 6; k++) await n[1].vault.rm(`q${k}.md`);
+    await sleep(30);
+    for (let k = 0; k < 6; k++) await n[3].vault.mv(`q${k}.md`, `q${k}-r4.md`);
+    await sleep(30);
+    for (let k = 0; k < 6; k++) await n[4].vault.write(`q${k}.md`, `head q${k}\nmid\ntail\n[E${k}]\n`);
+    await sleep(500);
+    for (const x of nodes) await x.coord.stop();
+    nodes = [];
+    await sleep(50);
+    n = [];
+    for (let i = 0; i < 5; i++) n.push(track(await startNode(roots[i], ids[i], pa + i, ids.map((_, j) => pa + j).filter((_, j) => j < i))));
+    await sleep(15000);
+    for (let i = 0; i < 5; i++) {
+      // The last rename wins; the edit keeps the note.
+      expect(`${ids[i]}: ${notes(roots[i]).join(" ")}`).toEqual(`${ids[i]}: ` + [...Array(6)].map((_, k) => `q${k}-r4.md`).sort().join(" "));
+      for (let k = 0; k < 6; k++) expect(n[i].vault.text(`q${k}-r4.md`), `device ${ids[i]} q${k}`).toContain(`[E${k}]`);
+    }
+  });
+
   it('moves an offline edit to the name a peer gave the note', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     const pa = ports(), ids = ['aaaa', 'bbbb'];
