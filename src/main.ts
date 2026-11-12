@@ -13,6 +13,7 @@ import { SyncCoordinator } from "./sync/sync-coordinator";
 import { generateSyncKey, normalizeSyncKey } from "./transport/auth";
 import type { AuthFailure } from "./transport/connection-manager";
 import { confirmDialog } from "./ui/confirm-modal";
+import { textInputDialog } from "./ui/text-input-modal";
 import { ConflictBackupService } from "./conflict/conflict-backup-service";
 import { SyncLogService } from "./sync-log/sync-log-service";
 import { StatusBar } from "./ui/status-bar";
@@ -137,10 +138,17 @@ export default class LANSyncPlugin extends Plugin {
       id: "lan-vault-sync-add-peer",
       name: "Add Manual Peer",
       callback: async () => {
-        // Simple prompt for adding a peer
-        const input = prompt("Enter peer address (ip:port):");
-        if (input) {
-          await this.addManualPeer(input);
+        const input = await textInputDialog(
+          this.app,
+          "Add a device by address",
+          "192.168.1.20:53712",
+          "Add",
+        );
+        if (!input) return;
+        if (await this.addManualPeer(input)) {
+          new Notice(`LAN Sync: Peer ${input} added`);
+        } else {
+          new Notice(`LAN Sync: Invalid address ${input}. Use ip:port, for example 192.168.1.20:53712.`);
         }
       },
     });
