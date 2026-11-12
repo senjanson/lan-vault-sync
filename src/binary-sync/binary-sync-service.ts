@@ -16,6 +16,7 @@ import {
   FileDeletePayload,
   FileRenamePayload,
   FileMeta,
+  Tombstone,
   MessageType,
 } from "../types";
 import { computeFileHash } from "./file-hash";
@@ -47,7 +48,7 @@ export class BinaryFileSyncService {
     | ((path: string, kind?: "write" | "delete" | "rename") => void)
     | null = null;
   private onRemoteFileDeletedCb:
-    | ((path: string, movedTo?: string) => Promise<void> | void)
+    | ((path: string, movedTo?: string, record?: Tombstone) => Promise<void> | void)
     | null = null;
   private onRemoteFileRenamedCb:
     | ((oldPath: string, newPath: string) => Promise<void> | void)
@@ -88,7 +89,7 @@ export class BinaryFileSyncService {
     this.onRemoteFileWrittenCb = cb;
   }
 
-  onRemoteFileDeleted(cb: (path: string, movedTo?: string) => Promise<void> | void): void {
+  onRemoteFileDeleted(cb: (path: string, movedTo?: string, record?: Tombstone) => Promise<void> | void): void {
     this.onRemoteFileDeletedCb = cb;
   }
 
@@ -358,16 +359,20 @@ export class BinaryFileSyncService {
   }
 
   /** Delete a local file because a peer deleted it (backed up first). */
-  async applyRemoteDelete(path: string): Promise<void> {
+  /**
+   * Delete a file a peer deleted while this device was away. `record` is
+   * the peer's deletion record, kept as this device's own in the same step.
+   */
+  async applyRemoteDelete(path: string, record?: Tombstone): Promise<void> {
     if (!this.isAllowedPath(path)) return;
-    await this._deleteFile(path);
+    await this._deleteFile(path, undefined, record?.movedTo, record);
   }
 
   /**
    * Delete a file, backed up first. With `hash`, only that exact copy is
    * deleted: the file may change while it is backed up.
    */
-  private async _deleteFile(path: string, hash?: string, movedTo?: string): Promise<void> {
+  private async _deleteFile(path: string, hash?: string, movedTo?: string, record?: Tombstone): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
       if (file instanceof TFile) {
@@ -405,7 +410,7 @@ export class BinaryFileSyncService {
       }
       this.onRemoteFileWrittenCb?.(path, "delete");
       await this.vault.delete(file);
-      await this.onRemoteFileDeletedCb?.(path, movedTo);
+      await this.onRemoteFileDeletedCb?.(path, movedTo, record);
       logger.debug(`Deleted file: ${path}`);
     }
   }

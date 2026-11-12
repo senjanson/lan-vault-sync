@@ -1124,6 +1124,41 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     for (const r of roots) expect(notes(r)).toEqual(['r-c.md']);
   });
 
+  it('keeps one copy when both names of a note renamed twice reached every device first', async () => {
+    const ids = ['aaaa', 'bbbb', 'cccc'];
+    const roots = ids.map((id) => tmpRoot(id));
+    const pa = ports();
+    seed(roots[0], { 'r.md': 'r\none\n' });
+    let n = await phase(roots, ids, pa, true);
+    await sleep(2500);
+    n = await phase(roots, ids, pa, false);
+    await n[0].vault.mv('r.md', 'r-a.md');
+    await sleep(20);
+    // B renames later, so its name wins.
+    await n[1].vault.mv('r.md', 'r-b.md');
+    await n[2].vault.write('r.md', 'r\none\nfrom C\n');
+    await sleep(800);
+    for (const x of nodes) await x.coord.stop();
+    nodes = [];
+    await sleep(50);
+    // C meets A, then B, so it hands each one the other's name...
+    const A = track(await startNode(roots[0], ids[0], pa, []));
+    const C = track(await startNode(roots[2], ids[2], pa + 2, [pa]));
+    await sleep(3000);
+    await C.coord.stop();
+    nodes = nodes.filter((x) => x !== C);
+    const B = track(await startNode(roots[1], ids[1], pa + 1, []));
+    track(await startNode(roots[2], ids[2], pa + 2, [pa + 1]));
+    await sleep(3000);
+    // ...and only then do A and B meet.
+    await A.coord.stop();
+    nodes = nodes.filter((x) => x !== A);
+    track(await startNode(roots[0], ids[0], pa, [pa + 1, pa + 2]));
+    await sleep(6000);
+    for (const r of roots) expect(notes(r)).toEqual(['r-b.md']);
+    expect(B.vault.text('r-b.md')).toContain('from C');
+  });
+
   it('keeps a note deleted after a peer moved it deleted', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     const pa = ports(), ids = ['aaaa', 'bbbb'];

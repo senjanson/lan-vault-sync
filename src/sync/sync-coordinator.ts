@@ -387,9 +387,19 @@ export class SyncCoordinator {
       this.knownHashes.set(path, hash);
     });
 
-    this.binarySync.onRemoteFileDeleted(async (path, movedTo) => {
+    this.binarySync.onRemoteFileDeleted(async (path, movedTo, record) => {
       // Remember the deletion too, for peers that are offline right now.
-      this.tombstones.add(path, this.knownHashes.get(path), undefined, movedTo);
+      // A peer's record of a deletion made while we were away is kept as it
+      // is: when the file was deleted, and where it went if it was moved. A
+      // record made now would count as a deletion later than renames made
+      // meanwhile, and is taken as one by tree syncs running alongside.
+      if (record) {
+        const hash = record.hash ?? this.knownHashes.get(path);
+        this.tombstones.clear(path);
+        this.tombstones.add(path, hash, record.deletedAt, record.movedTo);
+      } else {
+        this.tombstones.add(path, this.knownHashes.get(path), undefined, movedTo);
+      }
       this.knownHashes.delete(path);
       void this._prunePendingFolders();
       if (!this.filter.isTextFile(path)) return;
@@ -999,21 +1009,14 @@ export class SyncCoordinator {
       // The peer deleted this file while we were away.
       const peerTombstone = remoteDeleted.get(file.path);
       if (peerTombstone && TombstoneStore.covers(peerTombstone, file)) {
-        await this.binarySync.applyRemoteDelete(file.path);
-        // Keep the peer's record as it is: when the file was deleted, and
-        // where it went if it was moved. A record made now would count as a
-        // deletion later than renames made meanwhile.
-        if (!this.vault.getAbstractFileByPath(file.path)) {
-          const hash = peerTombstone.hash ?? this.tombstones.get(file.path)?.hash;
-          this.tombstones.clear(file.path);
-          this.tombstones.add(file.path, hash, peerTombstone.deletedAt, peerTombstone.movedTo);
-        }
+        await this.binarySync.applyRemoteDelete(file.path, peerTombstone);
         this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
         continue;
       }
       // We moved this file, and the peer deleted it later, unchanged.
-      if (this._deletedAfterRename(file, this.tombstones.list(), (p) => remoteDeleted.get(p))) {
-        await this.binarySync.applyRemoteDelete(file.path);
+      const deletedLater = this._deletedAfterRename(file, this.tombstones.list(), (p) => remoteDeleted.get(p));
+      if (deletedLater) {
+        await this.binarySync.applyRemoteDelete(file.path, { ...deletedLater, path: file.path });
         this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
         continue;
       }
