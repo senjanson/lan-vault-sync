@@ -1122,6 +1122,30 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     expect([notes(rb), notes(rc)]).toEqual([['g.md'], ['g.md']]);
   });
 
+  it('keeps the latest name when two devices gave a note the same name around another rename', async () => {
+    const ids = ['aaaa', 'bbbb', 'cccc'];
+    const [ra, rb, rc] = ids.map((id) => tmpRoot(id));
+    const pa = ports();
+    seed(ra, { 'f.md': 'f\n' });
+    let n = await phase([ra, rb, rc], ids, pa, true);
+    await sleep(2500);
+    n = await phase([ra, rb, rc], ids, pa, false);
+    await n[0].vault.mv('f.md', 'sub/f.md');
+    await sleep(30);
+    await n[1].vault.mv('f.md', 'g.md');
+    await sleep(30);
+    // C gives it the same name as A, last.
+    await n[2].vault.mv('f.md', 'sub/f.md');
+    await sleep(500);
+    // A meets C first: both have the same name, nothing to do...
+    n = await phase([ra, rc], ['aaaa', 'cccc'], pa, true);
+    await sleep(2000);
+    // ...then B, whose rename came before C's.
+    n = await phase([ra, rb], ['aaaa', 'bbbb'], pa, true);
+    await sleep(3000);
+    expect([notes(ra), notes(rb)]).toEqual([['sub/f.md'], ['sub/f.md']]);
+  });
+
   it('does not double a note that two peers created on their own at the same time', async () => {
     const C = track(await startNode(tmpRoot('c'), 'cccc', ports(), []));
     const history = (text: string) => {

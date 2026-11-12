@@ -911,6 +911,14 @@ export class SyncCoordinator {
 
     const treeDiff = diffFileTrees(localTree.files, remoteFiles);
     const remoteDeleted = new Map((meta.deleted ?? []).map((t) => [t.path, t]));
+    // The peer gave a file the same name we did, later: keep the later
+    // time, which is what other renames of the file are weighed against.
+    for (const theirs of remoteDeleted.values()) {
+      const ours = theirs.movedTo ? this.tombstones.get(theirs.path) : undefined;
+      if (ours && ours.movedTo === theirs.movedTo && ours.hash && ours.hash === theirs.hash && theirs.deletedAt > ours.deletedAt) {
+        this.tombstones.add(ours.path, ours.hash, theirs.deletedAt, ours.movedTo);
+      }
+    }
 
     // Files only on remote — request them via CRDT sync or binary transfer
     for (const file of treeDiff.remoteOnly) {
