@@ -5,6 +5,8 @@ export interface SocketLike {
   binaryType?: SocketBinaryType;
   send(data: Uint8Array): void;
   close(): void;
+  /** Drop the connection at once, without a closing handshake (ws only). */
+  terminate?(): void;
   addEventListener?(event: string, listener: EventListenerOrEventListenerObject): void;
   removeEventListener?(event: string, listener: EventListenerOrEventListenerObject): void;
   on?(event: string, listener: (...args: any[]) => void): void;
@@ -102,3 +104,4 @@ function addSocketListener(
 
   throw new Error('Unsupported WebSocket implementation');
 }
+

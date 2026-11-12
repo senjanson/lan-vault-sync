@@ -45,6 +45,8 @@ interface PeerConnection {
   direction: 'inbound' | 'outbound';
   client?: WSClient;
   pingTimer?: ReturnType<typeof setInterval>;
+  /** Pings sent since the peer last sent anything. */
+  missedPings: number;
   /** Per-peer message queue to serialize async message handling */
   messageQueue: Promise<void>;
 }
@@ -63,6 +65,16 @@ export interface AuthFailure {
 
 /** Unauthenticated sockets are closed after this long. */
 const HANDSHAKE_TIMEOUT_MS = 10_000;
+
+/**
+ * A peer that sends nothing for this many pings in a row is taken as gone.
+ * A device that sleeps or leaves the network does not close its socket, and
+ * until the system notices (which can take many minutes) the peer would stay
+ * listed as connected and its reconnection would be refused as a duplicate.
+ * Counting ping ticks rather than elapsed time keeps a stalled event loop
+ * from dropping a live peer.
+ */
+const MAX_MISSED_PINGS = 3;
 
 type MessageHandler = (deviceId: string, type: MessageType, payload: Uint8Array) => void | Promise<void>;
 
@@ -329,6 +341,10 @@ export class ConnectionManager {
     addSocketCloseListener(ws, () => clearTimeout(timeout));
 
     addSocketMessageListener(ws, (raw) => {
+      if (deviceId !== null) {
+        const peer = this.peers.get(deviceId);
+        if (peer && peer.ws === ws) peer.missedPings = 0;
+      }
       chain = chain
         .then(async () => {
           if (rejected) return;
@@ -401,12 +417,21 @@ export class ConnectionManager {
       ws,
       direction,
       client,
+      missedPings: 0,
       messageQueue: Promise.resolve(),
     };
 
-    // Ping keepalive
+    // Ping keepalive; a peer that stops answering is dropped.
     peer.pingTimer = setInterval(() => {
+      if (peer.missedPings >= MAX_MISSED_PINGS) {
+        logger.warn(`Peer ${device.deviceId} stopped responding; closing the connection`);
+        this._removePeer(device.deviceId, ws);
+        if (ws.terminate) ws.terminate();
+        else ws.close();
+        return;
+      }
       if (ws.readyState === SOCKET_OPEN) {
+        peer.missedPings++;
         ws.send(encodePing());
       }
     }, WS_PING_INTERVAL_MS);
