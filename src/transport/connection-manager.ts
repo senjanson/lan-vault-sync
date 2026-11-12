@@ -3,6 +3,7 @@ import { WSClient } from './ws-client';
 import {
   addSocketCloseListener,
   addSocketErrorListener,
+  describeSocketError,
   addSocketMessageListener,
   SOCKET_OPEN,
   SocketLike,
@@ -443,7 +444,7 @@ export class ConnectionManager {
     });
 
     addSocketErrorListener(ws, (err) => {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = describeSocketError(err);
       logger.error(`Peer ${device.deviceId} WS error:`, message);
     });
 

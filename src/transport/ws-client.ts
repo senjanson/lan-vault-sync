@@ -4,6 +4,7 @@ import { canUseNodeRuntime } from "../utils/runtime";
 import {
   addSocketCloseListener,
   addSocketErrorListener,
+  describeSocketError,
   addSocketMessageListener,
   addSocketOpenListener,
   setSocketBinaryType,
@@ -70,7 +71,7 @@ export class WSClient {
       });
 
       addSocketErrorListener(this.ws, (err) => {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = describeSocketError(err);
         logger.error(`WS client error (${this.url}):`, message);
         // close event will fire after error
       });

@@ -105,3 +105,14 @@ function addSocketListener(
   throw new Error('Unsupported WebSocket implementation');
 }
 
+/**
+ * A readable message for a socket error. The ws library and browsers pass an
+ * event object rather than an Error, which logs as "[object Object]".
+ */
+export function describeSocketError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  const e = err as { error?: unknown; message?: unknown } | null;
+  if (e?.error instanceof Error) return e.error.message;
+  if (typeof e?.message === 'string' && e.message) return e.message;
+  return 'connection error';
+}
