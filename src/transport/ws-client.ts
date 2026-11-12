@@ -94,6 +94,19 @@ export class WSClient {
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
   }
 
+  /**
+   * Try again right away if a reconnect is waiting, for example when the app
+   * comes back to the foreground or the network returns. The backoff can
+   * otherwise keep a device waiting up to RECONNECT_MAX_MS.
+   */
+  reconnectNow(): void {
+    if (this.intentionallyClosed || !this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectDelay = RECONNECT_BASE_MS;
+    this._doConnect();
+  }
+
   send(data: Uint8Array): void {
     if (this.ws && this.ws.readyState === SOCKET_OPEN) {
       this.ws.send(data);

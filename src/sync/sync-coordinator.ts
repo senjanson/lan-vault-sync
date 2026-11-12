@@ -252,6 +252,11 @@ export class SyncCoordinator {
     this._emitEvent("Sync service stopped");
   }
 
+  /** Retry waiting connections now (app back in the foreground, network back). */
+  reconnectNow(): void {
+    this.connectionManager.reconnectNow();
+  }
+
   addManualPeer(address: string): void {
     this.discovery.addManualPeer(address, this.vaultId);
   }

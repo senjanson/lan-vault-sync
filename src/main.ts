@@ -160,6 +160,14 @@ export default class LANSyncPlugin extends Plugin {
       await this.handleProtocolParams(params);
     });
 
+    // A phone suspends the app in the background and its connections drop.
+    // Reconnect as soon as it is back rather than waiting out the backoff.
+    const reconnect = () => this.coordinator?.reconnectNow();
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (document.visibilityState === "visible") reconnect();
+    });
+    this.registerDomEvent(window, "online", reconnect);
+
     // Auto-start if enabled
     if (this.settings.enabled) {
       // Delay to let Obsidian finish loading

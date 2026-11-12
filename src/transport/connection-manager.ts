@@ -213,6 +213,12 @@ export class ConnectionManager {
     client.connect();
   }
 
+  /** Retry every waiting outbound connection now. */
+  reconnectNow(): void {
+    if (this.stopped) return;
+    for (const client of this.clients.values()) client.reconnectNow();
+  }
+
   /** Stop connecting to an address and close outbound connections to it. */
   disconnectAddress(ip: string, port: number): void {
     const client = this.clients.get(`ws://${ip}:${port}`);

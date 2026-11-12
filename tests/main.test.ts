@@ -11,6 +11,9 @@ vi.mock('../src/conflict/conflict-backup-service', () => ({ ConflictBackupServic
 
 import LANSyncPlugin from '../src/main';
 
+(globalThis as any).document ??= { visibilityState: 'visible' };
+(globalThis as any).window ??= globalThis;
+
 function createPlugin(layoutReady: Array<() => void> | null = null): LANSyncPlugin {
   const plugin = new (LANSyncPlugin as any)() as LANSyncPlugin;
   const onLayoutReady = (cb: () => void) => (layoutReady ? layoutReady.push(cb) : cb());
@@ -22,6 +25,10 @@ function createPlugin(layoutReady: Array<() => void> | null = null): LANSyncPlug
     addSettingTab: () => undefined,
     addCommand: () => undefined,
     registerObsidianProtocolHandler: () => undefined,
+    domEvents: [] as Array<[unknown, string, () => void]>,
+    registerDomEvent(target: unknown, type: string, cb: () => void) {
+      (this as any).domEvents.push([target, type, cb]);
+    },
   });
   return plugin;
 }
@@ -50,5 +57,23 @@ describe('plugin lifecycle', () => {
     vi.advanceTimersByTime(2500);
     vi.useRealTimers();
     expect(startSync).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('reconnecting', () => {
+  it('retries connections when the app comes back or the network returns', async () => {
+    const plugin = createPlugin() as any;
+    plugin.loadData = async () => ({ enabled: false });
+    await plugin.onload();
+    let retries = 0;
+    plugin.coordinator = { reconnectNow: () => retries++ };
+    const fire = (type: string) => {
+      for (const [, t, cb] of plugin.domEvents) if (t === type) cb();
+    };
+    fire('visibilitychange');
+    fire('online');
+    expect(retries).toBe(2);
+    plugin.coordinator = null;
+    await plugin.onunload();
   });
 });
