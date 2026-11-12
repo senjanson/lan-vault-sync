@@ -88,7 +88,7 @@
 
 这是手机端最方便的连接方式，无需手动输入 IP 地址：
 
-1. 在**桌面设备（Mac / Windows / Linux）**上：打开 **设置 → LAN Vault Sync**，找到「**QR Code Pairing**」区块，界面会显示一个二维码。
+1. 在**桌面设备（Mac / Windows / Linux）**上：打开 **设置 → LAN Vault Sync**，找到「**Pair with QR code**」区块，界面会显示一个二维码。
 2. 在**手机 / 平板**上：用系统相机（或任意扫码工具）扫描该二维码。
 3. 扫描后，手机会弹出提示打开 Obsidian，插件会询问是否与该设备配对 —— 确认后，插件会将桌面设备的 IP:端口添加为对端，并采用二维码中的**同步密钥**。
 
@@ -104,7 +104,7 @@
 
 1. 在**设备 A** 上：打开插件设置，记下显示的 **IP 地址** 和**端口**（默认：`53712`）。
 2. 在**设备 B** 上：进入 **设置 → LAN Vault Sync → 手动对端** → 填入 `192.168.x.x:53712`。
-3. 也可以使用命令面板：**LAN Vault Sync: Add Manual Peer**。
+3. 也可以使用命令面板：**LAN Vault Sync: Add device by address**。
 
 ### 状态栏
 
@@ -120,9 +120,12 @@
 
 打开命令面板（`Cmd/Ctrl + P`）并搜索：
 
-- **LAN Vault Sync: Toggle** —— 启动或停止同步服务
-- **LAN Vault Sync: Open Sync Panel** —— 打开侧边栏面板，查看已连接对端和同步日志
-- **LAN Vault Sync: Add Manual Peer** —— 通过 `IP:端口` 添加对端
+- **LAN Vault Sync: Turn sync on or off** —— 启动或停止同步服务
+- **LAN Vault Sync: Open sync panel** —— 打开侧边栏面板，查看已连接对端和同步日志
+- **LAN Vault Sync: Add device by address** —— 通过 `IP:端口` 添加对端
+- **LAN Vault Sync: Open sync log** —— 打开同步日志
+
+0.4 版改了这些命令的名字，以前给它们设的快捷键需要重新设置。
 
 ---
 

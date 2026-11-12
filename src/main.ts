@@ -110,8 +110,8 @@ export default class LANSyncPlugin extends Plugin {
 
     // Commands
     this.addCommand({
-      id: "lan-vault-sync-toggle",
-      name: "Toggle LAN Vault Sync",
+      id: "toggle-sync",
+      name: "Turn sync on or off",
       callback: async () => {
         this.settings.enabled = !this.settings.enabled;
         await this.saveSettings();
@@ -124,20 +124,20 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lan-vault-sync-open-panel",
-      name: "Open Sync Panel",
+      id: "open-sync-panel",
+      name: "Open sync panel",
       callback: () => this.activateView(),
     });
 
     this.addCommand({
-      id: "lan-vault-sync-open-sync-log",
-      name: "Open Sync Log",
+      id: "open-sync-log",
+      name: "Open sync log",
       callback: () => this.activateSyncLogView(),
     });
 
     this.addCommand({
-      id: "lan-vault-sync-add-peer",
-      name: "Add Manual Peer",
+      id: "add-device-by-address",
+      name: "Add device by address",
       callback: async () => {
         const input = await textInputDialog(
           this.app,
