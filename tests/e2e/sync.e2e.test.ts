@@ -148,6 +148,30 @@ describe('e2e paths', { timeout: 30000 }, () => {
     expect(B.vault.exists('img/a..b.png')).toBe(true);
   });
 
+  it('closes a connection that sends a lot of data before pairing', async () => {
+    const pa = ports();
+    track(await startNode(tmpRoot('a'), 'aaaa', pa, []));
+    const WS = (globalThis as any).require('ws');
+    const ws = new WS(`ws://127.0.0.1:${pa}`);
+    await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+    let closed = false;
+    ws.on('close', () => { closed = true; });
+    ws.on('error', () => undefined);
+    // A frame that claims 50 MB; the server would buffer it all.
+    const header = Buffer.alloc(14);
+    header[0] = 0x82; header[1] = 0x80 | 127;
+    header.writeBigUInt64BE(BigInt(50 * 1024 * 1024), 2);
+    ws._socket.write(header);
+    const chunk = Buffer.alloc(256 * 1024);
+    for (let i = 0; i < 12 && !closed; i++) {
+      ws._socket.write(chunk);
+      await sleep(30);
+    }
+    await sleep(500);
+    expect(closed).toBe(true);
+    ws.terminate();
+  });
+
   it('refuses writes into the hidden .obsidian folder', async () => {
     const ra = tmpRoot('a');
     const pa = ports();

@@ -15,6 +15,12 @@ export interface SocketLike {
 
 export const SOCKET_OPEN = 1;
 
+/** The TCP socket under an incoming connection (Node only). */
+export interface RawSocket {
+  on(event: 'data', listener: (chunk: { length: number }) => void): void;
+  removeListener(event: 'data', listener: (chunk: { length: number }) => void): void;
+}
+
 export function setSocketBinaryType(socket: SocketLike): void {
   try {
     socket.binaryType = 'arraybuffer';

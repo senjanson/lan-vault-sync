@@ -5,6 +5,7 @@ import {
   addSocketErrorListener,
   describeSocketError,
   addSocketMessageListener,
+  RawSocket,
   SOCKET_OPEN,
   SocketLike,
   toUint8Array,
@@ -77,6 +78,9 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
  */
 const MAX_MISSED_PINGS = 3;
 
+/** Bytes an incoming connection may send before its pairing messages. */
+const PRE_AUTH_MAX_BYTES = 256 * 1024;
+
 type MessageHandler = (deviceId: string, type: MessageType, payload: Uint8Array) => void | Promise<void>;
 
 export class ConnectionManager {
@@ -127,7 +131,8 @@ export class ConnectionManager {
       return;
     }
 
-    this.server.onConnection((ws, ip) => {
+    this.server.onConnection((ws, ip, raw) => {
+      if (raw) this._limitBytesBeforeAuth(ws, raw);
       this._handleInbound(ws, ip);
     });
     await this.server.start();
@@ -256,6 +261,37 @@ export class ConnectionManager {
   }
 
   // ─── Private ────────────────────────────────────────────
+
+  /**
+   * Close an incoming connection that sends more than a pairing needs before
+   * it has sent its pairing messages. Without this the ws library buffers
+   * a single message of up to 100 MB from any device on the network.
+   *
+   * Counting stops once the handshake and auth messages have arrived (they
+   * are emitted before this listener sees the bytes that carried them), so
+   * data that follows right behind them is not counted.
+   */
+  private _limitBytesBeforeAuth(ws: SocketLike, raw: RawSocket): void {
+    let bytes = 0;
+    let messages = 0;
+    const onData = (chunk: { length: number }) => {
+      bytes += chunk.length;
+      if (bytes > PRE_AUTH_MAX_BYTES) {
+        raw.removeListener('data', onData);
+        logger.warn('Closing a connection that sent too much data before pairing');
+        if (ws.terminate) ws.terminate();
+        else ws.close();
+      }
+    };
+    raw.on('data', onData);
+    const stopMessages = addSocketMessageListener(ws, () => {
+      if (++messages >= 2) {
+        raw.removeListener('data', onData);
+        stopMessages();
+      }
+    });
+    addSocketCloseListener(ws, () => raw.removeListener('data', onData));
+  }
 
   private _handleInbound(ws: SocketLike, ip: string): void {
     let pending: { device: DeviceInfo; clientNonce: string; serverNonce: string } | null = null;
