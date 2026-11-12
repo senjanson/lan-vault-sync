@@ -89,6 +89,7 @@ export class SyncCoordinator {
   private syncLogService: SyncLogService | null;
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
+  private startError: string | null = null;
   private onSyncEventCb: ((msg: string) => void) | null = null;
   private onAuthFailedCb: ((failure: AuthFailure) => void) | null = null;
 
@@ -165,8 +166,14 @@ export class SyncCoordinator {
     return this.discovery.getOnlineDevices();
   }
 
+  /** Why the last start failed, in words for the user; null if it did not. */
+  getStartError(): string | null {
+    return this.startError;
+  }
+
   async start(): Promise<void> {
     if (!this.settings.enabled) return;
+    this.startError = null;
 
     try {
       this.stateMachine.transition("discovering");
@@ -213,6 +220,11 @@ export class SyncCoordinator {
       this._emitEvent("Sync service started");
     } catch (err) {
       logger.error("Failed to start sync:", err);
+      this.startError =
+        (err as { code?: string })?.code === "EADDRINUSE"
+          ? `Port ${this.settings.port} is already in use by another program or vault. Choose another port in the LAN Vault Sync settings.`
+          : `Sync could not start: ${err instanceof Error ? err.message : String(err)}`;
+      this._emitEvent(this.startError);
       this.stateMachine.transition("error");
     }
   }

@@ -324,6 +324,8 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     await this.coordinator.start();
+    const error = this.coordinator.getStartError();
+    if (error) new Notice(`LAN Sync: ${error}`, 15000);
   }
 
   async stopSync(): Promise<void> {

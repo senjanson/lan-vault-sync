@@ -66,6 +66,14 @@ describe('e2e connections', { timeout: 30000 }, () => {
     expect(count(A, 'Disconnected')).toBe(0);
   });
 
+  it('says why sync could not start when the port is taken', async () => {
+    const pa = ports();
+    track(await startNode(tmpRoot('a'), 'aaaa', pa, []));
+    const B = track(await startNode(tmpRoot('b'), 'bbbb', pa, []));
+    expect(B.coord.getStartError()).toContain(`Port ${pa} is already in use`);
+    expect(B.events.join('\n')).toContain(`Port ${pa} is already in use`);
+  });
+
   it('settles on one connection when both devices dial each other at once', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     const pa = ports(), pb = pa + 1;
