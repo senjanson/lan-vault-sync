@@ -60,6 +60,13 @@ export interface FileChangeEvent {
   timestamp: number;
   content?: string;
   source?: "vault" | "editor";
+  /** The file was also saved to disk while this (editor) change waited. */
+  savedToDisk?: boolean;
+  /**
+   * Rename events only: the file was changed under its old name just before,
+   * and that change was still waiting (`content` holds an editor's text).
+   */
+  editedBeforeRename?: boolean;
 }
 
 // ─── File metadata for tree sync ─────────────────────────
@@ -68,9 +75,18 @@ export interface FileMeta {
   hash: string;
   mtime: number;
   size: number;
+  /**
+   * Synced through a CRDT doc: a text file whose bytes are plain UTF-8. Other
+   * files, text ones included, are synced as bytes.
+   */
   isTextFile: boolean;
   /** Fingerprint of a note's CRDT history, if it has one (protocol 2). */
   crdt?: string;
+  /**
+   * The file was put back after this deletion; peers drop their record of
+   * it. Older versions leave this out.
+   */
+  revives?: { deletedAt: number; hash?: string };
 }
 
 // ─── Sync state ──────────────────────────────────────────
@@ -143,6 +159,15 @@ export interface Tombstone {
   movedTo?: string;
 }
 
+/** A file put back after it was deleted; see TombstoneStore.revive. */
+export interface Revival {
+  path: string;
+  /** When the deletion it undoes was made (that deletion's deletedAt). */
+  deletedAt: number;
+  /** Hash of the content that was deleted, when known. */
+  hash?: string;
+}
+
 export interface FileMetaSyncPayload {
   files: FileMeta[];
   /** All folders of the sender's vault; older versions leave this out. */
@@ -176,6 +201,12 @@ export interface FileDeletePayload {
   hash?: string;
   /** The file was renamed to this path; the deletion only follows that. */
   movedTo?: string;
+  /**
+   * When the deletion was made, by the clock of the device that made it.
+   * Recorded as it is, so every device's record of one deletion carries the
+   * same time. Older versions leave this out.
+   */
+  deletedAt?: number;
 }
 
 export interface FileRenamePayload {

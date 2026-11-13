@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ensureDirectory, ensureParentDirectory, getParentDir, MinimalAdapter } from './path-utils';
+import { ensureDirectory, ensureParentDirectory, getParentDir, MinimalAdapter, unportableNameChars } from './path-utils';
 
 class MemoryAdapter implements MinimalAdapter {
   private dirs = new Set<string>();
@@ -63,5 +63,13 @@ describe('isSafeSyncPath', () => {
       '.obsidian/plugins/evil/main.js', 'notes/.hidden/x.md', 'a\0b.md']) {
       expect(isSafeSyncPath(bad)).toBe(false);
     }
+  });
+});
+
+describe('unportableNameChars', () => {
+  it('names the characters Obsidian does not allow in file names', () => {
+    expect(unportableNameChars('notes/a:b?.md')).toBe('":", "?"');
+    expect(unportableNameChars('q "x" <y>|*.md')).toBe('""", "<", ">", "|", "*"');
+    expect(unportableNameChars('日记/第一 篇 (1) [x] #y.md')).toBe('');
   });
 });

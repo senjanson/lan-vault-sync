@@ -64,6 +64,9 @@ export class DiscoveryService {
   }
 
   private _handleDeviceSeen(device: DeviceInfo): void {
+    // UDP discovery hears every vault on the network. Another vault's
+    // devices refuse the pairing, so they are not listed or called at all.
+    if (device.vaultId !== this.localDevice.vaultId) return;
     const existing = this.devices.get(device.deviceId);
     device.lastSeen = Date.now();
     this.devices.set(device.deviceId, device);

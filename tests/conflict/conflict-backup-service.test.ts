@@ -65,4 +65,28 @@ describe('ConflictBackupService', () => {
     expect(metadata.kind).toBe('binary');
     expect(metadata.reason).toBe('remote-file-delete');
   });
+
+  it('makes a backup\'s folders without looking each one up, and again after they were removed', async () => {
+    // Folders are made one level at a time, as on storage where mkdir is not recursive.
+    const adapter = new FakeAdapter();
+    let lookups = 0;
+    const exists = adapter.exists.bind(adapter);
+    adapter.exists = async (p: string) => (lookups++, exists(p));
+    adapter.mkdir = async (p: string) => {
+      const parent = p.slice(0, p.lastIndexOf('/'));
+      if (adapter.directories.has(p) || (p.includes('/') && !adapter.directories.has(parent))) throw new Error(`mkdir ${p}`);
+      adapter.directories.add(p);
+    };
+    const service = new ConflictBackupService({ adapter } as any);
+
+    await service.backupBinaryFile('a/b/c.png', new Uint8Array([1]), 'remote-file-delete');
+    lookups = 0;
+    const second = await service.backupBinaryFile('a/b/d.png', new Uint8Array([2]), 'remote-file-delete');
+    expect(lookups).toBe(0);
+    expect(Array.from(adapter.binaryFiles.get(second!.contentPath)!)).toEqual([2]);
+
+    for (const dir of [...adapter.directories]) if (dir.startsWith(CONFLICT_BACKUP_DIR)) adapter.directories.delete(dir);
+    const third = await service.backupTextFile('e.md', 'text', 'text-remote-overwrite');
+    expect(adapter.textFiles.get(third!.contentPath)).toBe('text');
+  });
 });

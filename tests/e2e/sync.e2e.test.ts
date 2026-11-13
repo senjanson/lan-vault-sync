@@ -132,7 +132,8 @@ describe('e2e file writes', { timeout: 30000 }, () => {
     track(await startNode(ra, 'aaaa', pa, []));
     track(await startNode(rb, 'bbbb', pa + 1, [pa]));
     await sleep(1500);
-    for (const r of [ra, rb]) expect(fs.statSync(path.join(r, 'same.md')).mtime.getFullYear()).toBe(2020);
+    // Compared as a timestamp: a calendar year depends on the time zone.
+    for (const r of [ra, rb]) expect(fs.statSync(path.join(r, 'same.md')).mtimeMs).toBe(old.getTime());
   });
 });
 
@@ -290,6 +291,190 @@ describe('e2e edits right after a remote write', { timeout: 30000 }, () => {
   });
 });
 
+describe('e2e edits right before a rename', { timeout: 30000 }, () => {
+  it('sends an edit made just before the note was renamed', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'n.md': 'one\n', 'p.png': Buffer.from([1]) });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('n.md') === 'one\n' && B.vault.exists('p.png'));
+    // Well within the 200 ms the watcher waits for more changes.
+    await A.vault.write('n.md', 'one\ntwo\n');
+    await A.vault.writeBin('p.png', Buffer.from([2]));
+    await A.vault.mv('n.md', 'm.md');
+    await A.vault.mv('p.png', 'q.png');
+    await until(() => B.vault.text('m.md') === 'one\ntwo\n' && B.vault.bin('q.png')?.[0] === 2);
+    await sleep(500);
+    for (const n of [A, B]) {
+      expect(n.vault.exists('n.md')).toBe(false);
+      expect(n.vault.text('m.md')).toBe('one\ntwo\n');
+      expect(n.vault.bin('q.png')?.toString('hex')).toBe('02');
+    }
+  });
+
+  it('sends a note\'s change that never reached its sync history at the next sync', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'n.md': 'one\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('n.md') === 'one\n');
+    await A.vault.write('n.md', 'one\ntwo\n');
+    await until(() => B.vault.text('n.md') === 'one\ntwo\n');
+    // The file changes without an event reaching the plugin.
+    fs.writeFileSync(path.join(ra, 'n.md'), 'one\ntwo\nthree\n');
+    (A.vault as any).track('n.md');
+    await (A.coord as any)._periodicFullSync();
+    await until(() => B.vault.text('n.md') === 'one\ntwo\nthree\n');
+    expect(B.vault.text('n.md')).toBe('one\ntwo\nthree\n');
+    expect(A.vault.text('n.md')).toBe('one\ntwo\nthree\n');
+  });
+});
+
+describe('e2e names that differ only in case', { timeout: 30000 }, () => {
+  /**
+   * Make a vault behave like Android's shared storage: names that differ only
+   * in case are one file (as on this test disk), and Obsidian there refuses
+   * a new name that the storage reports as existing.
+   */
+  function likeAndroid(n: Node, root: string) {
+    const v = n.vault as any;
+    const onDisk = (p: string) => fs.existsSync(path.join(root, p));
+    const rename = v.rename.bind(v), create = v.create.bind(v), createBinary = v.createBinary.bind(v);
+    v.rename = async (f: any, np: string) => { if (np !== f.path && onDisk(np)) throw new Error('Destination file already exists!'); return rename(f, np); };
+    v.create = async (p: string, c: string) => { if (onDisk(p)) throw new Error('File already exists.'); return create(p, c); };
+    v.createBinary = async (p: string, c: ArrayBuffer) => { if (onDisk(p)) throw new Error('File already exists.'); return createBinary(p, c); };
+  }
+  const names = (root: string) => fs.readdirSync(root).filter((f) => !f.startsWith('.')).sort();
+
+  it('follows a rename that only changes the case of a name, live and after being apart', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'CaseName.md': 'x\n', 'Pic.png': Buffer.from([1, 2]), 'Later.md': 'later\n', 'Shot.png': Buffer.from([3]) });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    likeAndroid(B, rb);
+    await until(() => B.vault.text('Later.md') === 'later\n' && B.vault.exists('Shot.png') && B.vault.exists('Pic.png'));
+    await A.vault.mv('CaseName.md', 'casename.md');
+    await A.vault.mv('Pic.png', 'pic.png');
+    await until(() => names(rb).includes('casename.md') && names(rb).includes('pic.png'));
+    // Apart: B learns of these renames from A's list of deletions.
+    await B.coord.stop();
+    nodes = nodes.filter((n) => n !== B);
+    await A.vault.mv('Later.md', 'later.md');
+    await A.vault.mv('Shot.png', 'shot.png');
+    await sleep(200);
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    likeAndroid(B, rb);
+    await until(() => names(rb).includes('later.md') && names(rb).includes('shot.png'));
+    await sleep(500);
+    expect(names(rb)).toEqual(['casename.md', 'later.md', 'pic.png', 'shot.png']);
+    expect(B.vault.text('casename.md')).toBe('x\n');
+    expect(B.vault.text('later.md')).toBe('later\n');
+    expect(B.vault.bin('shot.png')?.toString('hex')).toBe('03');
+    expect(B.events.filter((e) => e.startsWith('Deleted'))).toEqual([]);
+    expect(names(ra)).toEqual(names(rb));
+  });
+
+  it('tells once that a peer\'s file cannot be stored next to one whose name differs only in case', async () => {
+    const rb = tmpRoot('b');
+    seed(rb, { 'ReadMe.md': 'mine\n', 'Pic.png': Buffer.from([1]) });
+    const pb = ports();
+    const B = track(await startNode(rb, 'bbbb', pb, []));
+    const { encodeFileMetaSync } = await import('../../src/transport/protocol');
+    const hash = await computeFileHash(new TextEncoder().encode('mine\n').buffer as ArrayBuffer);
+    const picHash = await computeFileHash(new Uint8Array([1]).buffer as ArrayBuffer);
+    const peer = await connectRaw(pb, { deviceId: 'peer', vaultId: (B.coord as any).vaultId }, 'TEST-KEY');
+    const tree = encodeFileMetaSync({
+      files: [
+        { path: 'ReadMe.md', hash, mtime: 1, size: 5, isTextFile: true },
+        { path: 'readme.md', hash: 'f'.repeat(64), mtime: 2, size: 7, isTextFile: true },
+        { path: 'Pic.png', hash: picHash, mtime: 1, size: 1, isTextFile: false },
+        { path: 'pic.png', hash: 'e'.repeat(64), mtime: 2, size: 1, isTextFile: false },
+      ],
+      folders: [],
+      deleted: [],
+    });
+    for (let round = 0; round < 3; round++) { peer.send(tree); await sleep(300); }
+    // The peer sends the file anyway.
+    const doc = new Y.Doc();
+    doc.getText('content').insert(0, 'theirs\n');
+    peer.send(encodeYjsSync(MessageType.YJS_FULL_STATE, 'readme.md', Y.encodeStateAsUpdate(doc)));
+    peer.send(encodeFileData({ path: 'pic.png', content: new Uint8Array([9]), mtime: 2 }));
+    await sleep(500);
+    peer.ws.close();
+    const asked = peer.received.filter((m) => m.type === MessageType.YJS_SYNC_STEP1 || m.type === MessageType.FILE_REQUEST);
+    expect(asked.map((m) => new TextDecoder().decode(m.payload)).join('\n')).not.toMatch(/readme|pic/);
+    expect(B.events.filter((e) => e.startsWith('Cannot sync readme.md'))).toHaveLength(1);
+    expect(B.events.filter((e) => e.startsWith('Cannot sync pic.png'))).toHaveLength(1);
+    expect(names(rb)).toEqual(['Pic.png', 'ReadMe.md']);
+    expect(B.vault.text('ReadMe.md')).toBe('mine\n');
+    expect(B.vault.bin('Pic.png')?.toString('hex')).toBe('01');
+  });
+});
+
+describe('e2e text that is not plain UTF-8', { timeout: 30000 }, () => {
+  // "中文测试" in GBK, and a UTF-8 file that starts with a byte order mark.
+  const gbk = Buffer.from([0xd6, 0xd0, 0xce, 0xc4, 0xb2, 0xe2, 0xca, 0xd4, 0x0a]);
+  const gbk2 = Buffer.from([0xd6, 0xd0, 0xce, 0xc4, 0x0a, 0xb2, 0xe2, 0xca, 0xd4, 0x0a]);
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('bom text\n')]);
+  const hex = (n: Node, p: string) => n.vault.bin(p)?.toString('hex');
+
+  it('syncs such files byte for byte, both ways, at connect and live', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'gbk.txt': gbk, 'bom.md': bom });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => hex(B, 'gbk.txt') === gbk.toString('hex') && hex(B, 'bom.md') === bom.toString('hex'));
+    expect(hex(B, 'gbk.txt')).toBe(gbk.toString('hex'));
+    expect(hex(B, 'bom.md')).toBe(bom.toString('hex'));
+    // Created and changed live, on either side.
+    await A.vault.writeBin('live.txt', gbk);
+    await until(() => hex(B, 'live.txt') === gbk.toString('hex'));
+    await B.vault.writeBin('gbk.txt', gbk2);
+    await until(() => hex(A, 'gbk.txt') === gbk2.toString('hex'));
+    await sleep(800);
+    for (const n of [A, B]) {
+      expect(hex(n, 'gbk.txt')).toBe(gbk2.toString('hex'));
+      expect(hex(n, 'live.txt')).toBe(gbk.toString('hex'));
+      expect(hex(n, 'bom.md')).toBe(bom.toString('hex'));
+    }
+    // The two agree from then on: a sync finds nothing to do.
+    const before = [...A.events, ...B.events].length;
+    await (A.coord as any)._periodicFullSync();
+    await sleep(800);
+    const after = [...A.events, ...B.events].slice(before);
+    expect(after.filter((e) => /conflict|Requesting|Sending/i.test(e))).toEqual([]);
+  });
+
+  it('switches a file to text sync and back when its encoding changes', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'f.txt': gbk });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => hex(B, 'f.txt') === gbk.toString('hex'));
+    // Saved as UTF-8 on A: from then on it merges like any note.
+    await A.vault.write('f.txt', '中文测试\n');
+    await until(() => B.vault.text('f.txt') === '中文测试\n');
+    await sleep(500);
+    await A.vault.write('f.txt', '中文测试\nfrom A\n');
+    await until(() => B.vault.text('f.txt') === '中文测试\nfrom A\n');
+    await B.vault.write('f.txt', 'from B\n中文测试\nfrom A\n');
+    await until(() => A.vault.text('f.txt') === 'from B\n中文测试\nfrom A\n');
+    // Saved in GBK again on B.
+    await sleep(500);
+    await B.vault.writeBin('f.txt', gbk2);
+    await until(() => hex(A, 'f.txt') === gbk2.toString('hex'));
+    await sleep(800);
+    expect(hex(A, 'f.txt')).toBe(gbk2.toString('hex'));
+    expect(hex(B, 'f.txt')).toBe(gbk2.toString('hex'));
+    for (const r of [ra, rb]) expect(fs.readdirSync(r).filter((f) => f.includes('conflict'))).toEqual([]);
+  });
+});
+
 describe('e2e large files', { timeout: 60000 }, () => {
   it('syncs a binary file larger than 100 MB without dropping the connection', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
@@ -400,6 +585,121 @@ describe('e2e unrelated histories', { timeout: 30000 }, () => {
     const texts = new Set(notes(ra).map((f) => all[0].vault.text(f)));
     expect([...texts].sort()).toEqual(['from A\n', 'from B\n']);
     for (const n of all) expect(n.vault.text('plan.md')).toBe(all[0].vault.text('plan.md'));
+  });
+});
+
+describe('e2e lost sync history', { timeout: 30000 }, () => {
+  const stateDir = '.obsidian/plugins/lan-vault-sync/crdt-state';
+  const listNotes = (root: string) => fs.readdirSync(root).filter((f) => f.endsWith('.md')).sort();
+
+  it('keeps the later edit when one device lost the notes\' sync history', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const base: Record<string, string> = {};
+    for (let k = 0; k < 6; k++) base[`n${k}.md`] = `v1 n${k}\n`;
+    for (let k = 0; k < 3; k++) base[`same${k}.md`] = `same ${k}\n`;
+    seed(ra, base);
+    const pa = ports();
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('n5.md') === 'v1 n5\n' && B.vault.text('same2.md') === 'same 2\n');
+    await A.coord.stop();
+    await B.coord.stop();
+    nodes = [];
+    // B's saved history is gone (a failed save, say), and B edits later.
+    fs.rmSync(path.join(rb, stateDir), { recursive: true, force: true });
+    await sleep(50);
+    const edited: Record<string, string> = {};
+    for (let k = 0; k < 6; k++) edited[`n${k}.md`] = `v1 n${k}\nedited on B\n`;
+    seed(rb, edited);
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => [A, B].every((n) => [...Array(6).keys()].every((k) => n.vault.text(`n${k}.md`) === edited[`n${k}.md`])), 10000);
+    await sleep(1000);
+    for (const n of [A, B]) {
+      for (let k = 0; k < 6; k++) expect(n.vault.text(`n${k}.md`)).toBe(edited[`n${k}.md`]);
+      for (let k = 0; k < 3; k++) expect(n.vault.text(`same${k}.md`)).toBe(`same ${k}\n`);
+    }
+    // Identical notes never leave a copy; an older version may.
+    for (const r of [ra, rb]) {
+      for (const f of listNotes(r).filter((f) => f.includes('(conflict'))) {
+        expect(f.startsWith('n')).toBe(true);
+        expect(fs.readFileSync(path.join(r, f), 'utf8')).toMatch(/^v1 n\d\n$/);
+      }
+    }
+  });
+});
+
+describe('e2e files put back after a deletion', { timeout: 30000 }, () => {
+  it('keeps a deleted note and attachment that are put back, live', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'f.md': 'keep me\n', 'p.png': Buffer.from([1, 2, 3]) });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('f.md') === 'keep me\n' && B.vault.exists('p.png'));
+    await A.vault.rm('f.md');
+    await A.vault.rm('p.png');
+    await until(() => !B.vault.exists('f.md') && !B.vault.exists('p.png'));
+    await sleep(300);
+    // Restored from the trash: the same name and content.
+    await A.vault.write('f.md', 'keep me\n');
+    await A.vault.writeBin('p.png', Buffer.from([1, 2, 3]));
+    await until(() => B.vault.text('f.md') === 'keep me\n' && B.vault.exists('p.png'));
+    // A periodic sync later on does not delete them again.
+    await (A.coord as any)._periodicFullSync();
+    await (B.coord as any)._periodicFullSync();
+    await sleep(1500);
+    for (const n of [A, B]) {
+      expect(n.vault.text('f.md')).toBe('keep me\n');
+      expect(n.vault.bin('p.png')?.toString('hex')).toBe('010203');
+    }
+  });
+
+  it('keeps a deleted note that is put back while sync is off', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'f.md': 'keep me\n' });
+    const pa = ports();
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('f.md') === 'keep me\n');
+    await B.vault.rm('f.md');
+    await until(() => !A.vault.exists('f.md'));
+    await sleep(300);
+    await A.coord.stop();
+    nodes = nodes.filter((n) => n !== A);
+    seed(ra, { 'f.md': 'keep me\n' });
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    await until(() => B.vault.text('f.md') === 'keep me\n');
+    await sleep(1000);
+    expect(A.vault.text('f.md')).toBe('keep me\n');
+    expect(B.vault.text('f.md')).toBe('keep me\n');
+  });
+
+  it('keeps a note made anew under a deleted note\'s name, without a copy of the old one', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const base: Record<string, string> = {};
+    for (let k = 0; k < 6; k++) base[`x${k}.md`] = `old ${k}\n`;
+    seed(ra, base);
+    const pa = ports();
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('x5.md') === 'old 5\n');
+    await B.coord.stop();
+    nodes = nodes.filter((n) => n !== B);
+    for (let k = 0; k < 6; k++) await A.vault.rm(`x${k}.md`);
+    await sleep(50);
+    for (let k = 0; k < 6; k++) await A.vault.write(`x${k}.md`, `new ${k}\n`);
+    await sleep(300);
+    // B's untouched copies are the newest files on disk.
+    const later = new Date(Date.now() + 60_000);
+    for (let k = 0; k < 6; k++) fs.utimesSync(path.join(rb, `x${k}.md`), later, later);
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => [...Array(6).keys()].every((k) => B.vault.text(`x${k}.md`) === `new ${k}\n`), 10000);
+    await sleep(1000);
+    for (const [r, n] of [[ra, A], [rb, B]] as const) {
+      for (let k = 0; k < 6; k++) expect(n.vault.text(`x${k}.md`)).toBe(`new ${k}\n`);
+      expect(fs.readdirSync(r).filter((f) => f.includes('conflict'))).toEqual([]);
+    }
   });
 });
 
@@ -1107,6 +1407,58 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
       expect(notes(r)).toEqual(['p-b.png', 'r-b.md']);
       expect(n.vault.text('r-b.md')).toBe('r\nedited on B\n');
     }
+  });
+
+  it('keeps one copy when one of two renames of a file was made while sync was off', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports(), ids = ['aaaa', 'bbbb'];
+    seed(ra, { 'r.md': 'r\n', 'p.png': Buffer.from([1, 2, 3]) });
+    let [A, B] = await phase([ra, rb], ids, pa, true);
+    await until(() => B.vault.text('r.md') === 'r\n' && B.vault.exists('p.png'));
+    await sleep(300);
+    [A, B] = await phase([ra, rb], ids, pa, false);
+    await B.vault.mv('r.md', 'r-b.md');
+    await B.vault.write('r-b.md', 'r\nedited on B\n');
+    await B.vault.mv('p.png', 'p-b.png');
+    await sleep(300);
+    // A's sync is off; its files are renamed meanwhile, later than B's.
+    await A.coord.stop();
+    nodes = nodes.filter((n) => n !== A);
+    fs.renameSync(path.join(ra, 'r.md'), path.join(ra, 'r-a.md'));
+    fs.renameSync(path.join(ra, 'p.png'), path.join(ra, 'p-a.png'));
+    await sleep(50);
+    [A, B] = await phase([ra, rb], ids, pa, true);
+    await until(() => notes(rb).join() === 'p-a.png,r-a.md' && B.vault.text('r-a.md') === 'r\nedited on B\n', 10000);
+    await sleep(500);
+    for (const [r, n] of [[ra, A], [rb, B]] as const) {
+      expect(notes(r)).toEqual(['p-a.png', 'r-a.md']);
+      expect(n.vault.text('r-a.md')).toBe('r\nedited on B\n');
+    }
+  });
+
+  it('settles two devices renaming or deleting the same files at once without waiting for a periodic sync', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports(), ids = ['aaaa', 'bbbb'];
+    seed(ra, { 'r.md': 'r\n', 'p.png': Buffer.from([1]), 'd.md': 'd\n', 'q.png': Buffer.from([2]) });
+    let [A, B] = await phase([ra, rb], ids, pa, true);
+    await until(() => notes(rb).length === 4);
+    await sleep(300);
+    // Each acts before the other's change arrives (no periodic sync here).
+    await Promise.all([
+      (async () => { await A.vault.mv('r.md', 'r-a.md'); await A.vault.mv('p.png', 'p-a.png'); await A.vault.mv('d.md', 'd-a.md'); await A.vault.mv('q.png', 'q-a.png'); })(),
+      (async () => { await B.vault.mv('r.md', 'r-b.md'); await B.vault.mv('p.png', 'p-b.png'); await B.vault.rm('d.md'); await B.vault.rm('q.png'); })(),
+    ]);
+    // One name per file, the same on both; the later of a rename and a
+    // deletion wins (the two may fall in the same millisecond here).
+    const settled = () => {
+      const [a, b] = [notes(ra), notes(rb)];
+      return a.join() === b.join() && ['r', 'p'].every((c) => a.filter((p) => p[0] === c).length === 1) &&
+        ['d', 'q'].every((c) => a.filter((p) => p[0] === c).length <= 1) && !a.some((p) => /^[rpdq]\./.test(p));
+    };
+    await until(settled, 8000);
+    await sleep(1000);
+    expect(notes(ra)).toEqual(notes(rb));
+    expect(settled()).toBe(true);
   });
 
   it('keeps one copy when three devices renamed the same note to different names', async () => {

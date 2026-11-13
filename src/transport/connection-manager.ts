@@ -94,6 +94,13 @@ const MAX_MISSED_PINGS = 3;
 /** Bytes an incoming connection may send before its pairing messages. */
 const PRE_AUTH_MAX_BYTES = 256 * 1024;
 
+/**
+ * Failed attempts in a row after which an address added by hand is shown as
+ * unreachable (about 7 seconds of retries). A phone without local network
+ * permission fails every attempt at once and would otherwise look fine.
+ */
+const UNREACHABLE_AFTER_FAILURES = 3;
+
 type MessageHandler = (deviceId: string, type: MessageType, payload: Uint8Array) => void | Promise<void>;
 
 export class ConnectionManager {
@@ -101,6 +108,14 @@ export class ConnectionManager {
   private peers = new Map<string, PeerConnection>();
   /** Outbound clients by URL, including ones that are still (re)connecting. */
   private clients = new Map<string, WSClient>();
+  /** Outbound URLs of addresses added by hand; see forgetDiscoveredPeer. */
+  private manualUrls = new Set<string>();
+  /** Discovered devices reported lost while their connection was still up. */
+  private lostUrls = new Set<string>();
+  /** Refusals already reported, with their address; see _authFailed. */
+  private reportedRefusals = new Map<string, string>();
+  private unreachable: string[] = [];
+  private onReachabilityChangeCb: (() => void) | null = null;
   private stopped = false;
   private messageHandler: MessageHandler | null = null;
   private localInfo: HandshakePayload;
@@ -138,6 +153,11 @@ export class ConnectionManager {
     this.onAuthFailedCb = cb;
   }
 
+  /** Called when the list of getUnreachablePeers changes. */
+  onReachabilityChange(cb: () => void): void {
+    this.onReachabilityChangeCb = cb;
+  }
+
   async start(): Promise<void> {
     if (!this.acceptsIncomingConnections) {
       logger.info('Incoming connections are disabled in this runtime; outbound-only mode enabled');
@@ -169,18 +189,27 @@ export class ConnectionManager {
 
   /** Connect to a discovered peer. Dedup: lower deviceId connects first. */
   connectToPeer(device: DeviceInfo): void {
+    const url = `ws://${device.ip}:${device.port}`;
+    // Seen again, so it may be called again once its connection drops.
+    this.lostUrls.delete(url);
     if (device.deviceId === this.settings.deviceId) return;
     if (this.peers.has(device.deviceId)) return;
     if (!this._shouldInitiateConnection(device)) return;
 
-    const url = `ws://${device.ip}:${device.port}`;
+    if (device.deviceId.startsWith('manual-')) this.manualUrls.add(url);
     // A manual peer and its auto-discovered entry point at the same address;
     // one client per address is enough.
     if (this.clients.has(url)) return;
     const client = new WSClient(url);
     this.clients.set(url, client);
 
+    client.onClose(() => {
+      if (this.clients.get(url) === client && this.lostUrls.delete(url)) this._retireClient(client);
+      this._updateReachability();
+    });
+
     client.onOpen((ws) => {
+      this._updateReachability();
       const nonce = randomNonce();
       const address = `${device.ip}:${device.port}`;
       this._routeSocket(ws, 'outbound', async (msg) => {
@@ -241,8 +270,32 @@ export class ConnectionManager {
     for (const client of this.clients.values()) client.reconnectNow();
   }
 
+  /**
+   * Stop calling a discovered device that discovery no longer sees, so a
+   * device that left (or never paired) is not called forever. A connection
+   * that is still up is kept but not called again once it closes; discovery
+   * reports the device again when it is back. Addresses added by hand keep
+   * being called.
+   */
+  forgetDiscoveredPeer(device: DeviceInfo): void {
+    const url = `ws://${device.ip}:${device.port}`;
+    const client = this.clients.get(url);
+    if (!client || this.manualUrls.has(url)) return;
+    if (client.isConnected) this.lostUrls.add(url);
+    else this._retireClient(client);
+  }
+
+  /**
+   * Addresses added by hand that could not be reached several times in a
+   * row. They are still being retried.
+   */
+  getUnreachablePeers(): string[] {
+    return this.unreachable;
+  }
+
   /** Stop connecting to an address and close outbound connections to it. */
   disconnectAddress(ip: string, port: number): void {
+    this.manualUrls.delete(`ws://${ip}:${port}`);
     const client = this.clients.get(`ws://${ip}:${port}`);
     if (client) this._retireClient(client);
     for (const peer of this.peers.values()) {
@@ -277,6 +330,18 @@ export class ConnectionManager {
 
   getConnectedPeerIds(): string[] {
     return Array.from(this.peers.keys());
+  }
+
+  /** The devices connected now, for display. */
+  getConnectedPeers(): DeviceInfo[] {
+    return Array.from(this.peers.values(), (p) => ({
+      deviceId: p.deviceId,
+      deviceName: p.deviceName,
+      ip: p.ip,
+      port: p.port,
+      vaultId: p.vaultId,
+      lastSeen: Date.now(),
+    }));
   }
 
   isConnectedTo(deviceId: string): boolean {
@@ -388,7 +453,17 @@ export class ConnectionManager {
     return false;
   }
 
+  /**
+   * Report a refusal once until that address pairs: the device is retried
+   * (and refused again) for as long as nothing changes on either side.
+   */
   private _authFailed(deviceName: string, address: string, reason: AuthFailure['reason']): void {
+    const key = `${reason} ${address} ${deviceName}`;
+    if (this.reportedRefusals.has(key)) {
+      logger.debug(`Rejected ${deviceName} (${address}) again: ${reason}`);
+      return;
+    }
+    this.reportedRefusals.set(key, address);
     logger.warn(`Rejected ${deviceName} (${address}): ${reason}`);
     this.onAuthFailedCb?.({ deviceName: String(deviceName ?? ''), address, reason });
   }
@@ -533,6 +608,10 @@ export class ConnectionManager {
     }, WS_PING_INTERVAL_MS);
 
     this.peers.set(device.deviceId, peer);
+    client?.markPaired();
+    for (const [key, address] of this.reportedRefusals) {
+      if (address === device.ip || address.startsWith(`${device.ip}:`)) this.reportedRefusals.delete(key);
+    }
 
     addSocketCloseListener(ws, () => {
       this._removePeer(device.deviceId, ws);
@@ -585,8 +664,25 @@ export class ConnectionManager {
   private _retireClient(client: WSClient): void {
     client.close();
     for (const [url, c] of this.clients) {
-      if (c === client) this.clients.delete(url);
+      if (c === client) {
+        this.clients.delete(url);
+        this.lostUrls.delete(url);
+      }
     }
+    this._updateReachability();
+  }
+
+  private _updateReachability(): void {
+    if (this.stopped) return;
+    const unreachable: string[] = [];
+    for (const [url, client] of this.clients) {
+      if (this.manualUrls.has(url) && client.failures >= UNREACHABLE_AFTER_FAILURES) {
+        unreachable.push(url.slice('ws://'.length));
+      }
+    }
+    if (unreachable.join() === this.unreachable.join()) return;
+    this.unreachable = unreachable;
+    this.onReachabilityChangeCb?.();
   }
 
   /** Whether a connection in this direction is the one both sides keep. */

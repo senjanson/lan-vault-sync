@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s \"https://raw.githubusercontent.com/obsidianmd/obsidian-releases/refs/heads/master/.github/PULL_REQUEST_TEMPLATE/plugin.md\")"
+    ]
+  }
+}

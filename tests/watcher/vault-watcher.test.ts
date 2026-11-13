@@ -76,6 +76,29 @@ describe("VaultWatcher", () => {
     });
   });
 
+  it("sends an edit still waiting under a file's old name along with its rename", () => {
+    const file = createFile("old.md");
+    vault.trigger("modify", file);
+    file.path = "new.md";
+    vault.trigger("rename", file, "old.md");
+    vi.advanceTimersByTime(DEBOUNCE_MS * 2);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "rename", path: "new.md", oldPath: "old.md", editedBeforeRename: true });
+  });
+
+  it("moves an edit waiting under a file's old name when the plugin renamed it", () => {
+    const file = createFile("old.md");
+    workspace.trigger("editor-change", { getValue: () => "typed" }, { file });
+    watcher.markRemoteWrite("new.md", "rename");
+    file.path = "new.md";
+    vault.trigger("rename", file, "old.md");
+    vi.advanceTimersByTime(DEBOUNCE_MS);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "modify", path: "new.md", content: "typed" });
+  });
+
   it("keeps editor content when a vault modify event follows", () => {
     const file = createFile("note.md");
     const editor = {

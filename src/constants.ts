@@ -54,6 +54,8 @@ export const TEXT_EXTENSIONS = new Set([
 export const CRDT_STATE_DIR = ".obsidian/plugins/lan-vault-sync/crdt-state";
 export const CONFLICT_BACKUP_DIR = ".obsidian/plugins/lan-vault-sync/conflicts";
 export const TOMBSTONE_FILE = ".obsidian/plugins/lan-vault-sync/deleted-files.json";
+/** Files put back after they were deleted; see TombstoneStore.revive. */
+export const REVIVED_FILE = ".obsidian/plugins/lan-vault-sync/revived-files.json";
 /** Files and their hashes as of the last time sync ran. */
 export const FILE_INDEX_FILE = ".obsidian/plugins/lan-vault-sync/synced-files.json";
 /** How long a deletion is remembered for peers that were offline. */

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TombstoneStore } from '../../src/sync/tombstones';
 import { TOMBSTONE_FILE, TOMBSTONE_TTL_MS } from '../../src/constants';
 
@@ -47,5 +47,66 @@ describe('TombstoneStore', () => {
     // A peer's copy came back under the old name and was removed.
     store.add('f.md', 'h2');
     expect(store.get('f.md')).toEqual({ path: 'f.md', deletedAt: 200, hash: 'h2', movedTo: 'g.md' });
+  });
+
+  it('turns the record of a deletion into one of the file being put back', async () => {
+    const adapter = memoryAdapter();
+    let now = 100;
+    const store = new TombstoneStore(adapter, () => now);
+    await store.load();
+    store.add('f.md', 'h1');
+    store.add('g.md', 'h2', undefined, 'h.md');
+    now = 200;
+    store.revive('f.md');
+    store.revive('g.md');
+    expect(store.get('f.md')).toBeUndefined();
+    expect(store.getRevival('f.md')).toEqual({ path: 'f.md', deletedAt: 100, hash: 'h1' });
+    // A new file under a renamed file's old name undoes no deletion.
+    expect(store.getRevival('g.md')).toBeUndefined();
+    await store.flush();
+    const again = new TombstoneStore(adapter, () => now);
+    await again.load();
+    expect(again.getRevival('f.md')?.deletedAt).toBe(100);
+    // Deleted once more: that deletion holds again.
+    again.add('f.md', 'h1');
+    expect(again.getRevival('f.md')).toBeUndefined();
+  });
+
+  it('writes changes a second after them, or later while writing takes long, up to three seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const adapter = memoryAdapter();
+      let writeMs = 0;
+      const writes: number[] = [];
+      const write = adapter.write;
+      adapter.write = async (p: string, d: string) => {
+        writes.push(Date.now());
+        vi.setSystemTime(Date.now() + writeMs);
+        return write(p, d);
+      };
+      const store = new TombstoneStore(adapter);
+      await store.load();
+      const start = Date.now();
+
+      writeMs = 500;
+      store.add('a.md', 'h1');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(writes).toEqual([start + 1000]);
+
+      // The write took half a second: the next one waits three.
+      writeMs = 0;
+      store.add('b.md', 'h2');
+      await vi.advanceTimersByTimeAsync(2900);
+      expect(writes).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(writes).toHaveLength(2);
+
+      store.add('c.md', 'h3');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(writes).toHaveLength(3);
+      expect(JSON.parse(adapter.files.get(TOMBSTONE_FILE)!).map((t: { path: string }) => t.path)).toEqual(['a.md', 'b.md', 'c.md']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,5 +1,5 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
-import { LANSyncSettings, DEFAULT_SETTINGS, SyncState } from "./types";
+import { LANSyncSettings, DEFAULT_SETTINGS } from "./types";
 import {
   PLUGIN_ID,
   SYNC_VIEW_TYPE,
@@ -19,7 +19,9 @@ import { SyncLogService } from "./sync-log/sync-log-service";
 import { StatusBar } from "./ui/status-bar";
 import { LANSyncSettingTab } from "./ui/settings-tab";
 import { SyncView } from "./ui/sync-view";
+import type { SyncViewStatus } from "./ui/sync-view";
 import { SyncLogView } from "./ui/sync-log-view";
+import { canUseNodeRuntime } from "./utils/runtime";
 
 function generateDeviceId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -47,6 +49,8 @@ export default class LANSyncPlugin extends Plugin {
   syncLogService: SyncLogService | null = null;
   /** Last notice time per refused address, so retries don't spam notices. */
   private authNoticeAt = new Map<string, number>();
+  /** Addresses the user was told cannot be reached, until they connect. */
+  private unreachableNotified = new Set<string>();
   private startTimer: ReturnType<typeof setTimeout> | null = null;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private unloaded = false;
@@ -92,7 +96,7 @@ export default class LANSyncPlugin extends Plugin {
 
     // Register view
     this.registerView(SYNC_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
-      this.syncView = new SyncView(leaf);
+      this.syncView = new SyncView(leaf, () => this.getSyncStatus());
       return this.syncView;
     });
 
@@ -166,8 +170,18 @@ export default class LANSyncPlugin extends Plugin {
     const reconnect = () => this.coordinator?.reconnectNow();
     this.registerDomEvent(document, "visibilitychange", () => {
       if (document.visibilityState === "visible") reconnect();
+      // A phone may stop the app in the background without notice.
+      else void this.coordinator?.persist();
     });
     this.registerDomEvent(window, "online", reconnect);
+    // Obsidian waits for these before it closes; onunload is not waited for.
+    this.registerEvent(
+      this.app.workspace.on("quit", (tasks) => {
+        tasks.add(async () => {
+          await this.coordinator?.persist();
+        });
+      }),
+    );
 
     // Auto-start if enabled
     if (this.settings.enabled) {
@@ -294,6 +308,30 @@ export default class LANSyncPlugin extends Plugin {
     );
   }
 
+  /** Files reported as impossible to sync, waiting to be told in one notice. */
+  private unsyncable: Array<{ path: string; reason: string }> = [];
+  private unsyncableTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Tell the user about files that cannot be synced (each is reported once
+   * per run), in one notice for those reported together: a folder of such
+   * files is reported file by file.
+   */
+  private notifyUnsyncable(path: string, reason: string): void {
+    this.unsyncable.push({ path, reason });
+    if (this.unsyncableTimer) return;
+    this.unsyncableTimer = setTimeout(() => {
+      this.unsyncableTimer = null;
+      const [first, ...rest] = this.unsyncable;
+      this.unsyncable = [];
+      if (!first || this.unloaded) return;
+      const more = rest.length > 0
+        ? ` ${rest.length} more file${rest.length > 1 ? "s" : ""} cannot be synced either; the LAN Sync panel lists them.`
+        : "";
+      new Notice(`LAN Sync: Cannot sync ${first.path}: ${first.reason}.${more}`, 15000);
+    }, 1000);
+  }
+
   async removeManualPeer(address: string): Promise<void> {
     const normalized = address.trim();
     const nextPeers = this.settings.manualPeers.filter(
@@ -342,18 +380,13 @@ export default class LANSyncPlugin extends Plugin {
       workspace: this.app.workspace,
     });
 
-    this.coordinator.onStateChange((state: SyncState) => {
-      const peerCount = this.coordinator?.getConnectedDevices().length ?? 0;
-      this.statusBar?.update(state, peerCount);
-      this.syncView?.setSyncState(state);
-      this.syncView?.setDevices(this.coordinator?.getDiscoveredDevices() ?? []);
-    });
+    this.coordinator.onStateChange(() => this.showStatus());
 
     this.coordinator.onAuthFailed((failure) => this.notifyAuthFailure(failure));
+    this.coordinator.onUnsyncableFile((path, reason) => this.notifyUnsyncable(path, reason));
 
     this.coordinator.onSyncEvent((msg: string) => {
       this.syncView?.addLog(msg);
-      this.syncView?.setDevices(this.coordinator?.getDiscoveredDevices() ?? []);
     });
 
     await this.coordinator.start();
@@ -366,7 +399,46 @@ export default class LANSyncPlugin extends Plugin {
       await this.coordinator.stop();
       this.coordinator = null;
     }
-    this.statusBar?.update("idle");
+    this.showStatus();
+  }
+
+  /** What the status bar and the sync view show, read from the running sync. */
+  getSyncStatus(): SyncViewStatus {
+    const coordinator = this.coordinator;
+    return {
+      state: coordinator?.getState() ?? "idle",
+      devices: coordinator?.getConnectedPeers() ?? [],
+      unreachable: coordinator?.getUnreachablePeers() ?? [],
+    };
+  }
+
+  private showStatus(): void {
+    const status = this.getSyncStatus();
+    this.statusBar?.update(status.state, status.devices.length, status.unreachable);
+    this.syncView?.refresh();
+    this.notifyUnreachable(status.unreachable);
+  }
+
+  /**
+   * One notice per address and stretch of failures; the status bar and the
+   * sync view show it for as long as it lasts. Phones have no status bar.
+   */
+  private notifyUnreachable(addresses: string[]): void {
+    for (const address of this.unreachableNotified) {
+      if (!addresses.includes(address)) this.unreachableNotified.delete(address);
+    }
+    const fresh = addresses.filter((address) => !this.unreachableNotified.has(address));
+    if (fresh.length === 0) return;
+    for (const address of fresh) this.unreachableNotified.add(address);
+    new Notice(
+      `LAN Sync: Cannot reach ${fresh.join(", ")}. Retrying in the background.` +
+        // In testing this was a phone without local network permission:
+        // every connection failed at once.
+        (canUseNodeRuntime()
+          ? ""
+          : " If that device is on and on the same network, check that Obsidian is allowed to use the local network (iPhone: Settings → Obsidian → Local Network)."),
+      15000,
+    );
   }
 
   async manualFullSync(

@@ -21,6 +21,24 @@ export class YjsDocManager {
   private evictedSeeded = new Set<string>();
   /** Docs loaded from their saved state and not changed since. */
   private unchanged = new WeakSet<Y.Doc>();
+  /** Docs with changes that are not in their state file yet. */
+  private dirty = new WeakSet<Y.Doc>();
+  /** Where each loaded doc is kept now; a rename moves it. */
+  private docPaths = new WeakMap<Y.Doc, string>();
+  /** Local updates held back until the doc that made them is saved. */
+  private outbox = new WeakMap<Y.Doc, Array<{ path: string; update: Uint8Array }>>();
+  private commitQueued = new Set<string>();
+  /**
+   * The text the note's file on disk is known to hold. It lags behind the
+   * doc while a peer's edit is being written, and while an edit shown in an
+   * editor waits for Obsidian to save it. A state saved in that time records
+   * this text (see _save): if the app stops before the file catches up, the
+   * next start can tell that the doc is ahead of the file from the file
+   * having been changed, and need not take the difference for a new edit.
+   */
+  private diskContent = new Map<string, string>();
+  /** The file text recorded in a note's state file, for notes that have one. */
+  private savedBase = new Map<string, string>();
   private pendingDocs = new Map<string, Promise<Y.Doc>>();
   private operationQueues = new Map<string, Promise<void>>();
 
@@ -53,7 +71,8 @@ export class YjsDocManager {
         // A doc that did not change since it was loaded is saved already.
         // Resaving it cost a write for each doc touched, thousands when a
         // peer connects.
-        if (!this.unchanged.has(doc)) await this.persistence.saveDoc(path, doc);
+        if (!this.unchanged.has(doc)) await this._save(path, doc);
+        this._sendHeldUpdates(doc);
         // The saved state is the note's text: loaded again, it needs no
         // seeding from the file, which may lag behind it.
         if (this.seeded.has(doc)) this.evictedSeeded.add(path);
@@ -66,6 +85,9 @@ export class YjsDocManager {
           this.lastKnownContent.get(path) === doc.getText('content').toString()
         ) {
           this.lastKnownContent.delete(path);
+        }
+        if (this.diskContent.get(path) === doc.getText('content').toString()) {
+          this.diskContent.delete(path);
         }
         this.pool.evict(path, doc);
       }).catch((err) => {
@@ -128,21 +150,127 @@ export class YjsDocManager {
 
     const doc = new Y.Doc();
     // Try to restore persisted state
-    if (await this.persistence.loadDoc(filePath, doc)) this.unchanged.add(doc);
+    const saved = await this.persistence.loadState(filePath, doc);
+    if (saved) this.unchanged.add(doc);
+    if (saved?.base !== undefined) {
+      this.savedBase.set(filePath, saved.base);
+      if (!this.diskContent.has(filePath)) this.diskContent.set(filePath, saved.base);
+    } else {
+      this.savedBase.delete(filePath);
+    }
     if (this.evictedSeeded.delete(filePath)) this.seeded.add(doc);
+    this.docPaths.set(doc, filePath);
 
-    // Listen for updates originating locally
     doc.on('update', (update: Uint8Array, origin: any) => {
       this.unchanged.delete(doc);
+      this.dirty.add(doc);
+      // Where the note is now: a doc keeps its updates' path across renames,
+      // and an update sent under the old name would bring that name back on
+      // a peer that has not seen the rename.
+      const path = this.docPaths.get(doc) ?? filePath;
       if (origin === 'local') {
-        this.onLocalUpdateCb?.(filePath, update);
+        // Sent once the doc is saved (see _commit).
+        const held = this.outbox.get(doc);
+        if (held) held.push({ path, update });
+        else this.outbox.set(doc, [{ path, update }]);
       } else if (origin instanceof RemoteOrigin) {
-        this.onRemoteUpdateAppliedCb?.(filePath, update, origin.deviceId);
+        this.onRemoteUpdateAppliedCb?.(path, update, origin.deviceId);
       }
+      // A peer's text for a note that has no file here yet is saved once the
+      // file is written (see noteDiskContent). Saved before, an app stopped
+      // in between would come back with the text and no file to put it in.
+      const awaitsFile = origin !== 'local' && origin !== 'init' && !this.diskContent.has(path);
+      if (!awaitsFile) this._scheduleCommit(doc);
     });
 
     this.pool.set(filePath, doc);
     return doc;
+  }
+
+  /**
+   * Save a doc's state, with the file's text when the doc is ahead of the
+   * file (see diskContent).
+   */
+  private async _save(path: string, doc: Y.Doc): Promise<void> {
+    this.dirty.delete(doc);
+    const disk = this.diskContent.get(path);
+    const base = disk !== undefined && disk !== doc.getText('content').toString() ? disk : undefined;
+    if (await this.persistence.saveDoc(path, doc, base)) {
+      if (base === undefined) this.savedBase.delete(path);
+      else this.savedBase.set(path, base);
+      if (!this.dirty.has(doc)) this.unchanged.add(doc);
+    } else {
+      this.dirty.add(doc);
+    }
+  }
+
+  private _sendHeldUpdates(doc: Y.Doc): void {
+    const held = this.outbox.get(doc);
+    if (!held) return;
+    this.outbox.delete(doc);
+    for (const { path, update } of held) this.onLocalUpdateCb?.(path, update);
+  }
+
+  /**
+   * Save a changed doc, then hand its local updates to onLocalUpdate. The
+   * state used to be saved once a minute: an app that stopped before that
+   * came back with a state older than its file, took the difference for a
+   * new edit, and so added again what peers had already received. A change
+   * is now saved before peers get it and before it is written to the file.
+   * Must run inside the path's queue.
+   */
+  private async _commit(path: string, doc: Y.Doc): Promise<void> {
+    if (this.dirty.has(doc)) await this._save(path, doc);
+    this._sendHeldUpdates(doc);
+  }
+
+  /** Queue a commit behind the operation that is changing the doc. */
+  private _scheduleCommit(doc: Y.Doc): void {
+    const path = this.docPaths.get(doc);
+    if (path === undefined || this.commitQueued.has(path)) return;
+    this.commitQueued.add(path);
+    void this._enqueueForPath(path, async () => {
+      this.commitQueued.delete(path);
+      if (this.pool.peek(path) === doc) await this._commit(path, doc);
+      else this._sendHeldUpdates(doc);
+    }).catch((err) => {
+      this.commitQueued.delete(path);
+      logger.error(`Failed to save CRDT state for ${path}:`, err);
+    });
+  }
+
+  /**
+   * The text to take as the starting point of what the file now holds, for
+   * a doc loaded with a recorded file text (`base`) other than its own
+   * (`current`). The file was changed from whichever of the two it is
+   * closer to: from `base` if the file never caught up with the doc, from
+   * `current` if it did and the record is out of date.
+   */
+  private _startingPoint(base: string | undefined, current: string, next: string): string {
+    if (base === undefined || base === current || next === base) return base ?? current;
+    if (next === current) return current;
+    return editSize(base, next) <= editSize(current, next) ? base : current;
+  }
+
+  /**
+   * Record what the note's file on disk holds, when that was read from the
+   * file or just written to it.
+   */
+  noteDiskContent(filePath: string, content: string): void {
+    this.diskContent.set(filePath, content);
+    const doc = this.pool.peek(filePath);
+    if (!doc) return;
+    if (this.dirty.has(doc)) {
+      this._scheduleCommit(doc);
+      return;
+    }
+    const saved = this.savedBase.get(filePath);
+    if (saved === undefined) return;
+    // The state file records a file text that no longer holds: save again.
+    const needed = content !== doc.getText('content').toString() ? content : undefined;
+    if (needed === saved) return;
+    this.dirty.add(doc);
+    this._scheduleCommit(doc);
   }
 
   private async _enqueueForPath<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
@@ -167,19 +295,39 @@ export class YjsDocManager {
     }
   }
 
-  /** Called when a local file changes. Computes diff and applies to Yjs doc. */
-  async applyLocalChange(filePath: string, newContent: string): Promise<void> {
-    await this._enqueueForPath(filePath, async () => {
+  /**
+   * Called when a local file changes. Computes diff and applies to Yjs doc.
+   * `onDisk` tells that the text was read from the file, not from an editor
+   * that may not have saved it yet.
+   */
+  async applyLocalChange(filePath: string, newContent: string, onDisk = false): Promise<void> {
+    const ahead = await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
-      this.seeded.add(doc);
       const ytext = doc.getText('content');
-      const oldContent = this.lastKnownContent.get(filePath) ?? ytext.toString();
+      const current = ytext.toString();
+      let oldContent = this.lastKnownContent.get(filePath);
+      // First change since the doc was loaded: see _startingPoint.
+      const recovering = oldContent === undefined && !this.seeded.has(doc);
+      if (oldContent === undefined) {
+        oldContent = recovering
+          ? this._startingPoint(this.savedBase.get(filePath), current, newContent)
+          : current;
+      }
+      this.seeded.add(doc);
+      if (onDisk) this.noteDiskContent(filePath, newContent);
 
-      if (oldContent === newContent) return;
+      if (oldContent !== newContent) {
+        applyRebasedEdit(ytext, oldContent, newContent, 'local');
+      }
+      if (oldContent !== newContent || recovering) this.lastKnownContent.set(filePath, newContent);
+      await this._commit(filePath, doc);
 
-      applyRebasedEdit(ytext, oldContent, newContent, 'local');
-      this.lastKnownContent.set(filePath, newContent);
+      // The doc was ahead of the file when the app last stopped: what it
+      // holds beyond the file still has to be written there.
+      const merged = ytext.toString();
+      return recovering && merged !== newContent ? merged : null;
     });
+    if (ahead !== null) await this.onRemoteContentCb?.(filePath, ahead, newContent);
   }
 
   /** Called when receiving a Yjs update from a remote peer */
@@ -211,18 +359,21 @@ export class YjsDocManager {
    * Two Y.Docs that were each seeded from disk on their own share no client
    * IDs; merging them concatenates both copies of the text. Docs with shared
    * history always share at least the client that inserted the base text.
-   * When histories are unrelated, both sides pick the same winner (the doc
-   * whose smallest client ID is lower) so they converge on one doc.
+   * When histories are unrelated, both sides must pick the same winner so
+   * they converge on one doc: `localWins` when the caller has settled it
+   * (see compareStateVectors).
    */
   async compareHistory(
     filePath: string,
     remoteStateVector: Uint8Array,
+    localWins?: boolean,
   ): Promise<'related' | 'local-wins' | 'remote-wins'> {
     return this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
       return compareStateVectors(
         Y.decodeStateVector(Y.encodeStateVector(doc)),
         Y.decodeStateVector(remoteStateVector),
+        localWins,
       );
     });
   }
@@ -290,6 +441,7 @@ export class YjsDocManager {
     filePath: string,
     update: Uint8Array,
     fromDeviceId?: string,
+    localWins?: boolean,
   ): Promise<'merged' | 'adopted' | 'kept-local'> {
     let result: 'merged' | 'adopted' | 'kept-local' = 'merged';
     let change: { content: string; previousContent: string | undefined } | null = null;
@@ -300,6 +452,7 @@ export class YjsDocManager {
       const relation = compareStateVectors(
         Y.decodeStateVector(Y.encodeStateVector(doc)),
         Y.decodeStateVector(Y.encodeStateVectorFromUpdate(update)),
+        localWins,
       );
 
       if (relation === 'local-wins') {
@@ -311,6 +464,7 @@ export class YjsDocManager {
         this.pool.delete(filePath);
         this.evictedSeeded.delete(filePath);
         this.lastKnownContent.delete(filePath);
+        this.savedBase.delete(filePath);
         await this.persistence.deleteDoc(filePath);
         doc = await this.getOrCreateDoc(filePath);
       }
@@ -415,6 +569,7 @@ export class YjsDocManager {
       }
 
       this.lastKnownContent.set(filePath, content);
+      await this._commit(filePath, doc);
     });
   }
 
@@ -440,53 +595,35 @@ export class YjsDocManager {
    * actual on-disk state before the sync exchange begins.
    */
   async initDocFromContentSilent(filePath: string, content: string): Promise<void> {
-    await this._enqueueForPath(filePath, async () => {
+    const ahead = await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
       // Something else filled the doc while the caller read the file (a
       // peer's text, say); the read is stale and must not be applied as a
       // change on top of it.
-      if (this.seeded.has(doc)) return;
+      if (this.seeded.has(doc)) return null;
       this.seeded.add(doc);
       const ytext = doc.getText('content');
       const existing = ytext.toString();
+      const base = this._startingPoint(this.savedBase.get(filePath), existing, content);
+      this.noteDiskContent(filePath, content);
+      this.lastKnownContent.set(filePath, content);
 
-      if (existing === content) {
-        // Already up-to-date — nothing to do.
-        this.lastKnownContent.set(filePath, content);
-        return;
-      }
+      // A neutral origin ('init'), so the change is not sent out as a local
+      // edit. Applied on top of what the doc holds beyond the file, if the
+      // doc was ahead of the file when the app last stopped.
+      if (base !== content) applyRebasedEdit(ytext, base, content, 'init');
 
-      // Use a neutral origin ('init') so the update listener does not fire
-      // the local-broadcast callback.
-      if (ytext.length === 0 && content.length > 0) {
-        doc.transact(() => {
-          ytext.insert(0, content);
-        }, 'init');
-      } else if (existing !== content) {
-        // Doc has stale/different content — apply diff silently.
-        doc.transact(() => {
-          const diffs = diff(existing, content);
-          let index = 0;
-          for (const [op, text] of diffs) {
-            if (op === diff.EQUAL) {
-              index += text.length;
-            } else if (op === diff.INSERT) {
-              ytext.insert(index, text);
-              index += text.length;
-            } else if (op === diff.DELETE) {
-              ytext.delete(index, text.length);
-            }
-          }
-        }, 'init');
-      }
-
-      this.lastKnownContent.set(filePath, ytext.toString());
+      const merged = ytext.toString();
+      return merged !== content ? merged : null;
     });
+    // What the doc holds beyond the file still has to be written there.
+    if (ahead !== null) await this.onRemoteContentCb?.(filePath, ahead, content);
   }
 
   /** Record that the file (or its editor) now holds this text. */
-  markWritten(filePath: string, content: string): void {
+  markWritten(filePath: string, content: string, onDisk = false): void {
     this.lastKnownContent.set(filePath, content);
+    if (onDisk) this.noteDiskContent(filePath, content);
   }
 
   /** The text the file or its editor is known to hold, if recorded. */
@@ -523,6 +660,8 @@ export class YjsDocManager {
       this.pool.delete(filePath);
       this.evictedSeeded.delete(filePath);
       this.lastKnownContent.delete(filePath);
+      this.diskContent.delete(filePath);
+      this.savedBase.delete(filePath);
       await this.persistence.deleteDoc(filePath);
     });
   }
@@ -549,6 +688,7 @@ export class YjsDocManager {
       const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, update, 'local');
       this.seeded.add(doc);
+      await this._commit(toPath, doc);
       return { content: doc.getText('content').toString(), previousContent };
     });
   }
@@ -560,6 +700,14 @@ export class YjsDocManager {
       await this._enqueueForPath(newPath, async () => {
         if (this.pool.has(oldPath)) {
           this.pool.rename(oldPath, newPath);
+          const moved = this.pool.peek(newPath);
+          if (moved) this.docPaths.set(moved, newPath);
+        }
+        for (const texts of [this.diskContent, this.savedBase]) {
+          const text = texts.get(oldPath);
+          texts.delete(oldPath);
+          if (text !== undefined) texts.set(newPath, text);
+          else texts.delete(newPath);
         }
         this.evictedSeeded.delete(newPath);
         if (this.evictedSeeded.delete(oldPath)) this.evictedSeeded.add(newPath);
@@ -575,11 +723,15 @@ export class YjsDocManager {
     });
   }
 
-  /** Persist all active docs */
+  /** Save every loaded doc that has unsaved changes. */
   async persistAll(): Promise<void> {
-    const docs = this.pool.getAll();
-    for (const [path, doc] of docs) {
-      await this.persistence.saveDoc(path, doc);
+    for (const [path, doc] of this.pool.getAll()) {
+      if (this.unchanged.has(doc)) continue;
+      await this._enqueueForPath(path, async () => {
+        if (this.pool.peek(path) !== doc) return;
+        if (!this.unchanged.has(doc)) await this._save(path, doc);
+        this._sendHeldUpdates(doc);
+      });
     }
     await this.persistence.flushDigests();
   }
@@ -590,24 +742,46 @@ export class YjsDocManager {
   }
 
   async destroy(): Promise<void> {
-    await this.pool.destroyAll((path, doc) => this.persistence.saveDoc(path, doc));
+    await this.pool.destroyAll(async (path, doc) => {
+      if (!this.unchanged.has(doc)) await this._save(path, doc);
+    });
     await this.persistence.flushDigests();
     this.lastKnownContent.clear();
+    this.diskContent.clear();
+    this.savedBase.clear();
+    this.commitQueued.clear();
   }
 }
 
-/** See YjsDocManager.compareHistory. */
+/**
+ * See YjsDocManager.compareHistory. For unrelated histories `localWins`
+ * decides, when the caller knows which copy should be kept (the coordinator
+ * decides from both files' modification times, which both devices see).
+ * Without it the doc whose smallest client ID is lower wins: arbitrary, as
+ * client IDs are random, but the same on both sides.
+ */
 export function compareStateVectors(
   local: Map<number, number>,
   remote: Map<number, number>,
+  localWins?: boolean,
 ): 'related' | 'local-wins' | 'remote-wins' {
   if (local.size === 0 || remote.size === 0) return 'related';
   for (const client of local.keys()) {
     if (remote.has(client)) return 'related';
   }
+  if (localWins !== undefined) return localWins ? 'local-wins' : 'remote-wins';
   return Math.min(...local.keys()) < Math.min(...remote.keys())
     ? 'local-wins'
     : 'remote-wins';
+}
+
+/** How many characters differ between two texts. */
+function editSize(from: string, to: string): number {
+  let size = 0;
+  for (const [op, text] of diff(from, to)) {
+    if (op !== diff.EQUAL) size += text.length;
+  }
+  return size;
 }
 
 /** Transaction origin for updates received from a peer. */

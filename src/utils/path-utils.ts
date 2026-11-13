@@ -44,3 +44,23 @@ export function isSafeSyncPath(filePath: string): boolean {
   }
   return true;
 }
+
+/**
+ * Whether two paths differ only in letter case. On storage that does not
+ * tell such names apart (Android's shared storage, default macOS and iOS
+ * volumes) they name the same file.
+ */
+export function isCaseVariant(a: string, b: string): boolean {
+  return a !== b && a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * The characters in a path that Obsidian does not allow in file names (nor
+ * do the file systems of Windows and Android), quoted and comma-separated;
+ * empty when there are none. A file whose name holds one can be made outside
+ * Obsidian on a Mac or iPhone, but no other device can create it.
+ */
+export function unportableNameChars(filePath: string): string {
+  const found = new Set(filePath.match(/[*"<>:|?]/g) ?? []);
+  return [...found].map((c) => `"${c}"`).join(", ");
+}

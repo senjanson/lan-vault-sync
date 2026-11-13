@@ -47,4 +47,42 @@ describe('StatePersistence', () => {
     expect(adapter.files.has(legacy)).toBe(false);
     expect(await store.hasDoc('a.md')).toBe(true);
   });
+
+  it('tells which notes have a saved history from one listing of the folder', async () => {
+    const adapter = new MemoryAdapter() as MemoryAdapter & { list?: (p: string) => Promise<{ files: string[]; folders: string[] }> };
+    const dir = '.obsidian/plugins/lan-vault-sync/crdt-state';
+    const doc = new Y.Doc();
+    doc.getText('content').insert(0, 'x');
+    await new StatePersistence({} as any, adapter).saveDoc('old.md', doc);
+
+    let release = () => {};
+    const listed = new Promise<void>((resolve) => { release = resolve; });
+    let lookups = 0;
+    const exists = adapter.exists.bind(adapter);
+    adapter.exists = async (p: string) => (lookups++, exists(p));
+    adapter.list = async (p: string) => {
+      const files = [...adapter.files.keys()].filter((k) => k.startsWith(p + '/'));
+      await listed;
+      return { files, folders: [] };
+    };
+    const store = new StatePersistence({} as any, adapter);
+
+    // Saved and removed while the folder is being listed.
+    const asking = store.hasDoc('old.md');
+    const saving = store.saveDoc('new.md', doc);
+    const deleting = store.deleteDoc('old.md');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    await Promise.all([asking, saving, deleting]);
+    const before = lookups;
+    expect(await store.hasDoc('new.md')).toBe(true);
+    expect(await store.hasDoc('old.md')).toBe(false);
+    expect(await store.hasDoc('other.md')).toBe(false);
+    // Nothing was looked up file by file.
+    expect(lookups).toBe(before);
+    await store.renameDoc('new.md', 'moved.md');
+    expect(await store.hasDoc('moved.md')).toBe(true);
+    expect(await store.hasDoc('new.md')).toBe(false);
+    expect([...adapter.files.keys()].filter((k) => k.startsWith(dir)).length).toBe(1);
+  });
 });

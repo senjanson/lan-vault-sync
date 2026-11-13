@@ -1,7 +1,7 @@
 import { Vault } from "obsidian";
 import { CONFLICT_BACKUP_DIR } from "../constants";
 import { logger } from "../logger";
-import { ensureParentDirectory } from "../utils/path-utils";
+import { ensureDirectory, ensureParentDirectory, getParentDir } from "../utils/path-utils";
 
 type ConflictBackupKind = "text" | "binary";
 
@@ -14,6 +14,8 @@ export interface ConflictBackupResult {
 
 export class ConflictBackupService {
   private sequence = 0;
+  /** Whether CONFLICT_BACKUP_DIR is known to exist; see _makeFolders. */
+  private rootReady = false;
 
   constructor(private vault: Vault) {}
 
@@ -35,8 +37,7 @@ export class ConflictBackupService {
       const snapshot = this._buildSnapshotPaths(filePath);
       const metadata = this._buildMetadata(filePath, reason, "text", details);
 
-      await ensureParentDirectory(adapter, snapshot.contentPath);
-      await ensureParentDirectory(adapter, snapshot.metadataPath);
+      await this._makeFolders(adapter, snapshot);
       await adapter.write(snapshot.contentPath, content);
       await adapter.write(
         snapshot.metadataPath,
@@ -70,8 +71,7 @@ export class ConflictBackupService {
       const snapshot = this._buildSnapshotPaths(filePath);
       const metadata = this._buildMetadata(filePath, reason, "binary", details);
 
-      await ensureParentDirectory(adapter, snapshot.contentPath);
-      await ensureParentDirectory(adapter, snapshot.metadataPath);
+      await this._makeFolders(adapter, snapshot);
       await adapter.writeBinary(
         snapshot.contentPath,
         this._toArrayBuffer(content),
@@ -87,6 +87,33 @@ export class ConflictBackupService {
         err,
       );
       return null;
+    }
+  }
+
+  /**
+   * Create a new backup's folders. They are new (the backup id is unique),
+   * so they are made without looking each one up first: on a phone every
+   * lookup is a round trip to the file system, and a bulk delete from a
+   * peer backs up every file, which made such lookups most of its work.
+   */
+  private async _makeFolders(adapter: any, snapshot: ConflictBackupResult): Promise<void> {
+    try {
+      if (!this.rootReady) {
+        await ensureDirectory(adapter, CONFLICT_BACKUP_DIR);
+        this.rootReady = true;
+      }
+      const parent = getParentDir(snapshot.contentPath);
+      let dir = snapshot.backupDir;
+      await adapter.mkdir(dir);
+      for (const name of parent.slice(dir.length + 1).split("/")) {
+        dir = `${dir}/${name}`;
+        await adapter.mkdir(dir);
+      }
+    } catch (err) {
+      // E.g. the backup folder was removed meanwhile.
+      logger.debug("Creating backup folders one by one:", err);
+      this.rootReady = false;
+      await ensureParentDirectory(adapter, snapshot.contentPath);
     }
   }
 

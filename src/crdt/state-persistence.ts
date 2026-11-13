@@ -29,10 +29,62 @@ export async function docDigest(doc: Y.Doc): Promise<string | undefined> {
   return hash.slice(0, 32);
 }
 
+/**
+ * A state file normally holds just the doc's Yjs update. While the doc holds
+ * text that is not in the note's file yet, the file's text is saved in front
+ * of it, after this marker; see YjsDocManager.diskContent. A Yjs update
+ * cannot start with these bytes: they would be an absurd struct count.
+ */
+const BASE_MARKER = new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x4c, 0x56, 0x53, 0x02]);
+
+function encodeState(update: Uint8Array, base: string | undefined): Uint8Array {
+  if (base === undefined) return update;
+  const text = new TextEncoder().encode(base);
+  const out = new Uint8Array(BASE_MARKER.length + 4 + text.length + update.length);
+  out.set(BASE_MARKER, 0);
+  new DataView(out.buffer).setUint32(BASE_MARKER.length, text.length);
+  out.set(text, BASE_MARKER.length + 4);
+  out.set(update, BASE_MARKER.length + 4 + text.length);
+  return out;
+}
+
+function decodeState(bytes: Uint8Array): { update: Uint8Array; base?: string } {
+  if (bytes.length < BASE_MARKER.length + 4) return { update: bytes };
+  for (let i = 0; i < BASE_MARKER.length; i++) {
+    if (bytes[i] !== BASE_MARKER[i]) return { update: bytes };
+  }
+  const start = BASE_MARKER.length + 4;
+  const length = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(BASE_MARKER.length);
+  if (start + length > bytes.length) throw new Error('truncated CRDT state file');
+  return {
+    base: new TextDecoder().decode(bytes.subarray(start, start + length)),
+    update: bytes.subarray(start + length),
+  };
+}
+
 export class StatePersistence {
   private digests: Map<string, [string, string]> | null = null;
   private digestsLoading: Promise<Map<string, [string, string]>> | null = null;
   private digestsDirty = false;
+  /**
+   * State file names by path, and the paths known to have no file under
+   * their former name. A note is saved after every change, so a save must
+   * not hash its path and look for the former file each time.
+   */
+  private stateFiles = new Map<string, string>();
+  private noLegacyFile = new Set<string>();
+  private stateDirReady = false;
+  /**
+   * The state files on disk, listed once and then kept up to date here, so
+   * that finding out whether a note has a saved history needs no file system
+   * lookup: on a phone each lookup is a round trip, and notes arriving or
+   * deleted in bulk asked several times per note. Null until listed, or when
+   * the folder cannot be listed. Changes made before the listing is in are
+   * replayed on it.
+   */
+  private listedStates: Set<string> | null = null;
+  private listingStates: Promise<Set<string> | null> | null = null;
+  private stateChangesWhileListing: Array<[string, boolean]> | null = [];
 
   constructor(private vault: Vault, private adapter: any) {}
 
@@ -110,9 +162,21 @@ export class StatePersistence {
   }
 
   private async _stateFilePath(filePath: string): Promise<string> {
+    const known = this.stateFiles.get(filePath);
+    if (known) return known;
     const bytes = new TextEncoder().encode(filePath);
     const hash = await computeFileHash(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
-    return `${CRDT_STATE_DIR}/${hash}.ystate`;
+    const stateFile = `${CRDT_STATE_DIR}/${hash}.ystate`;
+    if (this.stateFiles.size >= 5000) this.stateFiles.clear();
+    this.stateFiles.set(filePath, stateFile);
+    return stateFile;
+  }
+
+  private async _removeLegacyFile(filePath: string): Promise<void> {
+    if (this.noLegacyFile.has(filePath)) return;
+    await this._removeIfExists(this._legacyStateFilePath(filePath));
+    if (this.noLegacyFile.size >= 5000) this.noLegacyFile.clear();
+    this.noLegacyFile.add(filePath);
   }
 
   private _legacyStateFilePath(filePath: string): string {
@@ -120,11 +184,53 @@ export class StatePersistence {
   }
 
   private async _exists(path: string): Promise<boolean> {
+    if (this._isStateFile(path)) {
+      const listed = await this._listStates();
+      if (listed) return listed.has(path);
+    }
     try {
       return await this.adapter.exists(path);
     } catch {
       return false; // e.g. a legacy name that is too long for the file system
     }
+  }
+
+  private _isStateFile(path: string): boolean {
+    return path.startsWith(`${CRDT_STATE_DIR}/`) && path.endsWith('.ystate');
+  }
+
+  private _listStates(): Promise<Set<string> | null> {
+    if (!this.listingStates) {
+      this.listingStates = (async () => {
+        let listed: Set<string> | null = null;
+        try {
+          if (typeof this.adapter.list === 'function') {
+            listed = (await this.adapter.exists(CRDT_STATE_DIR))
+              ? new Set<string>(((await this.adapter.list(CRDT_STATE_DIR))?.files ?? []).filter((f: string) => this._isStateFile(f)))
+              : new Set<string>();
+          }
+        } catch (err) {
+          logger.debug('Could not list CRDT states; looking each one up:', err);
+          listed = null;
+        }
+        if (listed) for (const [path, present] of this.stateChangesWhileListing ?? []) this._apply(listed, path, present);
+        this.stateChangesWhileListing = null;
+        this.listedStates = listed;
+        return listed;
+      })();
+    }
+    return this.listingStates;
+  }
+
+  /** Record that a state file was written (present) or removed. */
+  private _noteState(path: string, present: boolean): void {
+    if (this.listedStates) this._apply(this.listedStates, path, present);
+    else this.stateChangesWhileListing?.push([path, present]);
+  }
+
+  private _apply(listed: Set<string>, path: string, present: boolean): void {
+    if (present) listed.add(path);
+    else listed.delete(path);
   }
 
   /** The state file that currently holds this path's state, if any. */
@@ -145,38 +251,57 @@ export class StatePersistence {
     }
   }
 
-  async saveDoc(filePath: string, doc: Y.Doc): Promise<void> {
+  /**
+   * Save a doc's state; `base` is the text of the note's file when that
+   * differs from the doc's (see BASE_MARKER). Returns false if it failed.
+   */
+  async saveDoc(filePath: string, doc: Y.Doc, base?: string): Promise<boolean> {
     try {
-      const state = Y.encodeStateAsUpdate(doc);
+      const state = encodeState(Y.encodeStateAsUpdate(doc), base);
       const stateFile = await this._stateFilePath(filePath);
-      await ensureParentDirectory(this.adapter, stateFile);
+      if (!this.stateDirReady) {
+        await ensureParentDirectory(this.adapter, stateFile);
+        this.stateDirReady = true;
+      }
 
       await this.adapter.writeBinary(stateFile, state.buffer.slice(state.byteOffset, state.byteOffset + state.byteLength));
-      await this._removeIfExists(this._legacyStateFilePath(filePath));
+      this._noteState(stateFile, true);
+      await this._removeLegacyFile(filePath);
       const digest = await docDigest(doc);
       await this._setDigest(filePath, digest ? [stateFile, digest] : null);
+      return true;
     } catch (err) {
+      this.stateDirReady = false;
       logger.error(`Failed to save CRDT state for ${filePath}:`, err);
+      return false;
     }
   }
 
   async loadDoc(filePath: string, doc: Y.Doc): Promise<boolean> {
+    return (await this.loadState(filePath, doc)) !== null;
+  }
+
+  /**
+   * Load a doc's saved state, if it has one. `base` is the text the note's
+   * file held when the state was saved, if it was not the doc's text.
+   */
+  async loadState(filePath: string, doc: Y.Doc): Promise<{ base?: string } | null> {
     try {
       const stateFile = await this._existingStateFile(filePath);
       if (stateFile) {
         const buffer: ArrayBuffer = await this.adapter.readBinary(stateFile);
-        const update = new Uint8Array(buffer);
+        const { update, base } = decodeState(new Uint8Array(buffer));
         Y.applyUpdate(doc, update);
         if (stateFile === (await this._stateFilePath(filePath))) {
           const digest = await docDigest(doc);
           await this._setDigest(filePath, digest ? [stateFile, digest] : null);
         }
-        return true;
+        return { base };
       }
     } catch (err) {
       logger.error(`Failed to load CRDT state for ${filePath}:`, err);
     }
-    return false;
+    return null;
   }
 
   async deleteDoc(filePath: string): Promise<void> {
@@ -208,11 +333,13 @@ export class StatePersistence {
 
       if (typeof this.adapter.rename === 'function') {
         await this.adapter.rename(oldStateFile, newStateFile);
+        this._noteState(oldStateFile, false);
       } else {
         const buffer: ArrayBuffer = await this.adapter.readBinary(oldStateFile);
         await this.adapter.writeBinary(newStateFile, buffer);
         await this._removeIfExists(oldStateFile);
       }
+      this._noteState(newStateFile, true);
       if (moved && moved[0] === oldStateFile) await this._setDigest(newPath, [newStateFile, moved[1]]);
     } catch (err) {
       logger.error(`Failed to rename CRDT state from ${oldPath} to ${newPath}:`, err);
@@ -223,6 +350,7 @@ export class StatePersistence {
     if (typeof this.adapter.remove !== 'function') return;
     if (await this._exists(path)) {
       await this.adapter.remove(path);
+      this._noteState(path, false);
     }
   }
 }

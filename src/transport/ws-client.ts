@@ -13,11 +13,25 @@ import {
   toUint8Array,
 } from "./socket";
 
+/**
+ * Wait before calling again a device that took the connection but did not
+ * pair: another vault, another sync key or an incompatible version. It will
+ * refuse again until someone changes something there, so retrying every few
+ * seconds only floods both devices' logs. Short enough that a key fixed on
+ * the other device takes effect without restarting sync here.
+ */
+export const REFUSED_RETRY_MS = 2 * 60_000;
+
 export class WSClient {
   private ws: SocketLike | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = RECONNECT_BASE_MS;
   private intentionallyClosed = false;
+  /** Whether the current socket reached the device, and whether it paired. */
+  private opened = false;
+  private paired = false;
+  /** Attempts in a row that did not reach the device at all. */
+  failures = 0;
 
   private onOpenCb: ((ws: SocketLike) => void) | null = null;
   private onMessageCb: ((data: Uint8Array) => void) | null = null;
@@ -53,10 +67,16 @@ export class WSClient {
         throw new Error("No WebSocket implementation available");
       }
       setSocketBinaryType(this.ws);
+      this.opened = false;
+      this.paired = false;
 
+      // The backoff is reset in markPaired, not here: a device that takes
+      // the connection and then refuses the pairing would otherwise be
+      // called again every second for good.
       addSocketOpenListener(this.ws, () => {
         logger.info(`Connected to ${this.url}`);
-        this.reconnectDelay = RECONNECT_BASE_MS;
+        this.opened = true;
+        this.failures = 0;
         this.onOpenCb?.(this.ws!);
       });
 
@@ -66,6 +86,8 @@ export class WSClient {
 
       addSocketCloseListener(this.ws, () => {
         logger.info(`Connection closed: ${this.url}`);
+        if (!this.opened) this.failures++;
+        else if (!this.paired) this.reconnectDelay = REFUSED_RETRY_MS;
         this.onCloseCb?.();
         this._scheduleReconnect();
       });
@@ -77,6 +99,7 @@ export class WSClient {
       });
     } catch (err) {
       logger.error(`Failed to connect to ${this.url}:`, err);
+      this.failures++;
       this._scheduleReconnect();
     }
   }
@@ -91,7 +114,16 @@ export class WSClient {
       this._doConnect();
     }, this.reconnectDelay);
 
-    this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
+    // A refused device keeps its longer wait.
+    if (this.reconnectDelay < RECONNECT_MAX_MS) {
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
+    }
+  }
+
+  /** The device on the current socket passed the pairing check. */
+  markPaired(): void {
+    this.paired = true;
+    this.reconnectDelay = RECONNECT_BASE_MS;
   }
 
   /**

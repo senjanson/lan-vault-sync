@@ -9,6 +9,12 @@ vi.mock('../src/sync-log/sync-log-service', () => ({
 }));
 vi.mock('../src/conflict/conflict-backup-service', () => ({ ConflictBackupService: class {} }));
 
+const { notices } = vi.hoisted(() => ({ notices: [] as string[] }));
+vi.mock('obsidian', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  Notice: class { constructor(message: string) { notices.push(message); } },
+}));
+
 import LANSyncPlugin from '../src/main';
 
 (globalThis as any).document ??= { visibilityState: 'visible' };
@@ -18,13 +24,14 @@ function createPlugin(layoutReady: Array<() => void> | null = null): LANSyncPlug
   const plugin = new (LANSyncPlugin as any)() as LANSyncPlugin;
   const onLayoutReady = (cb: () => void) => (layoutReady ? layoutReady.push(cb) : cb());
   Object.assign(plugin as any, {
-    app: { vault: {}, workspace: { onLayoutReady } },
+    app: { vault: {}, workspace: { onLayoutReady, on: () => ({}) } },
     loadData: async () => ({}),
     saveData: async () => undefined,
     registerView: () => undefined,
     addSettingTab: () => undefined,
     addCommand: () => undefined,
     registerObsidianProtocolHandler: () => undefined,
+    registerEvent: () => undefined,
     domEvents: [] as Array<[unknown, string, () => void]>,
     registerDomEvent(target: unknown, type: string, cb: () => void) {
       (this as any).domEvents.push([target, type, cb]);
@@ -109,5 +116,46 @@ describe('settings changes', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('sync status', () => {
+  const device = (name: string) => ({ deviceId: name, deviceName: name, ip: '10.0.0.2', port: 50000, vaultId: 'v', lastSeen: 0 });
+
+  it('reads the state and the connected devices from the running sync', () => {
+    const plugin = createPlugin() as any;
+    expect(plugin.getSyncStatus()).toEqual({ state: 'idle', devices: [], unreachable: [] });
+    plugin.coordinator = {
+      getState: () => 'watching',
+      getConnectedPeers: () => [device('mac'), device('iphone'), device('pixel')],
+      getUnreachablePeers: () => [],
+    };
+    const status = plugin.getSyncStatus();
+    expect(status.state).toBe('watching');
+    expect(status.devices.map((d: { deviceName: string }) => d.deviceName)).toEqual(['mac', 'iphone', 'pixel']);
+  });
+
+  it('tells once per stretch of failures that a device cannot be reached', () => {
+    const plugin = createPlugin() as any;
+    let unreachable: string[] = [];
+    const shown: string[][] = [];
+    plugin.statusBar = { update: (_s: string, _n: number, u: string[]) => shown.push(u) };
+    plugin.coordinator = { getState: () => 'watching', getConnectedPeers: () => [], getUnreachablePeers: () => unreachable };
+    notices.length = 0;
+
+    unreachable = ['192.168.1.5:50000'];
+    plugin.showStatus();
+    plugin.showStatus();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('192.168.1.5:50000');
+    expect(shown[shown.length - 1]).toEqual(['192.168.1.5:50000']);
+
+    // It connected, then failed again: a new stretch.
+    unreachable = [];
+    plugin.showStatus();
+    expect(shown[shown.length - 1]).toEqual([]);
+    unreachable = ['192.168.1.5:50000'];
+    plugin.showStatus();
+    expect(notices).toHaveLength(2);
   });
 });

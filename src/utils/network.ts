@@ -31,3 +31,62 @@ export function getLocalIPv4Addresses(): string[] {
     return [];
   }
 }
+
+/**
+ * The broadcast address of each IPv4 network this device is on, e.g.
+ * 192.168.1.255. Empty where Node's os module is missing (mobile).
+ */
+export function getIPv4BroadcastAddresses(): string[] {
+  try {
+    const require = getDynamicRequire();
+    if (!require) {
+      return [];
+    }
+
+    const os = require('os') as {
+      networkInterfaces(): Record<string, Array<{
+        family: string | number;
+        internal: boolean;
+        address: string;
+        netmask: string;
+      }> | undefined>;
+    };
+    const addresses = new Set<string>();
+    for (const list of Object.values(os.networkInterfaces())) {
+      for (const iface of list ?? []) {
+        // Node 18.0 to 18.3 report the family as a number.
+        if ((iface.family !== 'IPv4' && iface.family !== 4) || iface.internal) continue;
+        const broadcast = subnetBroadcastAddress(iface.address, iface.netmask);
+        if (broadcast) addresses.add(broadcast);
+      }
+    }
+    return Array.from(addresses);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The broadcast address of the network `address` is on. Null for a network
+ * of one or two hosts (a VPN tunnel, for example), which has none.
+ */
+export function subnetBroadcastAddress(address: string, netmask: string): string | null {
+  const ip = ipv4ToNumber(address);
+  const mask = ipv4ToNumber(netmask);
+  if (ip === null || mask === null) return null;
+  const hostBits = ~mask >>> 0;
+  if (hostBits <= 1) return null;
+  const broadcast = (ip | hostBits) >>> 0;
+  return [24, 16, 8, 0].map((shift) => (broadcast >>> shift) & 255).join('.');
+}
+
+function ipv4ToNumber(text: string): number | null {
+  const parts = text.split('.');
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part) || Number(part) > 255) return null;
+    value = value * 256 + Number(part);
+  }
+  return value;
+}

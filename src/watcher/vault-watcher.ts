@@ -26,7 +26,7 @@ export class VaultWatcher {
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingModifyEvents = new Map<
     string,
-    Pick<FileChangeEvent, "oldPath" | "content" | "source">
+    Pick<FileChangeEvent, "oldPath" | "content" | "source" | "savedToDisk">
   >();
 
   constructor(
@@ -80,9 +80,10 @@ export class VaultWatcher {
 
   /**
    * Like consumePendingModify, but also returns the pending event's editor
-   * content (when the change came from the editor and may not be saved yet).
+   * content (when the change came from the editor and may not be saved yet),
+   * and whether the file was saved to disk meanwhile.
    */
-  takePendingModify(filePath: string): { content?: string } | null {
+  takePendingModify(filePath: string): { content?: string; savedToDisk?: boolean } | null {
     const timer = this.debounceTimers.get(filePath);
     if (!timer) return null;
 
@@ -90,7 +91,7 @@ export class VaultWatcher {
     this.debounceTimers.delete(filePath);
     const pending = this.pendingModifyEvents.get(filePath);
     this.pendingModifyEvents.delete(filePath);
-    return { content: pending?.content };
+    return { content: pending?.content, savedToDisk: pending?.savedToDisk };
   }
 
   start(): void {
@@ -160,15 +161,30 @@ export class VaultWatcher {
     const isTextModify = type === "modify" && this.filter.isTextFile(path);
     if (!isTextModify && this._isRemoteWrite(path, type)) {
       logger.debug(`Skipping remote write event: ${path}`);
+      // An edit still waiting under the old name now belongs to the new one.
+      if (type === "rename" && oldPath) this._movePendingModify(oldPath, path);
       return;
     }
 
     // Debounce modify events
     if (type === "modify") {
       this._queueModify(path, oldPath);
+    } else if (type === "rename" && oldPath) {
+      // An edit made just before the rename (a template or script often
+      // does both at once) is still waiting under the old name, where the
+      // file no longer is. It goes with the rename, so it is applied before
+      // the rename is sent.
+      const pending = this.takePendingModify(oldPath);
+      this._emit(type, path, oldPath, pending?.content, "vault", pending?.savedToDisk, pending !== null);
     } else {
       this._emit(type, path, oldPath);
     }
+  }
+
+  private _movePendingModify(oldPath: string, newPath: string): void {
+    const pending = this.takePendingModify(oldPath);
+    if (!pending) return;
+    this._queueModify(newPath, undefined, pending.content, typeof pending.content === "string" ? "editor" : "vault");
   }
 
   private _onEditorChange(
@@ -202,6 +218,7 @@ export class VaultWatcher {
       oldPath: oldPath ?? pending?.oldPath,
       content: nextContent,
       source: nextSource,
+      savedToDisk: typeof content !== "string" || pending?.savedToDisk,
     });
 
     this.debounceTimers.set(
@@ -216,6 +233,7 @@ export class VaultWatcher {
           event?.oldPath,
           event?.content,
           event?.source ?? source,
+          event?.savedToDisk,
         );
       }, DEBOUNCE_MS),
     );
@@ -242,6 +260,8 @@ export class VaultWatcher {
     oldPath?: string,
     content?: string,
     source: FileChangeEvent["source"] = "vault",
+    savedToDisk?: boolean,
+    editedBeforeRename?: boolean,
   ): void {
     const event: FileChangeEvent = {
       type,
@@ -249,6 +269,9 @@ export class VaultWatcher {
       oldPath,
       content,
       source,
+      // Only tells something for a change taken from an editor.
+      savedToDisk: typeof content === "string" ? savedToDisk : undefined,
+      ...(editedBeforeRename ? { editedBeforeRename } : {}),
       isTextFile:
         type === "rename" && oldPath
           ? this.filter.isTextFile(path) || this.filter.isTextFile(oldPath)

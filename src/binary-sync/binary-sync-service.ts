@@ -20,13 +20,14 @@ import {
   MessageType,
 } from "../types";
 import { computeFileHash } from "./file-hash";
+import { isPlainUtf8 } from "../utils/utf8";
 import { logger } from "../logger";
 import {
   CHUNK_SIZE,
   CHUNKED_FILE_THRESHOLD,
   MAX_SYNC_FILE_SIZE,
 } from "../constants";
-import { ensureParentDirectory, isSafeSyncPath } from "../utils/path-utils";
+import { ensureParentDirectory, isCaseVariant, isSafeSyncPath } from "../utils/path-utils";
 
 interface IncomingFile {
   path: string;
@@ -42,10 +43,12 @@ export class BinaryFileSyncService {
   private holdsOtherContentCb:
     | ((path: string, hash: string) => Promise<boolean>)
     | null = null;
-  private onRemoteFileStoredCb: ((path: string, hash: string) => void) | null =
-    null;
+  private canCreateCb: ((path: string) => Promise<boolean>) | null = null;
+  private onRemoteFileStoredCb:
+    | ((path: string, hash: string, content: Uint8Array, fromDeviceId?: string) => void | Promise<void>)
+    | null = null;
   private onRemoteFileWrittenCb:
-    | ((path: string, kind?: "write" | "delete" | "rename") => void)
+    | ((path: string, kind?: "write" | "delete" | "rename", content?: Uint8Array) => void)
     | null = null;
   private onRemoteFileDeletedCb:
     | ((path: string, movedTo?: string, record?: Tombstone) => Promise<void> | void)
@@ -79,12 +82,21 @@ export class BinaryFileSyncService {
     this.holdsOtherContentCb = cb;
   }
 
-  onRemoteFileStored(cb: (path: string, hash: string) => void): void {
+  /** Tells whether a peer's new file may be created at this path here. */
+  setCanCreate(cb: (path: string) => Promise<boolean>): void {
+    this.canCreateCb = cb;
+  }
+
+  /** Called once a peer's file is in place here, with its bytes. */
+  onRemoteFileStored(
+    cb: (path: string, hash: string, content: Uint8Array, fromDeviceId?: string) => void | Promise<void>,
+  ): void {
     this.onRemoteFileStoredCb = cb;
   }
 
+  /** Called before a peer's change is made to a file; `content` for writes. */
   onRemoteFileWritten(
-    cb: (path: string, kind?: "write" | "delete" | "rename") => void,
+    cb: (path: string, kind?: "write" | "delete" | "rename", content?: Uint8Array) => void,
   ): void {
     this.onRemoteFileWrittenCb = cb;
   }
@@ -121,7 +133,7 @@ export class BinaryFileSyncService {
       case MessageType.FILE_DATA: {
         const data = decodeFileData(payload);
         if (!this.isAllowedPath(data.path)) break;
-        await this._receiveFile(data.path, data.content, data.mtime);
+        await this._receiveFile(data.path, data.content, data.mtime, deviceId);
         break;
       }
       case MessageType.FILE_CHUNK: {
@@ -138,7 +150,12 @@ export class BinaryFileSyncService {
           if (!(file instanceof TFile)) break;
           if ((await computeFileHash(await this.vault.readBinary(file))) !== del.hash) break;
         }
-        await this._deleteFile(del.path, del.hash, del.movedTo);
+        // The deleting device's time is kept as the deletion's own (see
+        // TombstoneStore.revive).
+        const record = !del.movedTo && typeof del.deletedAt === "number"
+          ? { path: del.path, deletedAt: del.deletedAt }
+          : undefined;
+        await this._deleteFile(del.path, del.hash, del.movedTo, record);
         break;
       }
       case MessageType.FILE_RENAME: {
@@ -162,9 +179,9 @@ export class BinaryFileSyncService {
     }
   }
 
-  /** Send a file deletion to all peers */
-  broadcastFileDelete(path: string): void {
-    const msg = encodeFileDelete({ path });
+  /** Send a file deletion to all peers, with when it was made. */
+  broadcastFileDelete(path: string, deletedAt?: number): void {
+    const msg = encodeFileDelete(deletedAt === undefined ? { path } : { path, deletedAt });
     this.connectionManager.broadcast(msg);
   }
 
@@ -289,7 +306,7 @@ export class BinaryFileSyncService {
     entry.received += content.byteLength;
     if (entry.received === totalSize) {
       this.incoming.delete(key);
-      await this._receiveFile(entry.path, entry.data, entry.mtime);
+      await this._receiveFile(entry.path, entry.data, entry.mtime, deviceId);
     }
   }
 
@@ -297,52 +314,57 @@ export class BinaryFileSyncService {
     path: string,
     content: Uint8Array,
     _mtime: number,
+    fromDeviceId?: string,
   ): Promise<void> {
     try {
       const existing = this.vault.getAbstractFileByPath(path);
-      // Text files only come this way when they are new and empty (an empty
-      // note has no CRDT content to send). An existing note's content is
-      // synced through its CRDT document, never overwritten here.
-      if (existing instanceof TFile && this.isTextPath(path)) return;
-      // A peer that has not yet seen our deletion may still send the file
-      // as it was when we deleted it; that must not bring it back.
-      if (
-        !existing &&
-        this.isDeletedCb?.(path, await computeFileHash(toExactArrayBuffer(content)))
-      ) {
+      const currentContent = existing instanceof TFile
+        ? new Uint8Array(await this.vault.readBinary(existing))
+        : null;
+      // Text files come this way when they are new and empty (an empty note
+      // has no CRDT content to send), or when either copy is not plain UTF-8
+      // (see isPlainUtf8). Otherwise an existing note's content is synced
+      // through its CRDT document, never overwritten here.
+      if (currentContent && this.isTextPath(path) && isPlainUtf8(content) && isPlainUtf8(currentContent)) return;
+      const hash = await computeFileHash(toExactArrayBuffer(content));
+      // Already here as it is: rewriting it would only change its mtime,
+      // and a file sent as bytes would be sent back by its modify event.
+      if (currentContent && this._isSameBinary(currentContent, content)) {
+        await this.onRemoteFileStoredCb?.(path, hash, content, fromDeviceId);
         return;
       }
+      // A peer that has not yet seen our deletion may still send the file
+      // as it was when we deleted it; that must not bring it back.
+      if (!existing && this.isDeletedCb?.(path, hash)) {
+        return;
+      }
+      if (!existing && this.canCreateCb && !(await this.canCreateCb(path))) return;
       // Mark remote write BEFORE modifying vault to prevent echo-back
-      this.onRemoteFileWrittenCb?.(path);
-      if (existing instanceof TFile) {
-        const currentContent = new Uint8Array(
-          await this.vault.readBinary(existing),
+      this.onRemoteFileWrittenCb?.(path, "write", content);
+      if (existing instanceof TFile && currentContent) {
+        const backup = await this.backupService.backupBinaryFile(
+          path,
+          currentContent,
+          "remote-file-overwrite",
+          {
+            incomingSize: content.byteLength,
+            existingSize: currentContent.byteLength,
+          },
         );
-        if (!this._isSameBinary(currentContent, content)) {
-          const backup = await this.backupService.backupBinaryFile(
-            path,
-            currentContent,
-            "remote-file-overwrite",
-            {
-              incomingSize: content.byteLength,
-              existingSize: currentContent.byteLength,
-            },
+        if (!backup) {
+          logger.error(
+            `Aborting remote overwrite for ${path}: conflict backup unavailable`,
           );
-          if (!backup) {
-            logger.error(
-              `Aborting remote overwrite for ${path}: conflict backup unavailable`,
-            );
-            return;
-          }
-          logger.warn(
-            `Backed up file before remote overwrite: ${path} -> ${backup.contentPath}`,
-          );
-          this.onBackupCreatedCb?.(
-            path,
-            backup.backupId,
-            "remote-file-overwrite",
-          );
+          return;
         }
+        logger.warn(
+          `Backed up file before remote overwrite: ${path} -> ${backup.contentPath}`,
+        );
+        this.onBackupCreatedCb?.(
+          path,
+          backup.backupId,
+          "remote-file-overwrite",
+        );
         await this.vault.modifyBinary(existing, toExactArrayBuffer(content));
       } else {
         const adapter = (this.vault as any).adapter;
@@ -351,7 +373,7 @@ export class BinaryFileSyncService {
         }
         await this.vault.createBinary(path, toExactArrayBuffer(content));
       }
-      this.onRemoteFileStoredCb?.(path, await computeFileHash(toExactArrayBuffer(content)));
+      await this.onRemoteFileStoredCb?.(path, hash, content, fromDeviceId);
       logger.debug(`Received binary file: ${path}`);
     } catch (err) {
       logger.error(`Failed to write binary file ${path}:`, err);
@@ -373,6 +395,13 @@ export class BinaryFileSyncService {
    * deleted: the file may change while it is backed up.
    */
   private async _deleteFile(path: string, hash?: string, movedTo?: string, record?: Tombstone): Promise<void> {
+    // Renamed to another case of its own name: where the storage does not
+    // tell the two apart, deleting the old name would delete the renamed
+    // file itself. The rename is followed instead.
+    if (movedTo && isCaseVariant(path, movedTo)) {
+      if (!this.vault.getAbstractFileByPath(movedTo)) await this._renameFile(path, movedTo);
+      return;
+    }
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
       if (file instanceof TFile) {
@@ -471,9 +500,44 @@ export class BinaryFileSyncService {
     if (adapter) {
       await ensureParentDirectory(adapter, newPath);
     }
-    await this.vault.rename(file, newPath);
+    if (!(file instanceof TFile)) await this.vault.rename(file, newPath);
+    else await this.renameInVault(file, newPath);
     await this.onRemoteFileRenamedCb?.(oldPath, newPath);
     logger.debug(`Renamed file: ${oldPath} → ${newPath}`);
+  }
+
+  /**
+   * Rename a file for a peer. A rename that only changes the case of the
+   * name fails where the storage does not tell such names apart (Android):
+   * the new name counts as taken, by the file itself. It is then done in two
+   * steps, through a temporary name.
+   */
+  async renameInVault(file: TFile, newPath: string): Promise<void> {
+    const oldPath = file.path;
+    if (!isCaseVariant(oldPath, newPath)) {
+      await this.vault.rename(file, newPath);
+      return;
+    }
+    try {
+      await this.vault.rename(file, newPath);
+      return;
+    } catch (err) {
+      if (file.path !== oldPath) throw err;
+      logger.debug(`Renaming ${oldPath} -> ${newPath} through a temporary name:`, err);
+    }
+    const slash = newPath.lastIndexOf("/");
+    const dot = newPath.lastIndexOf(".");
+    const extAt = dot > slash ? dot : newPath.length;
+    const temp = `${newPath.slice(0, extAt)}.lvs-rename-${Date.now().toString(36)}${newPath.slice(extAt)}`;
+    this.onRemoteFileWrittenCb?.(temp, "rename");
+    await this.vault.rename(file, temp);
+    try {
+      await this.vault.rename(file, newPath);
+    } catch (err) {
+      this.onRemoteFileWrittenCb?.(oldPath, "rename");
+      await this.vault.rename(file, oldPath).catch(() => undefined);
+      throw err;
+    }
   }
 
   private _isSameBinary(left: Uint8Array, right: Uint8Array): boolean {

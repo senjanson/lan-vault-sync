@@ -2,6 +2,10 @@ import { DeviceInfo } from '../types';
 import { DISCOVERY_PORT, DISCOVERY_INTERVAL_MS } from '../constants';
 import { logger } from '../logger';
 import { getDynamicRequire } from '../utils/runtime';
+import { getIPv4BroadcastAddresses } from '../utils/network';
+
+/** Reaches every network, but leaves through one interface only; see broadcast. */
+const LIMITED_BROADCAST = '255.255.255.255';
 
 export class UdpBroadcast {
   private socket: {
@@ -20,6 +24,8 @@ export class UdpBroadcast {
   } | null = null;
   private broadcastTimer: ReturnType<typeof setInterval> | null = null;
   private onDeviceSeenCb: ((device: DeviceInfo) => void) | null = null;
+  /** Addresses whose last send failed, so a failure is logged once. */
+  private failing = new Set<string>();
 
   constructor(private localDevice: DeviceInfo) {}
 
@@ -99,12 +105,32 @@ export class UdpBroadcast {
     const broadcast = () => {
       if (!this.socket) return;
       const msg = new TextEncoder().encode(JSON.stringify(this.localDevice));
-      this.socket.send(msg, 0, msg.length, DISCOVERY_PORT, '255.255.255.255', (err) => {
-        if (err) logger.debug('Broadcast send error:', err.message);
-      });
+      // The limited broadcast leaves through the interface of the default
+      // route only, and fails (EHOSTUNREACH on macOS) while that route is
+      // missing or points elsewhere, e.g. at a VPN. Each network's own
+      // broadcast address reaches its devices regardless. Interfaces are
+      // read every time: Wi-Fi may change networks while sync runs.
+      const addresses = new Set([LIMITED_BROADCAST, ...getIPv4BroadcastAddresses()]);
+      for (const address of addresses) {
+        this.socket.send(msg, 0, msg.length, DISCOVERY_PORT, address, (err) => this._logSend(address, err));
+      }
     };
 
     broadcast();
     this.broadcastTimer = setInterval(broadcast, DISCOVERY_INTERVAL_MS);
+  }
+
+  /**
+   * Log a failing address once until it works again. Sends repeat every few
+   * seconds, and a failure that lasts would otherwise fill the log.
+   */
+  private _logSend(address: string, err: Error | null): void {
+    if (err) {
+      if (this.failing.has(address)) return;
+      this.failing.add(address);
+      logger.warn(`Discovery broadcast to ${address} failed: ${err.message}. Still trying.`);
+    } else if (this.failing.delete(address)) {
+      logger.info(`Discovery broadcast to ${address} works again`);
+    }
   }
 }

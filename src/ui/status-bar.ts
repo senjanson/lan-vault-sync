@@ -10,7 +10,8 @@ export class StatusBar {
     this.update('idle');
   }
 
-  update(state: SyncState, peerCount = 0): void {
+  /** `unreachable`: addresses added by hand that keep failing to connect. */
+  update(state: SyncState, peerCount = 0, unreachable: string[] = []): void {
     this.el.empty();
 
     const icon = this.el.createSpan({ cls: 'lan-sync-status-icon' });
@@ -41,6 +42,18 @@ export class StatusBar {
         icon.setText('⚠️');
         text.setText('LAN Sync: Error');
         break;
+    }
+
+    // Retries run quietly in the background, so without this a device that
+    // cannot be reached (a phone without local network permission, say)
+    // looks like one that simply has no peers.
+    if (state !== 'idle' && unreachable.length > 0) {
+      icon.setText('⚠️');
+      const what = unreachable.length === 1 ? unreachable[0] : `${unreachable.length} devices`;
+      text.setText(`${text.textContent} · can't reach ${what}`);
+      this.el.setAttribute('aria-label', `Cannot reach ${unreachable.join(', ')}. Retrying in the background.`);
+    } else {
+      this.el.removeAttribute('aria-label');
     }
   }
 }

@@ -2,14 +2,18 @@ import { Vault, TFile } from 'obsidian';
 import { FileMeta } from '../types';
 import { FileFilter } from '../watcher/file-filter';
 import { computeFileHash } from '../binary-sync/file-hash';
+import { isPlainUtf8 } from '../utils/utf8';
 
 export interface FileTreeSnapshot {
   files: Map<string, FileMeta>;
   timestamp: number;
 }
 
-/** Hashes from earlier builds, reused while a file's size and mtime stay the same. */
-export type FileHashCache = Map<string, { mtime: number; size: number; hash: string }>;
+/**
+ * Hashes from earlier builds, reused while a file's size and mtime stay the
+ * same; for text files also whether they are plain UTF-8 (see isPlainUtf8).
+ */
+export type FileHashCache = Map<string, { mtime: number; size: number; hash: string; plain?: boolean }>;
 
 export async function buildFileTree(
   vault: Vault,
@@ -22,21 +26,24 @@ export async function buildFileTree(
   for (const file of allFiles) {
     if (filter.shouldIgnore(file.path)) continue;
 
-    const isText = filter.isTextFile(file.path);
+    let isText = filter.isTextFile(file.path);
     let hash = '';
     const cached = cache?.get(file.path);
 
-    if (cached && cached.mtime === file.stat.mtime && cached.size === file.stat.size) {
+    if (cached && cached.mtime === file.stat.mtime && cached.size === file.stat.size && (!isText || cached.plain !== undefined)) {
       hash = cached.hash;
+      if (isText) isText = cached.plain === true;
     } else {
       try {
         const data = await vault.readBinary(file);
         hash = await computeFileHash(data);
+        // Synced as bytes, like an attachment, when it is not plain UTF-8.
+        if (isText) isText = isPlainUtf8(new Uint8Array(data));
       } catch {
         // File may have been deleted between listing and reading
         continue;
       }
-      cache?.set(file.path, { mtime: file.stat.mtime, size: file.stat.size, hash });
+      cache?.set(file.path, { mtime: file.stat.mtime, size: file.stat.size, hash, plain: filter.isTextFile(file.path) ? isText : undefined });
     }
 
     files.set(file.path, {

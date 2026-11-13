@@ -119,7 +119,7 @@ describe('SyncCoordinator text conflict safety', () => {
       source: 'editor',
     });
 
-    expect(applyLocalChange).toHaveBeenCalledWith('note.md', 'edited on iphone');
+    expect(applyLocalChange).toHaveBeenCalledWith('note.md', 'edited on iphone', false);
     expect(cachedRead).not.toHaveBeenCalled();
   });
 
@@ -150,7 +150,7 @@ describe('SyncCoordinator text conflict safety', () => {
       'server previous',
     );
 
-    expect(applyLocalChange).toHaveBeenCalledWith('note.md', 'local pending');
+    expect(applyLocalChange).toHaveBeenCalledWith('note.md', 'local pending', true);
     expect(getContent).toHaveBeenCalledWith('note.md');
     expect(backupTextFile).toHaveBeenCalledWith(
       'note.md',
@@ -454,7 +454,7 @@ describe('SyncCoordinator text conflict safety', () => {
     await createTask;
     await renameTask;
 
-    expect(applyLocalChange).toHaveBeenCalledWith('Untitled.md', '# title');
+    expect(applyLocalChange).toHaveBeenCalledWith('Untitled.md', '# title', true);
     expect(renameDoc).toHaveBeenCalledWith('Untitled.md', 'note-a.md');
     expect(broadcastFileRename).toHaveBeenCalledWith('Untitled.md', 'note-a.md');
     expect(applyLocalChange.mock.invocationCallOrder[0]).toBeLessThan(

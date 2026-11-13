@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as Y from 'yjs';
 
-import { YjsDocManager } from '../../src/crdt/yjs-doc-manager';
+import { compareStateVectors, YjsDocManager } from '../../src/crdt/yjs-doc-manager';
 
 function createManager(): YjsDocManager {
   const vault = {
@@ -90,6 +90,35 @@ describe('YjsDocManager forwarding peer updates', () => {
     await manager.applyRemoteUpdate('n.md', update, 'peer-b');
 
     expect(forwarded).toEqual([['n.md', 'peer-a']]);
+  });
+});
+
+describe('YjsDocManager renamed notes', () => {
+  it('reports a renamed note\'s later edits under its new name', async () => {
+    const manager = createManager();
+    const sent: string[] = [];
+    manager.onLocalUpdate((path) => sent.push(path));
+    await manager.applyLocalChange('old.md', 'one\n');
+    await manager.renameDoc('old.md', 'new.md');
+    await manager.applyLocalChange('new.md', 'one\ntwo\n');
+    expect(sent).toEqual(['old.md', 'new.md']);
+  });
+});
+
+describe('compareStateVectors', () => {
+  const a = new Map([[5, 3]]);
+  const b = new Map([[9, 2]]);
+
+  it('lets the caller pick the winner of two unrelated histories', () => {
+    expect(compareStateVectors(a, b, false)).toBe('remote-wins');
+    expect(compareStateVectors(b, a, true)).toBe('local-wins');
+    // Without a choice, the smallest client ID decides, the same on both sides.
+    expect(compareStateVectors(a, b)).toBe('local-wins');
+    expect(compareStateVectors(b, a)).toBe('remote-wins');
+  });
+
+  it('still merges related histories whatever the caller picked', () => {
+    expect(compareStateVectors(new Map([[5, 3], [9, 1]]), b, true)).toBe('related');
   });
 });
 
