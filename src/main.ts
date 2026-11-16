@@ -436,7 +436,7 @@ export default class LANSyncPlugin extends Plugin {
         // every connection failed at once.
         (canUseNodeRuntime()
           ? ""
-          : " If that device is on and on the same network, check that Obsidian is allowed to use the local network (iPhone: Settings → Obsidian → Local Network)."),
+          : " If that device is on and on the same network, check that Obsidian is allowed to use the local network (iPhone: Settings → Privacy & Security → Local Network)."),
       15000,
     );
   }

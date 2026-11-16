@@ -70,7 +70,7 @@ export class SyncView extends ItemView {
     }
     if (unreachable.length > 0 && !canUseNodeRuntime()) {
       statusSection.createEl('p', {
-        text: 'If that device is on and on the same network, check that Obsidian is allowed to use the local network (iPhone: Settings → Obsidian → Local Network).',
+        text: 'If that device is on and on the same network, check that Obsidian is allowed to use the local network (iPhone: Settings → Privacy & Security → Local Network).',
         cls: 'lan-sync-muted',
       });
     }
