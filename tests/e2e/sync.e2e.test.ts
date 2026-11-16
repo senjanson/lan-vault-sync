@@ -655,6 +655,72 @@ describe('e2e files put back after a deletion', { timeout: 30000 }, () => {
     }
   });
 
+  it('keeps a note that came from a peer, deleted and put back here', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'f.md': 'keep me\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    // B wrote this text itself, for A's note.
+    await until(() => B.vault.text('f.md') === 'keep me\n');
+    await B.vault.rm('f.md');
+    await until(() => !A.vault.exists('f.md'));
+    await sleep(300);
+    await B.vault.write('f.md', 'keep me\n');
+    await until(() => A.vault.text('f.md') === 'keep me\n');
+    await (A.coord as any)._periodicFullSync();
+    await (B.coord as any)._periodicFullSync();
+    await sleep(1500);
+    expect(A.vault.text('f.md')).toBe('keep me\n');
+    expect(B.vault.text('f.md')).toBe('keep me\n');
+  });
+
+  it('passes a deletion on, so a device behind another gets a note made anew without a copy of the old one', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+    seed(ra, { 'f.md': 'old text\n' });
+    const pa = ports();
+    // B and C are connected through A only, like two phones and a desktop.
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    const C = track(await startNode(rc, 'cccc', pa + 2, [pa]));
+    await until(() => B.vault.text('f.md') === 'old text\n' && C.vault.text('f.md') === 'old text\n');
+    await sleep(300);
+    await C.vault.rm('f.md');
+    await C.vault.write('f.md', 'new text\n');
+    await until(() => A.vault.text('f.md') === 'new text\n' && B.vault.text('f.md') === 'new text\n');
+    await sleep(1500);
+    for (const n of [A, B, C]) {
+      expect(n.vault.text('f.md')).toBe('new text\n');
+      expect(fs.readdirSync(n === A ? ra : n === B ? rb : rc).filter((f) => f.includes('conflict'))).toEqual([]);
+    }
+  });
+
+  it('keeps a note put back after a deletion that a restarted peer saw while running', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'f.md': 'keep me\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('f.md') === 'keep me\n');
+    await sleep(300);
+    // B starts again: it remembers that f.md was here when it last ran.
+    await B.coord.stop();
+    nodes = nodes.filter((n) => n !== B);
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => (A.coord as any).connectionManager.getConnectedPeerIds().length === 1);
+    await sleep(500);
+    await A.vault.rm('f.md');
+    await until(() => !B.vault.exists('f.md'));
+    await sleep(300);
+    await A.vault.write('f.md', 'keep me\n');
+    await until(() => B.vault.text('f.md') === 'keep me\n');
+    await (A.coord as any)._periodicFullSync();
+    await (B.coord as any)._periodicFullSync();
+    await sleep(1500);
+    expect(A.vault.text('f.md')).toBe('keep me\n');
+    expect(B.vault.text('f.md')).toBe('keep me\n');
+  });
+
   it('keeps a deleted note that is put back while sync is off', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     seed(ra, { 'f.md': 'keep me\n' });

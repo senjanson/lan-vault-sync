@@ -106,7 +106,7 @@ describe('UdpBroadcast sending', () => {
     udp.stop();
   });
 
-  it('logs a send error once until sending works again', async () => {
+  it('logs a send error once, also when it comes and goes', async () => {
     let down = true;
     const { udp } = start((address) => down && address === '255.255.255.255');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -120,9 +120,15 @@ describe('UdpBroadcast sending', () => {
     vi.advanceTimersByTime(DISCOVERY_INTERVAL_MS * 3);
     expect(info.mock.calls.filter((c) => String(c).includes('255.255.255.255'))).toHaveLength(1);
 
-    down = true;
-    vi.advanceTimersByTime(DISCOVERY_INTERVAL_MS * 3);
-    expect(warn).toHaveBeenCalledTimes(2);
+    // An address that keeps failing and working again is reported once.
+    for (let k = 0; k < 4; k++) {
+      down = true;
+      vi.advanceTimersByTime(DISCOVERY_INTERVAL_MS * 3);
+      down = false;
+      vi.advanceTimersByTime(DISCOVERY_INTERVAL_MS * 3);
+    }
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls.filter((c) => String(c).includes('255.255.255.255'))).toHaveLength(1);
     udp.stop();
   });
 });

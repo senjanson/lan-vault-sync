@@ -155,7 +155,19 @@ export class BinaryFileSyncService {
         const record = !del.movedTo && typeof del.deletedAt === "number"
           ? { path: del.path, deletedAt: del.deletedAt }
           : undefined;
+        const existed = !!this.vault.getAbstractFileByPath(del.path);
         await this._deleteFile(del.path, del.hash, del.movedTo, record);
+        // Passed on to the other peers, as edits are (see SyncCoordinator):
+        // a device connected only through this one would otherwise get a
+        // new note made under the name before it knew the old one was gone,
+        // and keep the old one as a conflict copy. Only when the file was
+        // deleted here, so the message does not go round.
+        if (existed && !del.movedTo && !this.vault.getAbstractFileByPath(del.path)) {
+          const msg = encodeFileDelete(del);
+          for (const peerId of this.connectionManager.getConnectedPeerIds()) {
+            if (peerId !== deviceId) this.connectionManager.sendTo(peerId, msg);
+          }
+        }
         break;
       }
       case MessageType.FILE_RENAME: {

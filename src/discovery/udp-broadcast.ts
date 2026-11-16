@@ -26,6 +26,8 @@ export class UdpBroadcast {
   private onDeviceSeenCb: ((device: DeviceInfo) => void) | null = null;
   /** Addresses whose last send failed, so a failure is logged once. */
   private failing = new Set<string>();
+  /** How many times sending to an address started failing. */
+  private reported = new Map<string, number>();
 
   constructor(private localDevice: DeviceInfo) {}
 
@@ -125,12 +127,20 @@ export class UdpBroadcast {
    * seconds, and a failure that lasts would otherwise fill the log.
    */
   private _logSend(address: string, err: Error | null): void {
+    // An interface that keeps going up and down (seen with a USB network
+    // adapter on macOS) is reported once; later changes go to the debug log.
+    const reported = this.reported.get(address) ?? 0;
     if (err) {
       if (this.failing.has(address)) return;
       this.failing.add(address);
-      logger.warn(`Discovery broadcast to ${address} failed: ${err.message}. Still trying.`);
+      const text = `Discovery broadcast to ${address} failed: ${err.message}. Still trying.`;
+      if (reported === 0) logger.warn(text);
+      else logger.debug(text);
+      this.reported.set(address, reported + 1);
     } else if (this.failing.delete(address)) {
-      logger.info(`Discovery broadcast to ${address} works again`);
+      const text = `Discovery broadcast to ${address} works again`;
+      if (reported === 1) logger.info(text);
+      else logger.debug(text);
     }
   }
 }

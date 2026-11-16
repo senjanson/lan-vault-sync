@@ -467,6 +467,11 @@ export class SyncCoordinator {
         this.tombstones.add(path, this.knownHashes.get(path), undefined, movedTo);
       }
       this.knownHashes.delete(path);
+      this.remoteWrittenText.delete(path);
+      // Deleted while sync runs: once the deletion is undone (see
+      // TombstoneStore.revive), the file being gone here must not be taken
+      // for a deletion made while sync was off, which deleted it again.
+      this.lastRunFiles.delete(path);
       void this._prunePendingFolders();
       if (!this.filter.isTextFile(path)) return;
       await this.docManager.removeDoc(path);
@@ -750,6 +755,10 @@ export class SyncCoordinator {
         this.tombstones.add(path, this.knownHashes.get(path));
         const deletedAt = this.tombstones.get(path)?.deletedAt;
         this.knownHashes.delete(path);
+        // A file made again with the text we last wrote is a new file, not
+        // our own write coming back.
+        this.remoteWrittenText.delete(path);
+        this.lastRunFiles.delete(path);
         if (isTextFile) {
           await this.docManager.removeDoc(path);
           this._clearConflictLoserGuard(path);
@@ -2160,6 +2169,7 @@ export class SyncCoordinator {
     this.tombstones.add(oldPath, hash, undefined, newPath);
     this.tombstones.clear(newPath);
     this.knownHashes.delete(oldPath);
+    this.lastRunFiles.delete(oldPath);
     if (hash) this.knownHashes.set(newPath, hash);
   }
 

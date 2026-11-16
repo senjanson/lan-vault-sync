@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { encodeYjsSync } from '../../src/transport/protocol';
 import { MessageType } from '../../src/types';
-import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot } from './harness';
+import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot, until } from './harness';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CRDT_STATE_DIR } from '../../src/constants';
@@ -25,7 +25,7 @@ describe('e2e protocol', { timeout: 30000 }, () => {
     const send = ws.send.bind(ws);
     ws.send = (data: Uint8Array) => { sent.push(Buffer.from(data)); send(data); };
     await A.vault.write('secret.md', 'my secret plan');
-    await sleep(1000);
+    await until(() => B.vault.text('secret.md') === 'my secret plan');
     expect(B.vault.text('secret.md')).toBe('my secret plan');
     expect(sent.length).toBeGreaterThan(0);
     expect(sent.some((b) => b.includes(Buffer.from('secret')))).toBe(false);

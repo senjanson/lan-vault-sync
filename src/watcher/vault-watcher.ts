@@ -166,6 +166,10 @@ export class VaultWatcher {
       return;
     }
 
+    // Deleted here: a file made again under this name, even at once and
+    // with the same content, is the user's, not our remote write.
+    if (type === "delete") this.remoteWritePaths.delete(`write\0${path}`);
+
     // Debounce modify events
     if (type === "modify") {
       this._queueModify(path, oldPath);
