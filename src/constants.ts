@@ -84,8 +84,10 @@ export const WS_PING_INTERVAL_MS = 10000;
  * Version of the sync protocol. Devices only connect when theirs match.
  * 1: plain messages (plugin 0.3 and older, which send no version).
  * 2: encrypted messages, CRDT digests in the file list.
+ * 3: deletions say what was deleted; files say which version they replace;
+ *    pings carry the clock (plugin 0.5).
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export const SYNC_LOG_VIEW_TYPE = "lan-vault-sync-log-view";
 export const MAX_SYNC_LOG_ENTRIES = 500;

@@ -97,7 +97,11 @@ export default class LANSyncPlugin extends Plugin {
 
     // Register view
     this.registerView(SYNC_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
-      this.syncView = new SyncView(leaf, () => this.getSyncStatus());
+      this.syncView = new SyncView(leaf, () => this.getSyncStatus(), {
+        resolveHeld: async (id, choice) => {
+          await this.coordinator?.resolveHeldDeletions(id, choice);
+        },
+      });
       return this.syncView;
     });
 
@@ -380,8 +384,21 @@ export default class LANSyncPlugin extends Plugin {
       backupService: this.backupService!,
       syncLogService: this.syncLogService!,
       workspace: this.app.workspace,
+      trash: (file) => this.app.fileManager.trashFile(file),
     });
     setLogSink(this.coordinator.eventLog);
+
+    // A bulk deletion waits for the user: say so once per new batch.
+    let heldSeen = new Set<string>();
+    this.coordinator.onHeldDeletionsChange((held) => {
+      const fresh = held.filter((h) => !heldSeen.has(h.id));
+      heldSeen = new Set(held.map((h) => h.id));
+      if (fresh.length > 0) {
+        const count = fresh.reduce((n, h) => n + h.paths.length, 0);
+        new Notice(t("notice.held", { count }), 0);
+      }
+      this.syncView?.refresh();
+    });
 
     this.coordinator.onStateChange(() => this.showStatus());
 
@@ -412,6 +429,7 @@ export default class LANSyncPlugin extends Plugin {
       state: coordinator?.getState() ?? "idle",
       devices: coordinator?.getConnectedPeers() ?? [],
       unreachable: coordinator?.getUnreachablePeers() ?? [],
+      held: coordinator?.getHeldDeletions() ?? [],
     };
   }
 

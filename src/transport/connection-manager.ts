@@ -18,6 +18,8 @@ import {
   encodeAuth,
   encodePing,
   encodePong,
+  decodePing,
+  decodePong,
 } from './protocol';
 import {
   ackMessage,
@@ -50,6 +52,8 @@ interface PeerConnection {
   pingTimer?: ReturnType<typeof setInterval>;
   /** Pings sent since the peer last sent anything. */
   missedPings: number;
+  /** Peer's clock minus ours, in ms, estimated from pings (protocol 3). */
+  clockOffsetMs?: number;
   /** Encrypts and decrypts this connection's messages. */
   channel: SecureChannel;
   /** Sends in order: encryption is asynchronous. */
@@ -326,6 +330,11 @@ export class ConnectionManager {
         if (peer.ws.readyState === SOCKET_OPEN) peer.ws.send(frame);
       })
       .catch((err) => logger.error(`Failed to send to ${peer.deviceId}:`, err));
+  }
+
+  /** The peer's clock minus ours in ms, once a ping has been answered. */
+  getClockOffset(deviceId: string): number | undefined {
+    return this.peers.get(deviceId)?.clockOffsetMs;
   }
 
   getConnectedPeerIds(): string[] {
@@ -631,10 +640,19 @@ export class ConnectionManager {
     const p = this.peers.get(deviceId);
     if (!p || p.ws !== ws) return;
     if (msg.type === MessageType.PING) {
-      this._send(p, encodePong());
+      this._send(p, encodePong(decodePing(msg.payload) ?? 0));
       return;
     }
-    if (msg.type === MessageType.PONG || msg.type === MessageType.HANDSHAKE_ACK) return;
+    if (msg.type === MessageType.PONG) {
+      const pong = decodePong(msg.payload);
+      if (pong && pong.pingTime > 0) {
+        const now = Date.now();
+        // The peer read its clock about halfway through the round trip.
+        p.clockOffsetMs = Math.round(pong.peerTime - (pong.pingTime + now) / 2);
+      }
+      return;
+    }
+    if (msg.type === MessageType.HANDSHAKE_ACK) return;
 
     // Serialize message handling per peer to prevent race conditions.
     // Each message waits for the previous one to finish before starting.

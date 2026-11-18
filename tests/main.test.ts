@@ -124,11 +124,12 @@ describe('sync status', () => {
 
   it('reads the state and the connected devices from the running sync', () => {
     const plugin = createPlugin() as any;
-    expect(plugin.getSyncStatus()).toEqual({ state: 'idle', devices: [], unreachable: [] });
+    expect(plugin.getSyncStatus()).toEqual({ state: 'idle', devices: [], unreachable: [], held: [] });
     plugin.coordinator = {
       getState: () => 'watching',
       getConnectedPeers: () => [device('mac'), device('iphone'), device('pixel')],
       getUnreachablePeers: () => [],
+      getHeldDeletions: () => [],
     };
     const status = plugin.getSyncStatus();
     expect(status.state).toBe('watching');
@@ -140,7 +141,7 @@ describe('sync status', () => {
     let unreachable: string[] = [];
     const shown: string[][] = [];
     plugin.statusBar = { update: (_s: string, _n: number, u: string[]) => shown.push(u) };
-    plugin.coordinator = { getState: () => 'watching', getConnectedPeers: () => [], getUnreachablePeers: () => unreachable };
+    plugin.coordinator = { getState: () => 'watching', getConnectedPeers: () => [], getUnreachablePeers: () => unreachable, getHeldDeletions: () => [] };
     notices.length = 0;
 
     unreachable = ['192.168.1.5:50000'];

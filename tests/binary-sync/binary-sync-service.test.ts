@@ -82,10 +82,7 @@ describe('BinaryFileSyncService conflict backups', () => {
       'assets/file.bin',
       new Uint8Array([1, 2, 3]),
       'remote-file-overwrite',
-      {
-        incomingSize: 3,
-        existingSize: 3,
-      },
+      { size: 3 },
     );
   });
 
@@ -102,7 +99,7 @@ describe('BinaryFileSyncService conflict backups', () => {
       { backupBinaryFile } as any,
     );
 
-    await (service as any)._deleteFile('assets/file.bin');
+    await (service as any)._deleteFile('assets/file.bin', { ctx: { rule: 'test' } });
 
     expect(backupBinaryFile).toHaveBeenCalledWith(
       'assets/file.bin',
@@ -146,17 +143,13 @@ describe('BinaryFileSyncService conflict backups', () => {
       { backupBinaryFile } as any,
     );
 
-    await (service as any)._renameFile('assets/source.bin', 'assets/target.bin');
+    await (service as any)._renameFile('assets/source.bin', 'assets/target.bin', { rule: 'test' });
 
     expect(backupBinaryFile).toHaveBeenCalledWith(
       'assets/target.bin',
       new Uint8Array([7, 8, 9]),
       'remote-file-rename-overwrite',
-      {
-        oldPath: 'assets/source.bin',
-        newPath: 'assets/target.bin',
-        size: 3,
-      },
+      { size: 3 },
     );
   });
 
@@ -172,7 +165,7 @@ describe('BinaryFileSyncService conflict backups', () => {
       { backupBinaryFile } as any,
     );
 
-    await (service as any)._renameFile('assets/source.bin', 'assets/target.bin');
+    await (service as any)._renameFile('assets/source.bin', 'assets/target.bin', { rule: 'test' });
 
     expect(vault.getAbstractFileByPath('assets/source.bin')).not.toBeNull();
     const targetContent = new Uint8Array(await vault.readBinary(vault.getAbstractFileByPath('assets/target.bin')!));
@@ -238,7 +231,10 @@ describe('BinaryFileSyncService deletions', () => {
     service.onRemoteFileDeleted(deleted);
     const { encodeFileDelete, decodeMessage } = await import('../../src/transport/protocol');
     const { MessageType } = await import('../../src/types');
-    const msg = decodeMessage(encodeFileDelete({ path: 'd/file.bin', deletedAt: 5 }));
+    const { computeFileHash } = await import('../../src/binary-sync/file-hash');
+    const hash = await computeFileHash(new Uint8Array([1, 2]).buffer);
+    // Protocol 3: a deletion names the content it removes.
+    const msg = decodeMessage(encodeFileDelete({ path: 'd/file.bin', deletedAt: 5, hash }));
 
     await Promise.all([
       service.handleMessage('a', MessageType.FILE_DELETE, msg.payload),

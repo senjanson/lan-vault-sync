@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { SyncView, type SyncViewStatus } from '../../src/ui/sync-view';
 
 /** Just enough of Obsidian's element helpers to read what the view shows. */
@@ -14,11 +14,12 @@ class FakeEl {
   createDiv(opts?: { text?: string }) { return this.add(opts); }
   createSpan(opts?: { text?: string }) { return this.add(opts); }
   createEl(_tag: string, opts?: { text?: string }) { return this.add(opts); }
+  find(text: string): any { return this.text === text ? this : this.children.map((c) => c.find(text)).find(Boolean); }
   allText(): string { return [this.text, ...this.children.map((c) => c.allText())].filter(Boolean).join(' | '); }
 }
 
-function openView(getStatus: () => SyncViewStatus) {
-  const view = new SyncView({} as any, getStatus) as any;
+function openView(getStatus: () => SyncViewStatus, actions?: any) {
+  const view = new SyncView({} as any, getStatus, actions) as any;
   const content = new FakeEl();
   view.containerEl = { children: [new FakeEl(), content] };
   return { view, content };
@@ -48,5 +49,23 @@ describe('SyncView', () => {
     view.refresh();
     expect(content.allText()).toContain('Connected devices (1)');
     expect(content.allText()).toContain('Cannot reach 192.168.1.5:50000');
+  });
+
+  it('lists held deletions and passes the choice on', async () => {
+    const resolveHeld = vi.fn(async () => undefined);
+    const paths = Array.from({ length: 7 }, (_, i) => `f${i}.md`);
+    const { view, content } = openView(() => ({
+      state: 'watching',
+      devices: [],
+      unreachable: [],
+      held: [{ id: 'h1', kind: 'incoming', peer: 'pixel', since: 0, paths }],
+    }), { resolveHeld });
+    await view.onOpen();
+    const text = content.allText();
+    expect(text).toContain('Deletions waiting for you (1)');
+    expect(text).toContain('pixel deleted 7 file(s)');
+    expect(text).toContain('and 2 more');
+    await content.find('Keep them').onclick();
+    expect(resolveHeld).toHaveBeenCalledWith('h1', 'keep');
   });
 });

@@ -1,4 +1,7 @@
 import { EventLog, peerLabel } from "../diagnostics/event-log";
+import { ApplyGate, BackupKeeper, OpContext } from "./apply-gate";
+import { base64ToBytes, bytesToBase64 } from "../utils/base64";
+import { DeleteBreaker, DeleteLimits, HeldDeletion, HeldItem } from "./delete-breaker";
 import { Vault, TAbstractFile, TFile, TFolder, Workspace } from "obsidian";
 import * as Y from "yjs";
 import fastDiff from "fast-diff";
@@ -187,6 +190,11 @@ export class SyncCoordinator {
   private vaultId: string;
   /** Persistent sync log in .lan-vault-sync/logs (see EventLog). */
   readonly eventLog: EventLog;
+  /** Steps that remove or replace content (see ApplyGate). */
+  private gate: ApplyGate;
+  /** Bulk deletions waiting for the user (see DeleteBreaker). */
+  private breaker: DeleteBreaker;
+  private onHeldDeletionsCb: ((held: HeldDeletion[]) => void) | null = null;
   private syncLogService: SyncLogService | null;
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
@@ -208,6 +216,10 @@ export class SyncCoordinator {
       syncLogService?: SyncLogService;
       workspace?: Workspace;
       eventLog?: EventLog;
+      /** Moves a file to the user's trash (Obsidian's fileManager.trashFile). */
+      trash?: (file: TAbstractFile) => Promise<void>;
+      /** Overrides the bulk-deletion limits (tests). */
+      deleteLimits?: Partial<DeleteLimits>;
     },
   ) {
     this.eventLog =
@@ -230,6 +242,18 @@ export class SyncCoordinator {
       (path) => this._isAllowedPath(path),
       (path) => this.filter.isTextFile(path),
     );
+    this.gate = new ApplyGate({
+      vault,
+      keeper: new BackupKeeper(this.backupService),
+      log: this.eventLog,
+      trash: options?.trash,
+      // Something changed since the decision: decide again from fresh lists.
+      onPreconditionFailed: () => this._scheduleTreeSync(),
+      onKeepFailed: (path, op) => this._emitEvent(`Skipped ${op} for ${path}: its old version could not be kept`),
+    });
+    this.binarySync.setGate(this.gate);
+    this.binarySync.setPeerLabel((id) => this._peerLabel(id));
+    this.breaker = new DeleteBreaker(() => this._vaultFileCount(), Date.now, options?.deleteLimits);
     this.workspace = options?.workspace ?? null;
     this.docManager.setKeepsWrittenContent((path) => this._openEditors(path).length > 0);
     this.watcher = new VaultWatcher(
@@ -289,6 +313,66 @@ export class SyncCoordinator {
   /** Addresses added by hand that keep failing to connect; still retried. */
   getUnreachablePeers(): string[] {
     return this.connectionManager.getUnreachablePeers();
+  }
+
+  /** Bulk deletions waiting for the user's decision (see DeleteBreaker). */
+  getHeldDeletions(): HeldDeletion[] {
+    return this.breaker.list();
+  }
+
+  onHeldDeletionsChange(cb: (held: HeldDeletion[]) => void): void {
+    this.onHeldDeletionsCb = cb;
+  }
+
+  /**
+   * The user's answer for a held batch: "delete" applies the deletions,
+   * "keep" keeps the files (and gives them back to the devices that
+   * deleted them).
+   */
+  async resolveHeldDeletions(id: string, action: "delete" | "keep"): Promise<void> {
+    const batch = this.breaker.take(id);
+    if (!batch) return;
+    const ctxBase = { peer: batch.peer, batch: batch.id };
+    this.eventLog.record({
+      op: "held",
+      peer: batch.peer,
+      batch: batch.id,
+      msg: `${batch.kind} deletions of ${batch.items.size} file(s) resolved: ${action}`,
+    });
+    if (batch.kind === "inferred") {
+      for (const item of batch.items.values()) {
+        const file = item.file!;
+        if (action === "delete") {
+          if (this.vault.getAbstractFileByPath(file.path)) continue;
+          await this._recordDeletedWhileStopped(file);
+          const deletedAt = this.tombstones.get(file.path)?.deletedAt;
+          this.binarySync.broadcastFileDelete(file.path, deletedAt, { hash: file.hash, source: "inferred" });
+          this.eventLog.record({ op: "delete", path: file.path, rule: "deleted-while-stopped", batch: batch.id, before: { hash: file.hash, size: file.size }, msg: "confirmed by the user" });
+        } else {
+          // Not deleted: fetched back from the peers at the next exchange,
+          // a note with the peer's history (ours alone would not be written
+          // again, as it already holds that text).
+          this.lastRunFiles.delete(file.path);
+          if (file.isTextFile) await this.docManager.removeDoc(file.path);
+        }
+      }
+    } else {
+      for (const item of batch.items.values()) {
+        if (action === "delete") {
+          if (item.del) await this.binarySync.applyIncomingDelete(batch.deviceId!, item.del, false);
+          else if (item.tree) await this.binarySync.applyRemoteDelete(item.path, item.tree.record, item.tree.expectHash, { ...ctxBase, rule: "tombstone-covers" });
+        } else {
+          // Kept here: the deletion is undone for the peers too (see
+          // TombstoneStore.revive), so they stop proposing it.
+          const record = item.del ?? item.tree?.record;
+          const hash = item.del?.hash ?? item.tree?.record.hash;
+          this.tombstones.noteRevival(item.path, record?.deletedAt ?? Date.now(), hash);
+          this.eventLog.record({ op: "skip", path: item.path, ...ctxBase, rule: "held-kept", msg: "the user kept this file" });
+        }
+      }
+    }
+    this.onHeldDeletionsCb?.(this.breaker.list());
+    this._scheduleTreeSync();
   }
 
   /** Why the last start failed, in words for the user; null if it did not. */
@@ -556,6 +640,26 @@ export class SyncCoordinator {
       return (await this._hashText(await this.docManager.getContent(path))) !== hash;
     });
     this.binarySync.setCanCreate(async (path) => !(await this._refuseCaseClash(path)));
+    // A peer's live deletion of a note deletes our copy only when the peer
+    // had seen all of its edits, and none is waiting to go into it here.
+    this.binarySync.setNoteDeletePrecondition(async (path, del, diskHash) => {
+      if (!del.sv || !(await this.docManager.hasDocState(path))) return undefined;
+      let covered: boolean;
+      try {
+        covered = await this.docManager.isCoveredBy(path, base64ToBytes(del.sv));
+      } catch {
+        return undefined;
+      }
+      if (!covered) return false;
+      if (del.hash === diskHash) return true;
+      // The disk differs from what the peer deleted: fine when it is only
+      // behind the doc (our write of the peer's text is still on its way),
+      // not when it holds an edit made here that the doc has not taken in.
+      const docHash = await this._hashText(await this.docManager.getContent(path));
+      const written = this.docManager.getWrittenContent(path);
+      return diskHash === docHash || (written !== undefined && diskHash === (await this._hashText(written)));
+    });
+    this.binarySync.setDeleteAdmission((deviceId, del) => this._admitDelete(deviceId, del.path, { del }));
     this.binarySync.onRemoteFileStored(async (path, hash, content, fromDeviceId) => {
       this.knownHashes.set(path, hash);
       if (this.filter.isTextFile(path)) await this._storedTextAsBytes(path, hash, content, fromDeviceId);
@@ -933,7 +1037,9 @@ export class SyncCoordinator {
           }
         } else {
           this._reviveIfDeleted(path);
-          await this.binarySync.broadcastFileChange(path);
+          // Sent as a change of the version peers are thought to have.
+          const sentHash = await this.binarySync.broadcastFileChange(path, this.knownHashes.get(path));
+          if (sentHash) this.knownHashes.set(path, sentHash);
         }
         this.syncLogService?.addEntry("local-send", path, {
           hasSnapshot: false,
@@ -943,8 +1049,15 @@ export class SyncCoordinator {
       }
 
       case "delete": {
-        this.tombstones.add(path, this.knownHashes.get(path));
+        const deletedHash = this.knownHashes.get(path);
+        this.tombstones.add(path, deletedHash);
         const deletedAt = this.tombstones.get(path)?.deletedAt;
+        // What the peers' copies must still be for this deletion to remove
+        // them: the content, and for a note everything its history held.
+        let sv: string | undefined;
+        if (isTextFile && (await this.docManager.hasDocState(path))) {
+          sv = await this.docManager.encodeSyncStep1(path).then(bytesToBase64, () => undefined);
+        }
         this.knownHashes.delete(path);
         // A file made again with the text we last wrote is a new file, not
         // our own write coming back.
@@ -954,7 +1067,7 @@ export class SyncCoordinator {
           await this.docManager.removeDoc(path);
           this._clearConflictLoserGuard(path);
         }
-        this.binarySync.broadcastFileDelete(path, deletedAt);
+        this.binarySync.broadcastFileDelete(path, deletedAt, { hash: deletedHash, sv, source: "event" });
         this.syncLogService?.addEntry("local-send", path, {
           hasSnapshot: false,
           details: { isText: isTextFile, reason: "delete" },
@@ -1145,6 +1258,7 @@ export class SyncCoordinator {
 
       if (file instanceof TFile) {
         await this.vault.modify(file, latestContent);
+        this.gate.applied("overwrite", filePath, { rule: "text-merge" }, undefined, { hash: await this._hashText(latestContent), size: latestContent.length }, backupId);
       } else {
         await ensureVaultParentFolder(this.vault as any, filePath, (folder) => this.watcher.markRemoteWrite(folder, "write"));
         await this.vault.create(filePath, latestContent);
@@ -1231,6 +1345,7 @@ export class SyncCoordinator {
           }
         }
         editor.transaction({ changes });
+        this.gate.applied("overwrite", filePath, { rule: "text-merge" }, { hash: await this._hashText(current), size: current.length }, { hash: await this._hashText(latest), size: latest.length }, undefined, "open editor");
       }
       await this._markWritten(filePath, latest, false);
       return true;
@@ -1323,6 +1438,35 @@ export class SyncCoordinator {
       ? new Map([...localTree.files.keys()].map((p) => [p.toLowerCase(), p]))
       : null;
 
+    // Deletions inferred from files missing here: too many at once wait for
+    // the user (see DeleteBreaker), and so do any while a batch is waiting.
+    const inferred = treeDiff.remoteOnly.filter(
+      (file) =>
+        !this._localDeletePending(file.path) &&
+        !this.tombstones.get(file.path) &&
+        !this._deletedAfterRename(file, remoteRenamesTo.get(file.path) ?? [], (p) => this.tombstones.get(p)) &&
+        this._missingSinceLastRun(file),
+    );
+    let holdInferred = !!this.breaker.inferredBatch();
+    if (inferred.length > 0 && (holdInferred || this.breaker.holdsInferred(inferred.length))) {
+      const fresh = inferred.filter((f) => !this.breaker.isHeldInferred(f.path));
+      const batch = this.breaker.holdInferred(inferred.map((file) => ({ path: file.path, file })));
+      holdInferred = true;
+      if (fresh.length > 0) {
+        this.eventLog.record({
+          op: "held",
+          level: "warn",
+          peer: this._peerLabel(deviceId),
+          batch: batch.id,
+          rule: "deleted-while-stopped",
+          msg: `${batch.items.size} file(s) missing here since sync last ran; waiting for the user`,
+        });
+        this._emitEvent(`Held ${batch.items.size} deletion(s) of files missing since sync last ran; waiting for your decision`);
+        this.onHeldDeletionsCb?.(this.breaker.list());
+      }
+    }
+    const inferredPaths = new Set(inferred.map((f) => f.path));
+
     // Files only on remote — request them via CRDT sync or binary transfer
     for (const file of treeDiff.remoteOnly) {
       // Just deleted here: the deletion goes to the peer as soon as it is
@@ -1347,11 +1491,15 @@ export class SyncCoordinator {
         this._emitEvent(`Skipping deleted file: ${file.path}`);
         continue;
       }
-      if (!ownTombstone && (await this._wasDeletedWhileStopped(file))) {
+      if (!ownTombstone && inferredPaths.has(file.path)) {
+        // Held: neither deleted on the peer nor fetched back.
+        if (holdInferred) continue;
+        await this._recordDeletedWhileStopped(file);
         this.connectionManager.sendTo(
           deviceId,
-          encodeFileDelete({ path: file.path, deletedAt: this.tombstones.get(file.path)?.deletedAt }),
+          encodeFileDelete({ path: file.path, deletedAt: this.tombstones.get(file.path)?.deletedAt, hash: file.hash, source: "inferred" }),
         );
+        this.eventLog.record({ op: "delete", path: file.path, peer: this._peerLabel(deviceId), rule: "deleted-while-stopped", before: { hash: file.hash, size: file.size }, msg: "sent to the peer" });
         this._emitEvent(`Deleted while sync was off: ${file.path}`);
         continue;
       }
@@ -1367,7 +1515,7 @@ export class SyncCoordinator {
       }
       if (file.isTextFile && file.size === 0) {
         // An empty note has no CRDT content to fetch; fetch the file itself.
-        this.binarySync.requestFile(deviceId, file.path);
+        this.binarySync.requestFile(deviceId, file.path, null);
         this._emitEvent(`Requesting: ${file.path}`);
       } else if (file.isTextFile) {
         // DO NOT removeDoc here — it races with concurrent YJS_UPDATE messages
@@ -1383,7 +1531,7 @@ export class SyncCoordinator {
         this.connectionManager.sendTo(deviceId, msg);
         this._emitEvent(`Requesting text state: ${file.path}`);
       } else {
-        this.binarySync.requestFile(deviceId, file.path);
+        this.binarySync.requestFile(deviceId, file.path, null);
         this._emitEvent(`Requesting: ${file.path}`);
       }
     }
@@ -1408,16 +1556,23 @@ export class SyncCoordinator {
       const revival = this.tombstones.getRevival(file.path);
       const revived = !!revival && !!peerTombstone && !peerTombstone.movedTo && peerTombstone.deletedAt <= revival.deletedAt;
       if (peerTombstone && !revived && TombstoneStore.covers(peerTombstone, file)) {
-        await this.binarySync.applyRemoteDelete(file.path, peerTombstone);
-        this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
+        if (!this._admitDelete(deviceId, file.path, { tree: { record: peerTombstone, expectHash: file.hash } })) continue;
+        const ctx: OpContext = { peer: this._peerLabel(deviceId), rule: "tombstone-covers" };
+        if (await this.binarySync.applyRemoteDelete(file.path, peerTombstone, file.hash, ctx)) {
+          this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
+        }
         continue;
       }
       // We moved this file, and the peer deleted it later, unchanged.
       const deletedLater = this._deletedAfterRename(file, this.tombstones.renamesTo(file.path), (p) => remoteDeleted.get(p));
       if (deletedLater) {
         settled = true;
-        await this.binarySync.applyRemoteDelete(file.path, { ...deletedLater, path: file.path });
-        this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
+        const record = { ...deletedLater, path: file.path };
+        if (!this._admitDelete(deviceId, file.path, { tree: { record, expectHash: file.hash } })) continue;
+        const ctx: OpContext = { peer: this._peerLabel(deviceId), rule: "deleted-after-rename" };
+        if (await this.binarySync.applyRemoteDelete(file.path, record, file.hash, ctx)) {
+          this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
+        }
         continue;
       }
       // The peer renamed this note while we edited it: move our edits to
@@ -1540,8 +1695,8 @@ export class SyncCoordinator {
         }
       } else {
         if (remote.mtime > local.mtime) {
-          // Remote is newer — request it
-          this.binarySync.requestFile(deviceId, remote.path);
+          // Remote is newer — request it, to replace only the copy we have now
+          this.binarySync.requestFile(deviceId, remote.path, local.hash);
           this._emitEvent(`Requesting newer binary: ${remote.path}`);
         } else {
           // Local is newer (or same mtime) — send ours
@@ -1989,6 +2144,7 @@ export class SyncCoordinator {
       markAll(folder);
       try {
         await this.vault.delete(folder, true);
+        this.eventLog.record({ op: "delete", path, rule: "empty-folder", msg: "folder deleted on a peer, empty here" });
         this._emitEvent(`Deleted folder: ${path}`);
       } catch (err) {
         logger.warn(`Could not delete folder ${path}:`, err);
@@ -2011,13 +2167,21 @@ export class SyncCoordinator {
    * A file that was here, unchanged, when sync last ran and is gone now was
    * deleted while sync was not running, e.g. with the app closed.
    */
-  private async _wasDeletedWhileStopped(file: FileMeta): Promise<boolean> {
+  /**
+   * Here, unchanged, when sync last ran, but gone now: deleted while sync
+   * was not running, e.g. with the app closed. Or the vault is incomplete
+   * (a partial copy, files not downloaded yet), which is why many at once
+   * wait for the user (see DeleteBreaker).
+   */
+  private _missingSinceLastRun(file: FileMeta): boolean {
     if (this.vault.getAbstractFileByPath(file.path)) return false;
-    if (this.lastRunFiles.get(file.path) !== file.hash) return false;
+    return this.lastRunFiles.get(file.path) === file.hash;
+  }
+
+  private async _recordDeletedWhileStopped(file: FileMeta): Promise<void> {
     this.lastRunFiles.delete(file.path);
     this.tombstones.add(file.path, file.hash);
     if (file.isTextFile) await this.docManager.removeDoc(file.path);
-    return true;
   }
 
   private async _loadFileIndex(): Promise<void> {
@@ -2539,8 +2703,7 @@ export class SyncCoordinator {
       }
       await this._writeFileFromRemote(newPath, merged.content, merged.previousContent);
       if (file.path !== oldPath) return false;
-      this.watcher.markRemoteWrite(oldPath, "delete");
-      await this.vault.delete(file);
+      if (!(await this._removeFollowedFile(file, oldPath, newPath, deviceId))) return false;
       this.tombstones.add(oldPath, oldHash, undefined, newPath);
       this._keepRenameRecord(oldPath, record);
       this.knownHashes.delete(oldPath);
@@ -2568,8 +2731,7 @@ export class SyncCoordinator {
       if (!(target instanceof TFile)) return false;
       if ((await computeFileHash(await this.vault.readBinary(target))) !== oldHash) return false;
       if (file.path !== oldPath) return false;
-      this.watcher.markRemoteWrite(oldPath, "delete");
-      await this.vault.delete(file);
+      if (!(await this._removeFollowedFile(file, oldPath, newPath, deviceId))) return false;
       this.tombstones.add(oldPath, oldHash, undefined, newPath);
       this.knownHashes.delete(oldPath);
     }
@@ -2733,6 +2895,41 @@ export class SyncCoordinator {
     logger.info(msg);
     this.eventLog.record({ op: "log", msg });
     this.onSyncEventCb?.(msg);
+  }
+
+  /**
+   * Removes a file under its old name once a peer's rename was followed
+   * (its content is under the new name), its old version kept first.
+   */
+  private async _removeFollowedFile(file: TFile, oldPath: string, newPath: string, deviceId: string): Promise<boolean> {
+    const ctx: OpContext = { peer: this._peerLabel(deviceId), rule: "follow-rename" };
+    const snap = await this.gate.snapshot(oldPath);
+    if (!snap || snap.file !== file) return false;
+    const kept = await this.gate.keepOld(oldPath, snap.bytes, "follow-rename", ctx);
+    if (!kept) return false;
+    if (file.path !== oldPath) return false;
+    this.watcher.markRemoteWrite(oldPath, "delete");
+    await this.vault.delete(file);
+    this.gate.applied("rename", oldPath, ctx, { hash: snap.hash, size: snap.bytes.byteLength }, undefined, kept.hash ?? kept.id, `followed to ${newPath}`);
+    return true;
+  }
+
+  /** Files in the vault that sync, for the bulk-deletion limits. */
+  private _vaultFileCount(): number {
+    return this.vault.getFiles().filter((f) => this._isAllowedPath(f.path)).length;
+  }
+
+  /** Asks the DeleteBreaker whether a peer's deletion may go ahead now. */
+  private _admitDelete(deviceId: string, path: string, item: Omit<HeldItem, "path">): boolean {
+    const peer = this._peerLabel(deviceId);
+    const res = this.breaker.admit(deviceId, { path, ...item }, peer);
+    if (res.ok) return true;
+    this.eventLog.record({ op: "held", level: res.created ? "warn" : "info", path, peer, batch: res.batch.id, rule: "bulk-delete" });
+    if (res.created) {
+      this._emitEvent(`Held deletions from ${peer ?? deviceId}: more than half of the vault; waiting for your decision`);
+    }
+    this.onHeldDeletionsCb?.(this.breaker.list());
+    return false;
   }
 
   /** A peer for the persistent log: "deviceId (name)". */
@@ -2976,6 +3173,14 @@ export class SyncCoordinator {
       // note's history on their own) is not.
       if (before !== (await this.docManager.getContent(filePath))) {
         this.recentAdoptions.set(filePath, { at: Date.now(), dropped: await this._hashText(before) });
+        this.eventLog.record({
+          op: "overwrite",
+          path: filePath,
+          peer: this._peerLabel(deviceId),
+          rule: "full-state-adopted",
+          before: { hash: await this._hashText(before), size: before.length },
+          msg: decision?.keepCopy !== false ? "our text kept as a conflict copy" : "our text was weighed on the peer",
+        });
         if (decision?.keepCopy !== false) await this._createConflictCopy(filePath, before);
       }
       // Other peers may still hold the history we just dropped.
@@ -3070,6 +3275,7 @@ export class SyncCoordinator {
     if (this.vault.getAbstractFileByPath(copyPath)) return true;
     try {
       await this.vault.create(copyPath, content);
+      this.eventLog.record({ op: "conflict-copy", path: filePath, after: { hash, size: content.length }, msg: `kept as ${copyPath}` });
       this._emitEvent(`Kept the other version as ${copyPath}`);
       return true;
     } catch (err) {

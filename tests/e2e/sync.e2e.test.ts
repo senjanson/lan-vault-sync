@@ -1232,7 +1232,7 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
   }
   const notes = (root: string) => {
     const out: string[] = [];
-    const walk = (d: string) => { for (const e of fs.readdirSync(path.join(root, d), { withFileTypes: true })) { const rel = d ? `${d}/${e.name}` : e.name; if (rel.startsWith('.obsidian')) continue; if (e.isDirectory()) walk(rel); else out.push(rel); } };
+    const walk = (d: string) => { for (const e of fs.readdirSync(path.join(root, d), { withFileTypes: true })) { const rel = d ? `${d}/${e.name}` : e.name; if ((rel.startsWith('.obsidian') || rel.startsWith('.lan-vault-sync'))) continue; if (e.isDirectory()) walk(rel); else out.push(rel); } };
     walk(''); return out.sort();
   };
 

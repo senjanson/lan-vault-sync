@@ -196,13 +196,26 @@ export interface FileMetaSyncPayload {
   isResponse?: boolean;
 }
 
-export interface FileDataPayload {
+/** What a file's sender says about the version it sends (protocol 3). */
+export interface FileVersionInfo {
+  /** Hash of the whole file, checked once it has all arrived. */
+  hash?: string;
+  /**
+   * The version the sender believes the receiver has now (the one this
+   * replaces). A receiver holding another version has changed the file too.
+   */
+  base?: string;
+  /** When this version was made, as for notes (see FileMeta.madeAt). */
+  madeAt?: number;
+}
+
+export interface FileDataPayload extends FileVersionInfo {
   path: string;
   content: Uint8Array;
   mtime: number;
 }
 
-export interface FileChunkPayload {
+export interface FileChunkPayload extends FileVersionInfo {
   path: string;
   mtime: number;
   /** Size of the whole file in bytes. */
@@ -224,6 +237,17 @@ export interface FileDeletePayload {
    * same time. Older versions leave this out.
    */
   deletedAt?: number;
+  /**
+   * How the sender learned of the deletion: "event" when the file was
+   * deleted in Obsidian, "inferred" when it was found missing after sync was
+   * off (see SyncCoordinator._wasDeletedWhileStopped).
+   */
+  source?: "event" | "inferred";
+  /**
+   * For a note: the sender's CRDT state vector (base64) when it deleted the
+   * note. A receiver whose note holds edits beyond it keeps the note.
+   */
+  sv?: string;
 }
 
 export interface FileRenamePayload {

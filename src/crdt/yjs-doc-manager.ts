@@ -519,6 +519,21 @@ export class YjsDocManager {
     });
   }
 
+  /**
+   * Whether everything in this note's history is in the given state vector:
+   * the peer that sent it had seen all of our edits.
+   */
+  async isCoveredBy(filePath: string, remoteStateVector: Uint8Array): Promise<boolean> {
+    return this._enqueueForPath(filePath, async () => {
+      const doc = await this.getOrCreateDoc(filePath);
+      const remote = Y.decodeStateVector(remoteStateVector);
+      for (const [client, clock] of Y.decodeStateVector(Y.encodeStateVector(doc))) {
+        if (clock > (remote.get(client) ?? 0)) return false;
+      }
+      return true;
+    });
+  }
+
   async encodeSyncStep1(filePath: string): Promise<Uint8Array> {
     return this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);

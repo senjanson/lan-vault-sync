@@ -3,6 +3,7 @@ import { SYNC_VIEW_TYPE } from '../constants';
 import { SyncState, DeviceInfo } from '../types';
 import { canUseNodeRuntime } from '../utils/runtime';
 import { t } from '../i18n';
+import type { HeldDeletion } from '../sync/delete-breaker';
 
 export interface SyncViewStatus {
   state: SyncState;
@@ -10,6 +11,12 @@ export interface SyncViewStatus {
   devices: DeviceInfo[];
   /** Addresses added by hand that cannot be reached; still retried. */
   unreachable: string[];
+  /** Deletions held until the user confirms them. */
+  held?: HeldDeletion[];
+}
+
+export interface SyncViewActions {
+  resolveHeld(id: string, choice: 'delete' | 'keep'): Promise<void>;
 }
 
 /** How long new log lines wait to be shown, so that they are drawn together. */
@@ -23,7 +30,11 @@ export class SyncView extends ItemView {
    * The status is read when the view renders rather than kept from events:
    * a view opened while sync runs has missed every event before it.
    */
-  constructor(leaf: WorkspaceLeaf, private getStatus: () => SyncViewStatus) {
+  constructor(
+    leaf: WorkspaceLeaf,
+    private getStatus: () => SyncViewStatus,
+    private actions?: SyncViewActions,
+  ) {
     super(leaf);
   }
 
@@ -66,7 +77,7 @@ export class SyncView extends ItemView {
     const container = this.containerEl.children[1];
     if (!container) return;
     container.empty();
-    const { state, devices, unreachable } = this.getStatus();
+    const { state, devices, unreachable, held = [] } = this.getStatus();
 
     // Status section
     const statusSection = container.createDiv({ cls: 'lan-sync-section' });
@@ -85,6 +96,8 @@ export class SyncView extends ItemView {
         cls: 'lan-sync-muted',
       });
     }
+
+    if (held.length > 0) this._renderHeld(container as HTMLElement, held);
 
     // Devices section
     const devicesSection = container.createDiv({ cls: 'lan-sync-section' });
@@ -112,6 +125,34 @@ export class SyncView extends ItemView {
       for (const log of this.logs.slice(0, 20)) {
         logContainer.createDiv({ text: log, cls: 'lan-sync-log-entry' });
       }
+    }
+  }
+
+  private _renderHeld(container: HTMLElement, held: HeldDeletion[]): void {
+    const section = container.createDiv({ cls: 'lan-sync-section' });
+    section.createEl('h4', { text: t('view.held', { count: held.length }) });
+    for (const h of held) {
+      const box = section.createDiv({ cls: 'lan-sync-held' });
+      box.createEl('p', {
+        text: h.kind === 'inferred'
+          ? t('view.heldInferred', { count: h.paths.length })
+          : t('view.heldIncoming', { count: h.paths.length, peer: h.peer ?? h.deviceId ?? '?' }),
+        cls: 'lan-sync-state-error',
+      });
+      const list = box.createEl('ul');
+      for (const p of h.paths.slice(0, 5)) list.createEl('li', { text: p });
+      if (h.paths.length > 5) list.createEl('li', { text: t('view.heldMore', { count: h.paths.length - 5 }) });
+      const row = box.createDiv({ cls: 'lan-sync-held-actions' });
+      const del = row.createEl('button', { text: t('view.heldDelete'), cls: 'mod-warning' });
+      const keep = row.createEl('button', { text: t('view.heldKeep'), cls: 'mod-cta' });
+      const act = (choice: 'delete' | 'keep') => async () => {
+        del.disabled = true;
+        keep.disabled = true;
+        await this.actions?.resolveHeld(h.id, choice);
+        this.render();
+      };
+      del.onclick = act('delete');
+      keep.onclick = act('keep');
     }
   }
 

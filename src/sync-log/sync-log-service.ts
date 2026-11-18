@@ -89,6 +89,14 @@ export class SyncLogService {
 
         const file = this.vault.getAbstractFileByPath(entry.path);
         if (file instanceof TFile) {
+          // Keep what is there now: a restore is itself an overwrite.
+          const current = await this.vault.read(file);
+          if (current !== content) {
+            const kept = await this.backupService.backupTextFile(entry.path, current, "before-restore", {
+              restoring: entry.snapshotId,
+            });
+            if (!kept) return false;
+          }
           await this.vault.modify(file, content);
         } else {
           const adapter = (this.vault as any).adapter;
@@ -104,6 +112,12 @@ export class SyncLogService {
 
         const file = this.vault.getAbstractFileByPath(entry.path);
         if (file instanceof TFile) {
+          const current = new Uint8Array(await this.vault.readBinary(file));
+          const kept = await this.backupService.backupBinaryFile(entry.path, current, "before-restore", {
+            restoring: entry.snapshotId,
+            size: current.byteLength,
+          });
+          if (!kept) return false;
           await this.vault.modifyBinary(file, content);
         } else {
           const adapter = (this.vault as any).adapter;

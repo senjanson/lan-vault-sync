@@ -8,6 +8,7 @@ import {
   FileChunkPayload,
   FileDeletePayload,
   FileRenamePayload,
+  FileVersionInfo,
 } from '../types';
 
 /**
@@ -213,16 +214,45 @@ export function decodeFileRequest(payload: Uint8Array): string {
   return decoder.decode(payload);
 }
 
+function versionInfo(p: FileVersionInfo): Uint8Array {
+  const info: FileVersionInfo = {};
+  if (p.hash) info.hash = p.hash;
+  if (p.base) info.base = p.base;
+  if (typeof p.madeAt === 'number' && Number.isFinite(p.madeAt)) info.madeAt = p.madeAt;
+  return Object.keys(info).length ? encoder.encode(JSON.stringify(info)) : new Uint8Array(0);
+}
+
+function readVersionInfo(bytes: Uint8Array): FileVersionInfo {
+  if (bytes.byteLength === 0) return {};
+  try {
+    const raw = JSON.parse(decoder.decode(bytes)) as Record<string, unknown>;
+    const info: FileVersionInfo = {};
+    if (typeof raw.hash === 'string') info.hash = raw.hash;
+    if (typeof raw.base === 'string') info.base = raw.base;
+    if (typeof raw.madeAt === 'number' && Number.isFinite(raw.madeAt)) info.madeAt = raw.madeAt;
+    return info;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * FILE_DATA: [u16 path length][path][f64 mtime][u32 info length][info JSON]
+ * [content]. The info (protocol 3) says which version this is; see
+ * FileVersionInfo.
+ */
 export function encodeFileData(payload: FileDataPayload): Uint8Array {
   const pathBytes = encoder.encode(payload.path);
-  // [2 bytes path len][path][8 bytes mtime][content]
-  const buf = new Uint8Array(2 + pathBytes.length + 8 + payload.content.length);
+  const info = versionInfo(payload);
+  const header = 2 + pathBytes.length + 8 + 4 + info.length;
+  const buf = new Uint8Array(header + payload.content.length);
   const view = new DataView(buf.buffer);
   view.setUint16(0, pathBytes.length, false);
   buf.set(pathBytes, 2);
-  // store mtime as float64
   view.setFloat64(2 + pathBytes.length, payload.mtime, false);
-  buf.set(payload.content, 2 + pathBytes.length + 8);
+  view.setUint32(2 + pathBytes.length + 8, info.length, false);
+  buf.set(info, 2 + pathBytes.length + 12);
+  buf.set(payload.content, header);
   return encodeMessage(MessageType.FILE_DATA, buf);
 }
 
@@ -232,19 +262,26 @@ export function decodeFileData(payload: Uint8Array): FileDataPayload {
   }
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const pathLen = view.getUint16(0, false);
-  if (payload.byteLength < 2 + pathLen + 8) {
+  if (payload.byteLength < 2 + pathLen + 12) {
     throw new Error('Malformed file payload: truncated metadata');
   }
   const path = decoder.decode(payload.slice(2, 2 + pathLen));
   const mtime = view.getFloat64(2 + pathLen, false);
-  const content = payload.slice(2 + pathLen + 8);
-  return { path, content, mtime };
+  const infoLen = view.getUint32(2 + pathLen + 8, false);
+  const header = 2 + pathLen + 12 + infoLen;
+  if (payload.byteLength < header) {
+    throw new Error('Malformed file payload: truncated metadata');
+  }
+  const info = readVersionInfo(payload.slice(2 + pathLen + 12, header));
+  const content = payload.slice(header);
+  return { path, content, mtime, ...info };
 }
 
+/** FILE_CHUNK: as FILE_DATA, with the total size and offset after mtime. */
 export function encodeFileChunk(payload: FileChunkPayload): Uint8Array {
   const pathBytes = encoder.encode(payload.path);
-  // [2 bytes path len][path][8 bytes mtime][8 bytes total size][8 bytes offset][content]
-  const header = 2 + pathBytes.length + 24;
+  const info = versionInfo(payload);
+  const header = 2 + pathBytes.length + 28 + info.length;
   const buf = new Uint8Array(header + payload.content.length);
   const view = new DataView(buf.buffer);
   view.setUint16(0, pathBytes.length, false);
@@ -252,6 +289,8 @@ export function encodeFileChunk(payload: FileChunkPayload): Uint8Array {
   view.setFloat64(2 + pathBytes.length, payload.mtime, false);
   view.setFloat64(2 + pathBytes.length + 8, payload.totalSize, false);
   view.setFloat64(2 + pathBytes.length + 16, payload.offset, false);
+  view.setUint32(2 + pathBytes.length + 24, info.length, false);
+  buf.set(info, 2 + pathBytes.length + 28);
   buf.set(payload.content, header);
   return encodeMessage(MessageType.FILE_CHUNK, buf);
 }
@@ -262,7 +301,11 @@ export function decodeFileChunk(payload: Uint8Array): FileChunkPayload {
   }
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const pathLen = view.getUint16(0, false);
-  const header = 2 + pathLen + 24;
+  if (payload.byteLength < 2 + pathLen + 28) {
+    throw new Error('Malformed chunk payload: truncated metadata');
+  }
+  const infoLen = view.getUint32(2 + pathLen + 24, false);
+  const header = 2 + pathLen + 28 + infoLen;
   if (payload.byteLength < header) {
     throw new Error('Malformed chunk payload: truncated metadata');
   }
@@ -271,6 +314,7 @@ export function decodeFileChunk(payload: Uint8Array): FileChunkPayload {
     mtime: view.getFloat64(2 + pathLen, false),
     totalSize: view.getFloat64(2 + pathLen + 8, false),
     offset: view.getFloat64(2 + pathLen + 16, false),
+    ...readVersionInfo(payload.slice(2 + pathLen + 28, header)),
     content: payload.slice(header),
   };
 }
@@ -292,10 +336,29 @@ export function encodeFolderOp(
 
 // ─── Ping / Pong ─────────────────────────────────────────
 
-export function encodePing(): Uint8Array {
-  return encodeMessage(MessageType.PING, new Uint8Array(0));
+/** PING carries the sender's clock (protocol 3), to estimate clock skew. */
+export function encodePing(now: number = Date.now()): Uint8Array {
+  const buf = new Uint8Array(8);
+  new DataView(buf.buffer).setFloat64(0, now, false);
+  return encodeMessage(MessageType.PING, buf);
 }
 
-export function encodePong(): Uint8Array {
-  return encodeMessage(MessageType.PONG, new Uint8Array(0));
+/** PONG echoes the ping's time and adds the answering device's clock. */
+export function encodePong(pingTime = 0, now: number = Date.now()): Uint8Array {
+  const buf = new Uint8Array(16);
+  const view = new DataView(buf.buffer);
+  view.setFloat64(0, pingTime, false);
+  view.setFloat64(8, now, false);
+  return encodeMessage(MessageType.PONG, buf);
+}
+
+export function decodePing(payload: Uint8Array): number | null {
+  if (payload.byteLength < 8) return null;
+  return new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getFloat64(0, false);
+}
+
+export function decodePong(payload: Uint8Array): { pingTime: number; peerTime: number } | null {
+  if (payload.byteLength < 16) return null;
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  return { pingTime: view.getFloat64(0, false), peerTime: view.getFloat64(8, false) };
 }
