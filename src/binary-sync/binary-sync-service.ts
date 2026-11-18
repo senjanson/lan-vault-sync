@@ -482,7 +482,11 @@ export class BinaryFileSyncService {
       }
       return this._deleteFile(del.path, { expectHash: del.hash, checkDoc: !!del.hash, movedTo: del.movedTo, ctx });
     }
-    const snap = await this.gate.snapshot(del.path);
+    // The same deletion comes from each peer: wait for one already under
+    // way, which leaves nothing for this one to do.
+    await this.deleting.get(del.path)?.catch(() => false);
+    // A file removed while it was read (by the trash, or the user) is gone.
+    const snap = await this.gate.snapshot(del.path).catch(() => null);
     if (!snap) return false;
     if (admit && this.admitDeleteCb && !this.admitDeleteCb(deviceId, del)) return false;
     let ok: boolean | undefined;

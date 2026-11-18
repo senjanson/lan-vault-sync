@@ -176,7 +176,17 @@ describe('no-loss stage 1', { timeout: 40000 }, () => {
     };
     await until(() => !once, 10000);
     await sleep(2000);
-    expect(B.vault.bin('p.png')?.toString('hex')).toBe('0303');
+    // The version on its way was not written over B's change.
+    const refused = B.coord.eventLog.recentRecords().find((r) => r.op === 'precondition-failed' && r.path === 'p.png');
+    expect(refused).toBeTruthy();
+    // B's change is on disk, or kept where it can be restored. (Which of two
+    // diverged attachments wins is settled in stage 2, from their versions.)
+    const backups = path.join(rb, '.obsidian/plugins/lan-vault-sync/conflicts');
+    const kept = (dir: string): Buffer[] => fs.existsSync(dir)
+      ? fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? kept(path.join(dir, e.name)) : e.name === 'p.png' ? [fs.readFileSync(path.join(dir, e.name))] : [])
+      : [];
+    const versions = [B.vault.bin('p.png'), ...kept(backups)].map((b) => b?.toString('hex'));
+    expect(versions).toContain('0303');
   });
 
   it('records remote deletions in the persistent log with rule, peer and hash', async () => {
@@ -194,5 +204,40 @@ describe('no-loss stage 1', { timeout: 40000 }, () => {
     expect(del).toMatchObject({ rule: 'live-delete', before: { size: 1 } });
     expect(del?.peer).toContain('aaaa');
     expect(del?.before?.hash).toBeTruthy();
+  });
+});
+
+describe('e2e relayed edits of a deleted note', { timeout: 40000 }, () => {
+  it('passes an old edit of a note deleted everywhere on once, not round and round', async () => {
+    const { connectRaw } = await import('./harness');
+    const { encodeYjsSync } = await import('../../src/transport/protocol');
+    const { MessageType } = await import('../../src/types');
+    const Y = await import('yjs');
+    const p = ports();
+    const roots = [0, 1, 2].map((i) => tmpRoot('l' + i));
+    const ns = [];
+    for (let i = 0; i < 3; i++) ns.push(track(await startNode(roots[i], 'node' + i, p + i, [0, 1, 2].filter((j) => j < i).map((j) => p + j))));
+    await until(() => ns.every((n) => n.coord.getConnectedPeers().length === 2), 10000);
+    await ns[0].vault.write('gone.md', 'old text\n');
+    await until(() => ns.every((n) => n.vault.text('gone.md') === 'old text\n'), 10000);
+    // The note's history as it was when deleted, as a device that has not
+    // heard of the deletion still sends it.
+    const dm = (ns[1].coord as any).docManager;
+    const late = Y.encodeStateAsUpdate(await dm.getOrCreateDoc('gone.md'));
+    await ns[0].vault.deleteFile(ns[0].vault.files.get('gone.md'));
+    await until(() => ns.every((n) => !n.vault.exists('gone.md')), 10000);
+    await sleep(500);
+    let relayed = 0;
+    for (const n of ns) {
+      const cm = (n.coord as any).connectionManager;
+      const send = cm.sendTo.bind(cm);
+      cm.sendTo = (id: string, msg: Uint8Array) => { if (msg[0] === MessageType.YJS_UPDATE) relayed++; return send(id, msg); };
+    }
+    const peer = await connectRaw(p, { deviceId: 'away', vaultId: (ns[0].coord as any).vaultId }, 'TEST-KEY');
+    peer.send(encodeYjsSync(MessageType.YJS_UPDATE, 'gone.md', late));
+    await sleep(3000);
+    peer.ws.close();
+    // Each device passes it on at most once, to the two others.
+    expect(relayed).toBeLessThanOrEqual(6);
   });
 });

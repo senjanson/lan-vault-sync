@@ -65,6 +65,9 @@ interface SavedAgreedHashes {
   times: Record<string, [string, number]>;
 }
 
+/** An update passed on to peers is not passed on again for this long. */
+const RELAY_ONCE_MS = 60_000;
+
 export class SyncCoordinator {
   private static readonly REMOTE_TEXT_RENAME_ALIAS_TTL_MS = 10_000;
   private connectionManager: ConnectionManager;
@@ -604,6 +607,10 @@ export class SyncCoordinator {
         .getConnectedPeerIds()
         .filter((id) => id !== fromDeviceId);
       if (peers.length === 0) return;
+      // Each update once: a deleted note's doc is dropped after each update
+      // (see _writeFileFromRemoteNow), so the same update applied again is
+      // new to it, and was passed round the devices without end.
+      if (!this._firstRelay(filePath, update)) return;
       const msg = encodeYjsSync(MessageType.YJS_UPDATE, filePath, update);
       for (const peerId of peers) this.connectionManager.sendTo(peerId, msg);
     });
@@ -2915,6 +2922,28 @@ export class SyncCoordinator {
   }
 
   /** Files in the vault that sync, for the bulk-deletion limits. */
+  /** Updates passed on lately, by path and digest, with when. */
+  private relayed = new Map<string, number>();
+
+  /** Whether this update was not passed on within the last minute. */
+  private _firstRelay(filePath: string, update: Uint8Array): boolean {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < update.length; i++) {
+      h ^= update[i];
+      h = Math.imul(h, 0x01000193);
+    }
+    const key = `${filePath}\u0000${update.length}:${(h >>> 0).toString(36)}`;
+    const now = Date.now();
+    const last = this.relayed.get(key);
+    if (last !== undefined && now - last < RELAY_ONCE_MS) return false;
+    this.relayed.set(key, now);
+    if (this.relayed.size > 5000) {
+      for (const [k, t] of this.relayed) if (now - t >= RELAY_ONCE_MS) this.relayed.delete(k);
+      if (this.relayed.size > 5000) this.relayed.clear();
+    }
+    return true;
+  }
+
   private _vaultFileCount(): number {
     return this.vault.getFiles().filter((f) => this._isAllowedPath(f.path)).length;
   }
