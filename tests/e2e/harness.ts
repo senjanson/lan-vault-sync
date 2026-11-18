@@ -59,8 +59,22 @@ export class DiskVault {
   /** Folders come straight from disk, with their children, like Obsidian's tree. */
   folder(p: string): TFolder | null {
     if (!p || p.startsWith('.obsidian') || !fs.existsSync(this.abs(p)) || !fs.statSync(this.abs(p)).isDirectory()) return null;
+    return this.liveFolder(p);
+  }
+  getRoot(): TFolder { return this.liveFolder(''); }
+  /** Children are read when asked for, as they are now (Obsidian's are live). */
+  private liveFolder(p: string): TFolder {
     const f = new TFolder(p);
-    f.children = fs.readdirSync(this.abs(p)).map((n) => this.getAbstractFileByPath(`${p}/${n}`)).filter(Boolean);
+    Object.defineProperty(f, 'children', {
+      get: () => {
+        if (!fs.existsSync(this.abs(p))) return [];
+        return fs.readdirSync(this.abs(p))
+          .map((n) => (p ? `${p}/${n}` : n))
+          .filter((c) => !c.startsWith('.obsidian'))
+          .map((c) => this.getAbstractFileByPath(c))
+          .filter(Boolean);
+      },
+    });
     return f;
   }
   getAllLoadedFiles(): any[] {

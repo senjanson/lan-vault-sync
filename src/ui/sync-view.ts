@@ -11,8 +11,12 @@ export interface SyncViewStatus {
   unreachable: string[];
 }
 
+/** How long new log lines wait to be shown, so that they are drawn together. */
+const RENDER_DELAY_MS = 250;
+
 export class SyncView extends ItemView {
   private logs: string[] = [];
+  private renderTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * The status is read when the view renders rather than kept from events:
@@ -48,7 +52,13 @@ export class SyncView extends ItemView {
     this.logs.unshift(`[${timestamp}] ${message}`);
     // Keep last 100 entries
     if (this.logs.length > 100) this.logs.pop();
-    this.render();
+    // A bulk change logs an event per file; the view is drawn again at most
+    // a few times a second, not once for each.
+    if (this.renderTimer) return;
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = null;
+      this.render();
+    }, RENDER_DELAY_MS);
   }
 
   private render(): void {

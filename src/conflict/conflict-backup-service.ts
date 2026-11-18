@@ -16,6 +16,8 @@ export class ConflictBackupService {
   private sequence = 0;
   /** Whether CONFLICT_BACKUP_DIR is known to exist; see _makeFolders. */
   private rootReady = false;
+  /** The adapter does not make missing parent folders; see _writeInNewFolders. */
+  private oneLevelAtATime = false;
 
   constructor(private vault: Vault) {}
 
@@ -37,8 +39,7 @@ export class ConflictBackupService {
       const snapshot = this._buildSnapshotPaths(filePath);
       const metadata = this._buildMetadata(filePath, reason, "text", details);
 
-      await this._makeFolders(adapter, snapshot);
-      await adapter.write(snapshot.contentPath, content);
+      await this._writeInNewFolders(adapter, snapshot, () => adapter.write(snapshot.contentPath, content));
       await adapter.write(
         snapshot.metadataPath,
         JSON.stringify(metadata, null, 2),
@@ -71,10 +72,8 @@ export class ConflictBackupService {
       const snapshot = this._buildSnapshotPaths(filePath);
       const metadata = this._buildMetadata(filePath, reason, "binary", details);
 
-      await this._makeFolders(adapter, snapshot);
-      await adapter.writeBinary(
-        snapshot.contentPath,
-        this._toArrayBuffer(content),
+      await this._writeInNewFolders(adapter, snapshot, () =>
+        adapter.writeBinary(snapshot.contentPath, this._toArrayBuffer(content)),
       );
       await adapter.write(
         snapshot.metadataPath,
@@ -88,6 +87,33 @@ export class ConflictBackupService {
       );
       return null;
     }
+  }
+
+  /**
+   * Write a new backup's file, making its folders first. Obsidian's adapters
+   * make a folder's missing parents along with it, so one call makes them
+   * all: a bulk delete from a peer backs up every file, and a call per
+   * folder level was most of the work of each. Where that fails (the call
+   * refused the missing parents, or the write found no folder) they are
+   * made one level at a time and the file written again.
+   */
+  private async _writeInNewFolders(
+    adapter: any,
+    snapshot: ConflictBackupResult,
+    write: () => Promise<void>,
+  ): Promise<void> {
+    if (this.rootReady && !this.oneLevelAtATime) {
+      try {
+        await adapter.mkdir(getParentDir(snapshot.contentPath));
+        await write();
+        return;
+      } catch (err) {
+        logger.debug("Making backup folders one level at a time:", err);
+        this.oneLevelAtATime = true;
+      }
+    }
+    await this._makeFolders(adapter, snapshot);
+    await write();
   }
 
   /**

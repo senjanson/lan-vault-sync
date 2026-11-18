@@ -627,6 +627,124 @@ describe('e2e lost sync history', { timeout: 30000 }, () => {
       }
     }
   });
+
+  /** Set a file's modified time to `at` (ms), as a later touch or a skewed clock would. */
+  const touch = (root: string, file: string, at: number) => fs.utimesSync(path.join(root, file), at / 1000, at / 1000);
+  const copies = (root: string) => listNotes(root).filter((f) => f.includes('(conflict'));
+
+  it('keeps no conflict copy of a note changed on one side only after a device lost its sync history', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const base = {
+      'onlyB.md': 'v1 onlyB\n', 'onlyA.md': 'v1 onlyA\n', 'both.md': 'v1 both\n', 'same.md': 'v1 same\n',
+      'onlyB touched.md': 'v1 onlyB touched\n', 'onlyA touched.md': 'v1 onlyA touched\n',
+    };
+    seed(ra, base);
+    seed(rb, base);
+    const pa = ports();
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => count(A, 'Tree sync with') > 0 && count(B, 'Tree sync with') > 0);
+    await sleep(1500);
+    await A.coord.stop();
+    await B.coord.stop();
+    nodes = [];
+    // B's saved history is gone (the plugin was reinstalled, say); its list
+    // of synced files is still there.
+    fs.rmSync(path.join(rb, stateDir), { recursive: true, force: true });
+    const now = Date.now();
+    seed(rb, { 'onlyB.md': 'v2 onlyB from B\n', 'onlyB touched.md': 'v2 onlyB touched from B\n', 'both.md': 'v2 both from B\n' });
+    seed(ra, { 'onlyA.md': 'v2 onlyA from A\n', 'onlyA touched.md': 'v2 onlyA touched from A\n', 'both.md': 'v2 both from A\n' });
+    touch(ra, 'both.md', now - 60_000);
+    touch(rb, 'both.md', now - 30_000);
+    // The unchanged copy was modified later (touched, or a clock that is
+    // ahead): the changed copy still wins.
+    touch(ra, 'onlyB touched.md', now + 60_000);
+    touch(rb, 'onlyA touched.md', now + 60_000);
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    const expected: Record<string, string> = {
+      'onlyB.md': 'v2 onlyB from B\n', 'onlyA.md': 'v2 onlyA from A\n', 'both.md': 'v2 both from B\n', 'same.md': 'v1 same\n',
+      'onlyB touched.md': 'v2 onlyB touched from B\n', 'onlyA touched.md': 'v2 onlyA touched from A\n',
+    };
+    const settled = () => [A, B].every((n) => Object.entries(expected).every(([f, t]) => n.vault.text(f) === t));
+    await until(() => settled() && copies(ra).length > 0 && copies(rb).length > 0, 10000);
+    await sleep(1500);
+    for (const n of [A, B]) for (const [f, t] of Object.entries(expected)) expect(n.vault.text(f)).toBe(t);
+    // Only the note changed on both sides keeps the other version.
+    for (const r of [ra, rb]) {
+      expect(copies(r)).toHaveLength(1);
+      expect(copies(r)[0].startsWith('both (conflict ')).toBe(true);
+      expect(fs.readFileSync(path.join(r, copies(r)[0]), 'utf8')).toBe('v2 both from A\n');
+    }
+    // Edits still flow both ways afterwards.
+    await B.vault.write('onlyA.md', 'v3 onlyA from B\n');
+    await A.vault.write('onlyB.md', 'v3 onlyB from A\n');
+    await until(() => A.vault.text('onlyA.md') === 'v3 onlyA from B\n' && B.vault.text('onlyB.md') === 'v3 onlyB from A\n');
+    expect(A.vault.text('onlyA.md')).toBe('v3 onlyA from B\n');
+    expect(B.vault.text('onlyB.md')).toBe('v3 onlyB from A\n');
+  });
+
+  it('keeps no conflict copy of a note changed on one device after another lost its sync history, with three devices', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+    const base = { 'n.md': 'v1 n\n', 'm.md': 'v1 m\n', 'same.md': 'same\n' };
+    for (const r of [ra, rb, rc]) seed(r, base);
+    const pa = ports(), pb = pa + 1, pc = pa + 2;
+    const start = () => Promise.all([
+      startNode(ra, 'aaaa', pa, []),
+      startNode(rb, 'bbbb', pb, [pa]),
+      startNode(rc, 'cccc', pc, [pa, pb]),
+    ]);
+    let all = await start();
+    all.forEach(track);
+    await until(() => all.every((n) => count(n, 'Tree sync with') >= 2));
+    await sleep(2000);
+    for (const n of all) await n.coord.stop();
+    nodes = [];
+    fs.rmSync(path.join(rb, stateDir), { recursive: true, force: true });
+    seed(ra, { 'n.md': 'v2 n from A\n' });
+    seed(rb, { 'm.md': 'v2 m from B\n' });
+    all = await start();
+    all.forEach(track);
+    const settled = () => all.every((n) => n.vault.text('n.md') === 'v2 n from A\n' && n.vault.text('m.md') === 'v2 m from B\n');
+    await until(settled, 10000);
+    await sleep(2000);
+    for (const n of all) {
+      expect(n.vault.text('n.md')).toBe('v2 n from A\n');
+      expect(n.vault.text('m.md')).toBe('v2 m from B\n');
+      expect(n.vault.text('same.md')).toBe('same\n');
+    }
+    for (const r of [ra, rb, rc]) expect(copies(r)).toEqual([]);
+  });
+
+  it('keeps the changed version when a device lost all of the plugin\'s data', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const base = { 'onlyB.md': 'v1 onlyB\n', 'onlyA.md': 'v1 onlyA\n', 'same.md': 'v1 same\n' };
+    seed(ra, base);
+    seed(rb, base);
+    const pa = ports();
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => count(A, 'Tree sync with') > 0 && count(B, 'Tree sync with') > 0);
+    await sleep(1500);
+    await A.coord.stop();
+    await B.coord.stop();
+    nodes = [];
+    // Nothing of the plugin is left on B: it cannot tell which version the
+    // two devices last shared, so it keeps the other version as before.
+    fs.rmSync(path.join(rb, '.obsidian/plugins/lan-vault-sync'), { recursive: true, force: true });
+    await sleep(50);
+    seed(rb, { 'onlyB.md': 'v2 onlyB from B\n' });
+    seed(ra, { 'onlyA.md': 'v2 onlyA from A\n' });
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    const expected: Record<string, string> = { 'onlyB.md': 'v2 onlyB from B\n', 'onlyA.md': 'v2 onlyA from A\n', 'same.md': 'v1 same\n' };
+    await until(() => [A, B].every((n) => Object.entries(expected).every(([f, t]) => n.vault.text(f) === t)), 10000);
+    await sleep(1500);
+    for (const n of [A, B]) for (const [f, t] of Object.entries(expected)) expect(n.vault.text(f)).toBe(t);
+    for (const r of [ra, rb]) {
+      for (const f of copies(r)) expect(fs.readFileSync(path.join(r, f), 'utf8')).toMatch(/^v1 only[AB]\n$/);
+    }
+  });
 });
 
 describe('e2e files put back after a deletion', { timeout: 30000 }, () => {

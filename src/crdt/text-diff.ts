@@ -102,6 +102,20 @@ export function applyRebasedEdit(
   }, origin);
 }
 
+/**
+ * Whether `merged` has a line that none of `sources` has. Edits made apart
+ * to different lines of a note merge into lines that each come from one
+ * side; edits to the same line merge character by character into a line
+ * that neither side wrote. Lines are compared without their line break, so
+ * that a line added at the end of a note with no final newline counts as
+ * the same line wherever the merge puts its break.
+ */
+export function hasLineFromNeither(merged: string, sources: string[]): boolean {
+  const known = new Set<string>();
+  for (const text of sources) for (const line of text.split('\n')) known.add(line);
+  return merged.split('\n').some((line) => !known.has(line));
+}
+
 function applyDiffToYTextWithOrigin(ytext: Y.Text, oldText: string, newText: string, origin: unknown): void {
   if (oldText === newText) return;
   let index = 0;

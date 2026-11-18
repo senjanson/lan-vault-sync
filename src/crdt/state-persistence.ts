@@ -327,7 +327,12 @@ export class StatePersistence {
       }
 
       const newStateFile = await this._stateFilePath(newPath);
-      await ensureParentDirectory(this.adapter, newStateFile);
+      // Once per run, not once per note: a folder of notes moved by a peer
+      // looked the folder up for each of them.
+      if (!this.stateDirReady) {
+        await ensureParentDirectory(this.adapter, newStateFile);
+        this.stateDirReady = true;
+      }
       await this._removeIfExists(newStateFile);
       await this._removeIfExists(this._legacyStateFilePath(newPath));
 
@@ -342,6 +347,7 @@ export class StatePersistence {
       this._noteState(newStateFile, true);
       if (moved && moved[0] === oldStateFile) await this._setDigest(newPath, [newStateFile, moved[1]]);
     } catch (err) {
+      this.stateDirReady = false;
       logger.error(`Failed to rename CRDT state from ${oldPath} to ${newPath}:`, err);
     }
   }

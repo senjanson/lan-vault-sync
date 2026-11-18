@@ -29,6 +29,33 @@ export async function ensureParentDirectory(adapter: MinimalAdapter, filePath: s
 }
 
 /**
+ * Make the folder a vault file is to be created in, unless the vault already
+ * holds it. The vault's own tree answers that without a file system lookup:
+ * on a phone each lookup is a round trip, made for every file a peer creates
+ * or moves in a bulk change.
+ *
+ * `beforeCreate` is told each folder about to be made, outermost last.
+ * Obsidian reports a folder made through the adapter as a new folder, like
+ * one the user made; the caller marks it as made for a peer.
+ */
+export async function ensureVaultParentFolder(
+  vault: { adapter?: MinimalAdapter; getAbstractFileByPath(path: string): unknown },
+  filePath: string,
+  beforeCreate?: (folder: string) => void,
+): Promise<void> {
+  const isFolder = (path: string) => {
+    const known = vault.getAbstractFileByPath(path) as { children?: unknown } | null;
+    return !!known && Array.isArray(known.children);
+  };
+  const dir = getParentDir(filePath);
+  if (!dir || isFolder(dir)) return;
+  if (beforeCreate) {
+    for (let sub = dir; sub && !isFolder(sub); sub = getParentDir(sub)) beforeCreate(sub);
+  }
+  if (vault.adapter) await ensureDirectory(vault.adapter, dir);
+}
+
+/**
  * Whether a path received from a peer may be read or written in the vault.
  * Checks whole path segments, so names like "v1..2.md" stay allowed while
  * traversal, absolute or drive-letter paths and hidden folders (such as the

@@ -219,3 +219,36 @@ describe('BinaryFileSyncService received bytes', () => {
     expect(Array.from(new Uint8Array(await vault.readBinary(file)))).toEqual([1, 2, 0, 255]);
   });
 });
+
+describe('BinaryFileSyncService deletions', () => {
+  it('backs up and deletes a file once when its deletion comes from two peers at once', async () => {
+    const vault = new FakeVault();
+    vault.setBinary('d/file.bin', [1, 2]);
+    const backupBinaryFile = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      return { backupId: 'b', contentPath: 'x' };
+    });
+    const sendTo = vi.fn();
+    const service = new BinaryFileSyncService(
+      vault as any,
+      { broadcast: vi.fn(), sendTo, getConnectedPeerIds: () => ['a', 'b', 'c'] } as any,
+      { backupBinaryFile } as any,
+    );
+    const deleted = vi.fn();
+    service.onRemoteFileDeleted(deleted);
+    const { encodeFileDelete, decodeMessage } = await import('../../src/transport/protocol');
+    const { MessageType } = await import('../../src/types');
+    const msg = decodeMessage(encodeFileDelete({ path: 'd/file.bin', deletedAt: 5 }));
+
+    await Promise.all([
+      service.handleMessage('a', MessageType.FILE_DELETE, msg.payload),
+      service.handleMessage('b', MessageType.FILE_DELETE, msg.payload),
+    ]);
+
+    expect(vault.getAbstractFileByPath('d/file.bin')).toBeNull();
+    expect(backupBinaryFile).toHaveBeenCalledTimes(1);
+    expect(deleted).toHaveBeenCalledTimes(1);
+    // Passed on once, by the message that deleted it, to the peers that did not send it.
+    expect(sendTo.mock.calls.map((c) => c[0]).sort()).toEqual(['b', 'c']);
+  });
+});

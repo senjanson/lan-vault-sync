@@ -58,6 +58,12 @@ export const TOMBSTONE_FILE = ".obsidian/plugins/lan-vault-sync/deleted-files.js
 export const REVIVED_FILE = ".obsidian/plugins/lan-vault-sync/revived-files.json";
 /** Files and their hashes as of the last time sync ran. */
 export const FILE_INDEX_FILE = ".obsidian/plugins/lan-vault-sync/synced-files.json";
+/**
+ * Per peer and note, the content this device last had in common with that
+ * peer (see FileMeta.agreed), and times learned for notes' versions (see
+ * FileMeta.madeAt).
+ */
+export const AGREED_HASHES_FILE = ".obsidian/plugins/lan-vault-sync/agreed-files.json";
 /** How long a deletion is remembered for peers that were offline. */
 export const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 

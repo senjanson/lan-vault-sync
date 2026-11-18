@@ -109,4 +109,31 @@ describe('TombstoneStore', () => {
       vi.useRealTimers();
     }
   });
+
+  it('finds the records of renames to a name, as filtering the whole list does', async () => {
+    const adapter = memoryAdapter();
+    let now = 1_000_000;
+    const store = new TombstoneStore(adapter, () => now);
+    await store.load();
+    const byList = (to: string) => store.list().filter((t) => t.movedTo === to).map((t) => t.path);
+    const byIndex = (to: string) => store.renamesTo(to).map((t) => t.path);
+    store.add('a.md', 'h1', undefined, 'x.md');
+    store.add('b.md', 'h2', undefined, 'x.md');
+    store.add('c.md', 'h3', undefined, 'y.md');
+    store.add('d.md', 'h4');
+    expect(byIndex('x.md')).toEqual(['a.md', 'b.md']);
+    now += 1;
+    store.add('a.md', 'h1', undefined, 'y.md'); // moved on again: the old target no longer holds
+    store.clear('b.md');
+    store.revive('c.md');
+    for (const to of ['x.md', 'y.md', 'd.md']) expect(byIndex(to)).toEqual(byList(to));
+    expect(byIndex('y.md')).toEqual(['a.md']);
+    await store.flush();
+
+    const loaded = new TombstoneStore(adapter, () => now);
+    await loaded.load();
+    expect(loaded.renamesTo('y.md').map((t) => t.path)).toEqual(['a.md']);
+    now += TOMBSTONE_TTL_MS + 1;
+    expect(loaded.renamesTo('y.md')).toEqual([]);
+  });
 });

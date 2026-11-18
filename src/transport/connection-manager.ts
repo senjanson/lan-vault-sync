@@ -193,7 +193,7 @@ export class ConnectionManager {
     // Seen again, so it may be called again once its connection drops.
     this.lostUrls.delete(url);
     if (device.deviceId === this.settings.deviceId) return;
-    if (this.peers.has(device.deviceId)) return;
+    if (this._livePeer(device.deviceId)) return;
     if (!this._shouldInitiateConnection(device)) return;
 
     if (device.deviceId.startsWith('manual-')) this.manualUrls.add(url);
@@ -345,7 +345,7 @@ export class ConnectionManager {
   }
 
   isConnectedTo(deviceId: string): boolean {
-    return this.peers.has(deviceId);
+    return this.peers.get(deviceId)?.ws.readyState === SOCKET_OPEN;
   }
 
   // ─── Private ────────────────────────────────────────────
@@ -556,7 +556,7 @@ export class ConnectionManager {
       ws.close();
       return false;
     }
-    const existing = this.peers.get(device.deviceId);
+    const existing = this._livePeer(device.deviceId);
     if (existing) {
       // Both devices may dial each other at the same moment (a manual
       // address on one side, discovery on the other). Each side would then
@@ -645,6 +645,22 @@ export class ConnectionManager {
         logger.error(`Error handling message from ${deviceId}:`, err);
       }
     });
+  }
+
+  /**
+   * The device's connection, if its socket is still open. A socket that is
+   * already closing can take a while to report it (the ws library waits up to
+   * 30 seconds for the other side). Until then it would count as the device's
+   * connection: a new one would be skipped or closed as a duplicate, and once
+   * the old socket finally closed nothing would call the device again. So a
+   * closing connection is dropped here and a new one may take its place.
+   */
+  private _livePeer(deviceId: string): PeerConnection | undefined {
+    const peer = this.peers.get(deviceId);
+    if (!peer) return undefined;
+    if (peer.ws.readyState === SOCKET_OPEN) return peer;
+    this._removePeer(deviceId, peer.ws);
+    return undefined;
   }
 
   /**

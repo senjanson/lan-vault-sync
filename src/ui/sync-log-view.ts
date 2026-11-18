@@ -7,13 +7,22 @@ import { SyncLogModal } from "./sync-log-modal";
 export class SyncLogView extends ItemView {
   private filterType: SyncLogEntryType | "all" = "all";
   private searchQuery = "";
+  private renderTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
     private syncLogService: SyncLogService,
   ) {
     super(leaf);
-    this.syncLogService.onChange(() => this.render());
+    // A bulk change from a peer adds an entry per file; drawing every entry
+    // again for each one made the change itself slow on a phone.
+    this.syncLogService.onChange(() => {
+      if (this.renderTimer) return;
+      this.renderTimer = setTimeout(() => {
+        this.renderTimer = null;
+        this.render();
+      }, 250);
+    });
   }
 
   getViewType(): string {

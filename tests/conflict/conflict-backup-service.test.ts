@@ -89,4 +89,27 @@ describe('ConflictBackupService', () => {
     const third = await service.backupTextFile('e.md', 'text', 'text-remote-overwrite');
     expect(adapter.textFiles.get(third!.contentPath)).toBe('text');
   });
+
+  it('makes a backup\'s folders with one call where the adapter makes missing parents', async () => {
+    // Like Obsidian's adapters: mkdir makes the parents, a write needs its folder.
+    const adapter = new FakeAdapter();
+    let mkdirs = 0;
+    adapter.mkdir = async (p: string) => {
+      mkdirs++;
+      for (let at = p.indexOf('/'); at > 0; at = p.indexOf('/', at + 1)) adapter.directories.add(p.slice(0, at));
+      adapter.directories.add(p);
+    };
+    const write = adapter.writeBinary.bind(adapter);
+    adapter.writeBinary = async (p: string, d: ArrayBuffer) => {
+      if (!adapter.directories.has(p.slice(0, p.lastIndexOf('/')))) throw new Error(`no folder for ${p}`);
+      return write(p, d);
+    };
+    const service = new ConflictBackupService({ adapter } as any);
+
+    await service.backupBinaryFile('a/b/c.png', new Uint8Array([1]), 'remote-file-delete');
+    mkdirs = 0;
+    const second = await service.backupBinaryFile('x/y/z/d.png', new Uint8Array([2]), 'remote-file-delete');
+    expect(mkdirs).toBe(1);
+    expect(Array.from(adapter.binaryFiles.get(second!.contentPath)!)).toEqual([2]);
+  });
 });

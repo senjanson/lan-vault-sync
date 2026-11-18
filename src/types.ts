@@ -87,6 +87,23 @@ export interface FileMeta {
    * it. Older versions leave this out.
    */
   revives?: { deletedAt: number; hash?: string };
+  /**
+   * Hash of the note's content when this device last saw the receiving peer
+   * list it with the very same content: the version those two last had in
+   * common. Each peer is sent its own. Lets two devices whose histories no
+   * longer match tell a note changed on one side only from one changed on
+   * both. Older versions leave this out.
+   */
+  agreed?: string;
+  /**
+   * Notes: when this version (this content) was made, as early as known:
+   * the file's modified time, or an earlier time a peer listing the same
+   * content gave. A device that received the version learns the time of
+   * the one that made it at their next list exchange, so all devices that
+   * have the version give the same time, and weigh it alike against
+   * another version. Older versions leave this out.
+   */
+  madeAt?: number;
 }
 
 // ─── Sync state ──────────────────────────────────────────

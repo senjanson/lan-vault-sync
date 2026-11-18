@@ -3,6 +3,7 @@ import { WS_PING_INTERVAL_MS } from '../../src/constants';
 import { encodePing, encodePong } from '../../src/transport/protocol';
 
 import { ConnectionManager } from '../../src/transport/connection-manager';
+import { WSClient } from '../../src/transport/ws-client';
 import { DEFAULT_SETTINGS, type DeviceInfo, type HandshakePayload } from '../../src/types';
 
 function createManager(): ConnectionManager {
@@ -126,6 +127,63 @@ describe('ConnectionManager liveness', () => {
       manager.stop();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('takes a new connection while the old socket is still closing', () => {
+    const manager = createManager() as any;
+    const events: string[] = [];
+    manager.onPeerConnected((d: DeviceInfo) => events.push('up ' + d.deviceId));
+    manager.onPeerDisconnected((id: string) => events.push('down ' + id));
+    const old = fakeSocket();
+    manager._setupWs(old, peer, plainChannel, 'outbound');
+    old.readyState = 2; // closing; the close event has not arrived yet
+    expect(manager.isConnectedTo('device-c')).toBe(false);
+
+    // Same direction as the old one, so while the old one counted as live
+    // this was closed as a duplicate.
+    const fresh = fakeSocket();
+    expect(manager._setupWs(fresh, peer, plainChannel, 'outbound')).toBe(true);
+    expect(fresh.closed).toBe(false);
+    expect(manager.isConnectedTo('device-c')).toBe(true);
+
+    // The old socket finally closes; the new connection stays.
+    old.emit('close');
+    expect(manager.isConnectedTo('device-c')).toBe(true);
+    expect(events).toEqual(['up device-c', 'down device-c', 'up device-c']);
+    manager.stop();
+  });
+
+  it('still closes a duplicate while the existing connection is open', () => {
+    const manager = createManager() as any;
+    const first = fakeSocket();
+    manager._setupWs(first, peer, plainChannel, 'outbound');
+    const dup = fakeSocket();
+    expect(manager._setupWs(dup, peer, plainChannel, 'outbound')).toBe(false);
+    expect(dup.closed).toBe(true);
+    expect(first.closed).toBe(false);
+    expect(manager.isConnectedTo('device-c')).toBe(true);
+    manager.stop();
+  });
+
+  it('calls a device again when its only connection is still closing', () => {
+    const connect = vi.spyOn(WSClient.prototype, 'connect').mockImplementation(() => {});
+    try {
+      const manager = createManager() as any;
+      const old = fakeSocket();
+      manager._setupWs(old, peer, plainChannel, 'outbound');
+      const url = `ws://${peer.ip}:${peer.port}`;
+
+      manager.connectToPeer(peer);
+      expect(manager.clients.has(url)).toBe(false); // open connection: nothing to do
+
+      old.readyState = 2;
+      manager.connectToPeer(peer);
+      expect(manager.clients.has(url)).toBe(true);
+      expect(connect).toHaveBeenCalledTimes(1);
+      manager.stop();
+    } finally {
+      connect.mockRestore();
     }
   });
 });

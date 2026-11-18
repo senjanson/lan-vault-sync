@@ -11,6 +11,8 @@ export class SyncLogService {
   private onChangeCb: (() => void) | null = null;
   private sequence = 0;
   private lastLocalSendTime = new Map<string, number>();
+  /** How long the last write of the log took, in ms; see _scheduleSave. */
+  private lastWriteMs = 0;
 
   constructor(
     private vault: Vault,
@@ -138,7 +140,9 @@ export class SyncLogService {
 
     try {
       await ensureParentDirectory(adapter, SYNC_LOG_FILE_PATH);
+      const started = Date.now();
       await adapter.write(SYNC_LOG_FILE_PATH, JSON.stringify(this.entries));
+      this.lastWriteMs = Date.now() - started;
     } catch (err) {
       logger.error("Failed to save sync log:", err);
     }
@@ -164,11 +168,17 @@ export class SyncLogService {
     return `${Date.now()}-${this.sequence}`;
   }
 
+  /**
+   * Save a while after the log changes. A bulk change adds an entry per file
+   * for minutes on a phone, and each save writes the whole log, so while
+   * entries keep coming saves are spaced to take a tenth of the time at
+   * most. The log is also saved when sync stops.
+   */
   private _scheduleSave(): void {
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(async () => {
       this.saveTimer = null;
       await this.saveToDisk();
-    }, 2000);
+    }, Math.min(10000, Math.max(2000, this.lastWriteMs * 10)));
   }
 }

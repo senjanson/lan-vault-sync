@@ -27,6 +27,13 @@ const MAX_SAVE_DELAY_MS = 3000;
  */
 export class TombstoneStore {
   private entries = new Map<string, Tombstone>();
+  /**
+   * Paths of the records of renames, by the name the file went to. A file
+   * list exchange looks up, for each file one side lacks, the renames that
+   * led to it: going through every record each time made that exchange take
+   * seconds on a phone once a bulk change left thousands of records.
+   */
+  private byTarget = new Map<string, Set<string>>();
   /** Files put back after a deletion, by path; see revive. */
   private revivals = new Map<string, Revival>();
   private loaded = false;
@@ -49,7 +56,8 @@ export class TombstoneStore {
         const list = JSON.parse(await this.adapter.read(file)) as Tombstone[];
         for (const t of list) {
           if (t && typeof t.path === 'string' && typeof t.deletedAt === 'number') {
-            into.set(t.path, t);
+            if (into === this.entries) this._set(t);
+            else into.set(t.path, t);
           }
         }
       } catch (err) {
@@ -68,6 +76,19 @@ export class TombstoneStore {
     return Array.from(this.entries.values());
   }
 
+  /** Records of renames of a file to `path`; the same as filtering list(). */
+  renamesTo(path: string): Tombstone[] {
+    const paths = this.byTarget.get(path);
+    if (!paths) return [];
+    const cutoff = this.now() - TOMBSTONE_TTL_MS;
+    const out: Tombstone[] = [];
+    for (const p of paths) {
+      const t = this.entries.get(p);
+      if (t && t.deletedAt >= cutoff) out.push(t);
+    }
+    return out;
+  }
+
   add(path: string, hash?: string, deletedAt = this.now(), movedTo?: string): void {
     const existing = this.entries.get(path);
     if (existing && existing.deletedAt >= deletedAt) return;
@@ -79,12 +100,12 @@ export class TombstoneStore {
     // again does not undo the rename: peers still need to know where it went.
     const moved = movedTo ?? existing?.movedTo;
     if (moved) entry.movedTo = moved;
-    this.entries.set(path, entry);
+    this._set(entry);
     this._changed();
   }
 
   clear(path: string): void {
-    if (this.entries.delete(path)) this._changed();
+    if (this._delete(path)) this._changed();
   }
 
   /**
@@ -101,7 +122,7 @@ export class TombstoneStore {
   revive(path: string): void {
     const existing = this.entries.get(path);
     if (!existing) return;
-    this.entries.delete(path);
+    this._delete(path);
     if (!existing.movedTo) this.noteRevival(path, existing.deletedAt, existing.hash);
     this._changed();
   }
@@ -132,7 +153,7 @@ export class TombstoneStore {
     const cutoff = this.now() - TOMBSTONE_TTL_MS;
     for (const [p, t] of this.entries) {
       if (t.deletedAt < cutoff) {
-        this.entries.delete(p);
+        this._delete(p);
         this.entriesDirty = true;
       }
     }
@@ -143,6 +164,27 @@ export class TombstoneStore {
       }
     }
     this._scheduleSave();
+  }
+
+  private _set(entry: Tombstone): void {
+    this._delete(entry.path);
+    this.entries.set(entry.path, entry);
+    if (!entry.movedTo) return;
+    const paths = this.byTarget.get(entry.movedTo);
+    if (paths) paths.add(entry.path);
+    else this.byTarget.set(entry.movedTo, new Set([entry.path]));
+  }
+
+  private _delete(path: string): boolean {
+    const old = this.entries.get(path);
+    if (!old) return false;
+    this.entries.delete(path);
+    const paths = old.movedTo ? this.byTarget.get(old.movedTo) : undefined;
+    if (paths) {
+      paths.delete(path);
+      if (paths.size === 0) this.byTarget.delete(old.movedTo!);
+    }
+    return true;
   }
 
   private _changed(): void {

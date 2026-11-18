@@ -92,6 +92,113 @@ export function decodeYjsSync(payload: Uint8Array): YjsSyncMessage {
   return { filePath, data };
 }
 
+/**
+ * A note's text on the sending device as the devices meet again, sent with
+ * the state vector of a YJS_SYNC_STEP1 when the note differs between them.
+ * See SyncCoordinator._settleApartEdits.
+ */
+export interface ApartText {
+  text: string;
+  /**
+   * When the sender's version was made (FileMeta.madeAt), or its file last
+   * modified. Both devices weigh the same two values, whichever was sent.
+   */
+  mtime: number;
+}
+
+const APART_TEXT_TAG = 0x01;
+
+/**
+ * The data of a YJS_SYNC_STEP1: a Yjs state vector, optionally followed by
+ * the sender's text (see ApartText). Yjs reads a state vector up to its last
+ * entry and ignores what follows, so older versions read such a message as
+ * a plain state vector.
+ */
+export function encodeSyncStep1Data(stateVector: Uint8Array, apart?: ApartText): Uint8Array {
+  if (!apart) return stateVector;
+  const extra = encoder.encode(JSON.stringify({ text: apart.text, mtime: apart.mtime }));
+  const data = new Uint8Array(stateVector.length + 1 + extra.length);
+  data.set(stateVector, 0);
+  data[stateVector.length] = APART_TEXT_TAG;
+  data.set(extra, stateVector.length + 1);
+  return data;
+}
+
+export function decodeSyncStep1Data(data: Uint8Array): { stateVector: Uint8Array; apart?: ApartText } {
+  // A state vector is a count, then that many (client, clock) pairs, all
+  // variable-length unsigned integers.
+  let pos = 0;
+  const readVarUint = (): number | null => {
+    let value = 0;
+    for (let shift = 0; pos < data.length && shift < 53; shift += 7) {
+      const byte = data[pos++];
+      value += (byte & 0x7f) * 2 ** shift;
+      if (byte < 0x80) return value;
+    }
+    return null;
+  };
+  const count = readVarUint();
+  for (let i = 0; count !== null && i < count * 2; i++) {
+    if (readVarUint() === null) return { stateVector: data };
+  }
+  if (count === null || pos >= data.length || data[pos] !== APART_TEXT_TAG) {
+    return { stateVector: data };
+  }
+  const stateVector = data.slice(0, pos);
+  try {
+    const extra = JSON.parse(decoder.decode(data.slice(pos + 1))) as Partial<ApartText>;
+    if (typeof extra.text === 'string' && typeof extra.mtime === 'number' && Number.isFinite(extra.mtime)) {
+      return { stateVector, apart: { text: extra.text, mtime: extra.mtime } };
+    }
+  } catch {
+    // Not one we can read: the state vector still is.
+  }
+  return { stateVector };
+}
+
+/**
+ * Marks the data of a YJS_FULL_STATE as a history the sender adopted a
+ * moment ago (see SyncCoordinator.recentAdoptions), with the hash of the
+ * text it dropped for it. Appended after the Yjs update, which Yjs reads up
+ * to its end and ignores what follows, so older versions read such a
+ * message as a plain update. An update in Yjs' format ends with a
+ * variable-length integer, whose last byte is below 0x80: the mark ends
+ * with 0xff, so no update is taken for a marked one.
+ */
+const ADOPTED_HISTORY_MARK = new Uint8Array([0x4c, 0x56, 0x53, 0x61, 0x64, 0x6f, 0x70, 0xff]);
+
+/** A whole doc the sender adopted a moment ago: the hash of the text it had before. */
+export interface AdoptedHistory {
+  dropped: string;
+}
+
+/**
+ * The data of a YJS_FULL_STATE: a Yjs update, then, for a history the
+ * sender adopted a moment ago, the dropped text's hash, its length (one
+ * byte) and the mark.
+ */
+export function encodeFullStateData(update: Uint8Array, adopted?: AdoptedHistory): Uint8Array {
+  if (!adopted) return update;
+  const dropped = encoder.encode(adopted.dropped).slice(0, 255);
+  const data = new Uint8Array(update.length + dropped.length + 1 + ADOPTED_HISTORY_MARK.length);
+  data.set(update, 0);
+  data.set(dropped, update.length);
+  data[update.length + dropped.length] = dropped.length;
+  data.set(ADOPTED_HISTORY_MARK, update.length + dropped.length + 1);
+  return data;
+}
+
+export function decodeFullStateData(data: Uint8Array): { update: Uint8Array; adopted?: AdoptedHistory } {
+  const markAt = data.length - ADOPTED_HISTORY_MARK.length;
+  if (markAt < 1 || ADOPTED_HISTORY_MARK.some((b, i) => data[markAt + i] !== b)) return { update: data };
+  const droppedAt = markAt - 1 - data[markAt - 1];
+  if (droppedAt < 0) return { update: data };
+  return {
+    update: data.slice(0, droppedAt),
+    adopted: { dropped: decoder.decode(data.slice(droppedAt, markAt - 1)) },
+  };
+}
+
 // ─── File meta ───────────────────────────────────────────
 
 export function encodeFileMetaSync(payload: FileMetaSyncPayload): Uint8Array {

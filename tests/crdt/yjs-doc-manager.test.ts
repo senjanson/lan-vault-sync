@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as Y from 'yjs';
 
-import { compareStateVectors, YjsDocManager } from '../../src/crdt/yjs-doc-manager';
+import { compareStateVectors, restoreText, YjsDocManager } from '../../src/crdt/yjs-doc-manager';
 
 function createManager(): YjsDocManager {
   const vault = {
@@ -170,5 +170,39 @@ describe('YjsDocManager seeding from disk', () => {
     await manager.compareHistory('n.md', Y.encodeStateVector(new Y.Doc()));
     await manager.initDocFromContentSilent('n.md', 'on disk');
     expect(await manager.getContent('n.md')).toBe('on disk');
+  });
+});
+
+describe('restoreText', () => {
+  /** Two devices whose docs both hold `merged`, from one shared history. */
+  function twoCopies(base: string, edit: (t: Y.Text) => void) {
+    const a = new Y.Doc();
+    a.getText('content').insert(0, base);
+    edit(a.getText('content'));
+    const b = new Y.Doc();
+    Y.applyUpdate(b, Y.encodeStateAsUpdate(a));
+    return [a, b];
+  }
+
+  it('makes the same change once when two devices make it at once', () => {
+    // "world" was deleted and has to be typed again on both.
+    const [a, b] = twoCopies('hello world!!', (t) => t.delete(6, 5));
+    const updates: Uint8Array[] = [];
+    for (const doc of [a, b]) {
+      doc.once('update', (u: Uint8Array) => updates.push(u));
+      restoreText(doc, 'hello !!', 'hello world!!');
+    }
+    Y.applyUpdate(a, updates[1]);
+    Y.applyUpdate(b, updates[0]);
+    expect(a.getText('content').toString()).toBe('hello world!!');
+    expect(b.getText('content').toString()).toBe('hello world!!');
+  });
+
+  it('keeps the doc\'s own client ID for its later edits', () => {
+    const [a] = twoCopies('abc', () => undefined);
+    const own = a.clientID;
+    restoreText(a, 'abc', 'abXc');
+    expect(a.clientID).toBe(own);
+    expect(a.getText('content').toString()).toBe('abXc');
   });
 });

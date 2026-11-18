@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
-import { applyRebasedEdit } from '../../src/crdt/text-diff';
+import { applyRebasedEdit, hasLineFromNeither } from '../../src/crdt/text-diff';
 
 function text(content: string): Y.Text {
   const t = new Y.Doc().getText('content');
@@ -32,5 +32,19 @@ describe('applyRebasedEdit', () => {
     const t = text('one two');
     applyRebasedEdit(t, 'one two', 'one 2 three');
     expect(t.toString()).toBe('one 2 three');
+  });
+});
+
+describe('hasLineFromNeither', () => {
+  it('tells a line merged from both versions from lines of one or the other', () => {
+    const a = 'title\nhub version, earlier\nend\n';
+    const b = 'title\nother version, later\nend\n';
+    expect(hasLineFromNeither('title\nhub version, earother versio, laterr\nend\n', [a, b])).toBe(true);
+    expect(hasLineFromNeither(b, [a, b])).toBe(false);
+    expect(hasLineFromNeither('one A\ntwo B\n', ['one A\ntwo\n', 'one\ntwo B\n'])).toBe(false);
+  });
+
+  it('ignores where line breaks went when lines were added at the end', () => {
+    expect(hasLineFromNeither('x\ny\nfrom A\nfrom B', ['x\ny\nfrom A', 'x\ny\nfrom B'])).toBe(false);
   });
 });

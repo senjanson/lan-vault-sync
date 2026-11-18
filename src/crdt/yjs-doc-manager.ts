@@ -405,8 +405,17 @@ export class YjsDocManager {
    * (see _startsOtherHistory); returns false, without applying it, then.
    * The check and the apply are one step, so two peers' separate histories
    * arriving together cannot both be applied to a doc that was empty.
+   *
+   * `settle`, when given, sees the text before and after an update that
+   * changed it, and may return a text to put in the note instead (see
+   * restoreText), before anything is written to the file.
    */
-  async applyRelatedUpdate(filePath: string, update: Uint8Array, fromDeviceId?: string): Promise<boolean> {
+  async applyRelatedUpdate(
+    filePath: string,
+    update: Uint8Array,
+    fromDeviceId?: string,
+    settle?: (before: string, merged: string) => Promise<string | null>,
+  ): Promise<boolean> {
     let related = true;
     const remoteContentChange = await this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
@@ -417,7 +426,14 @@ export class YjsDocManager {
       this.seeded.add(doc);
       const previousContent = doc.getText('content').toString();
       Y.applyUpdate(doc, update, remoteOrigin(fromDeviceId));
-      const content = doc.getText('content').toString();
+      let content = doc.getText('content').toString();
+      if (settle && content !== previousContent) {
+        const instead = await settle(previousContent, content);
+        if (instead !== null && instead !== content) {
+          restoreText(doc, content, instead);
+          content = instead;
+        }
+      }
       return content !== previousContent ? { content, previousContent } : null;
     });
 
@@ -773,6 +789,36 @@ export function compareStateVectors(
   return Math.min(...local.keys()) < Math.min(...remote.keys())
     ? 'local-wins'
     : 'remote-wins';
+}
+
+/**
+ * Change a doc's text from `current` to `target`, as a local edit that is
+ * sent to peers. Several devices may make the very same change to the very
+ * same doc at once (two devices that held the same version of a note each
+ * put back the version that won; see SyncCoordinator._settleApartEdits).
+ * Deletions made twice are one deletion, but text inserted twice would be
+ * there twice. So the edit is made under a client ID derived from the doc's
+ * state and the target text: devices making the same change create the same
+ * items, which Yjs then holds once. A doc in any other state gets another ID
+ * and its own items, as for any edit.
+ */
+export function restoreText(doc: Y.Doc, current: string, target: string): void {
+  const own = doc.clientID;
+  const state = Y.encodeSnapshot(Y.snapshot(doc));
+  const text = new TextEncoder().encode(target);
+  // FNV-1a over the doc's state and the target text.
+  let hash = 0x811c9dc5;
+  for (const bytes of [state, text]) {
+    for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 0x01000193);
+  }
+  const shared = (hash >>> 0) || 1;
+  // An ID already in the doc would make these items clash with its own.
+  if (!Y.decodeStateVector(Y.encodeStateVector(doc)).has(shared)) doc.clientID = shared;
+  try {
+    applyDiffToYText(doc.getText('content'), current, target);
+  } finally {
+    doc.clientID = own;
+  }
 }
 
 /** How many characters differ between two texts. */

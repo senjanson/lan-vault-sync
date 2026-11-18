@@ -27,7 +27,7 @@ import {
   CHUNKED_FILE_THRESHOLD,
   MAX_SYNC_FILE_SIZE,
 } from "../constants";
-import { ensureParentDirectory, isCaseVariant, isSafeSyncPath } from "../utils/path-utils";
+import { ensureVaultParentFolder, isCaseVariant, isSafeSyncPath } from "../utils/path-utils";
 
 interface IncomingFile {
   path: string;
@@ -39,6 +39,8 @@ interface IncomingFile {
 export class BinaryFileSyncService {
   /** Chunked files being received, keyed by `${deviceId}\n${path}`. */
   private incoming = new Map<string, IncomingFile>();
+  /** Deletions being applied, by path; see _deleteFile. */
+  private deleting = new Map<string, Promise<boolean>>();
   private isDeletedCb: ((path: string, hash: string) => boolean) | null = null;
   private holdsOtherContentCb:
     | ((path: string, hash: string) => Promise<boolean>)
@@ -56,6 +58,7 @@ export class BinaryFileSyncService {
   private onRemoteFileRenamedCb:
     | ((oldPath: string, newPath: string) => Promise<void> | void)
     | null = null;
+  private onRemoteFolderMadeCb: ((path: string) => void) | null = null;
   private onBackupCreatedCb:
     | ((path: string, backupId: string, reason: string) => void)
     | null = null;
@@ -99,6 +102,14 @@ export class BinaryFileSyncService {
     cb: (path: string, kind?: "write" | "delete" | "rename", content?: Uint8Array) => void,
   ): void {
     this.onRemoteFileWrittenCb = cb;
+  }
+
+  /**
+   * Called before a folder is made to hold a file a peer sent or moved;
+   * see ensureVaultParentFolder.
+   */
+  onRemoteFolderMade(cb: (path: string) => void): void {
+    this.onRemoteFolderMadeCb = cb;
   }
 
   onRemoteFileDeleted(cb: (path: string, movedTo?: string, record?: Tombstone) => Promise<void> | void): void {
@@ -155,14 +166,13 @@ export class BinaryFileSyncService {
         const record = !del.movedTo && typeof del.deletedAt === "number"
           ? { path: del.path, deletedAt: del.deletedAt }
           : undefined;
-        const existed = !!this.vault.getAbstractFileByPath(del.path);
-        await this._deleteFile(del.path, del.hash, del.movedTo, record);
+        const deleted = await this._deleteFile(del.path, del.hash, del.movedTo, record);
         // Passed on to the other peers, as edits are (see SyncCoordinator):
         // a device connected only through this one would otherwise get a
         // new note made under the name before it knew the old one was gone,
-        // and keep the old one as a conflict copy. Only when the file was
-        // deleted here, so the message does not go round.
-        if (existed && !del.movedTo && !this.vault.getAbstractFileByPath(del.path)) {
+        // and keep the old one as a conflict copy. Only when this message
+        // deleted the file here, so the message does not go round.
+        if (deleted && !del.movedTo && !this.vault.getAbstractFileByPath(del.path)) {
           const msg = encodeFileDelete(del);
           for (const peerId of this.connectionManager.getConnectedPeerIds()) {
             if (peerId !== deviceId) this.connectionManager.sendTo(peerId, msg);
@@ -379,10 +389,7 @@ export class BinaryFileSyncService {
         );
         await this.vault.modifyBinary(existing, toExactArrayBuffer(content));
       } else {
-        const adapter = (this.vault as any).adapter;
-        if (adapter) {
-          await ensureParentDirectory(adapter, path);
-        }
+        await ensureVaultParentFolder(this.vault as any, path, (folder) => this.onRemoteFolderMadeCb?.(folder));
         await this.vault.createBinary(path, toExactArrayBuffer(content));
       }
       await this.onRemoteFileStoredCb?.(path, hash, content, fromDeviceId);
@@ -406,13 +413,31 @@ export class BinaryFileSyncService {
    * Delete a file, backed up first. With `hash`, only that exact copy is
    * deleted: the file may change while it is backed up.
    */
-  private async _deleteFile(path: string, hash?: string, movedTo?: string, record?: Tombstone): Promise<void> {
+  private _deleteFile(path: string, hash?: string, movedTo?: string, record?: Tombstone): Promise<boolean> {
+    // One deletion of a path at a time. The same deletion comes from each
+    // peer (one passes on what another sent), and a tree sync may apply it
+    // too; each peer's messages are handled apart, so on a slow device all
+    // of them found the file still there, and backed it up and deleted it
+    // once each. Taken in turn, the later ones find it gone.
+    const run = (this.deleting.get(path) ?? Promise.resolve(false))
+      .catch(() => false)
+      .then(() => this._deleteFileNow(path, hash, movedTo, record));
+    this.deleting.set(path, run);
+    const forget = () => {
+      if (this.deleting.get(path) === run) this.deleting.delete(path);
+    };
+    run.then(forget, forget);
+    return run;
+  }
+
+  /** See _deleteFile; returns whether the file was deleted. */
+  private async _deleteFileNow(path: string, hash?: string, movedTo?: string, record?: Tombstone): Promise<boolean> {
     // Renamed to another case of its own name: where the storage does not
     // tell the two apart, deleting the old name would delete the renamed
     // file itself. The rename is followed instead.
     if (movedTo && isCaseVariant(path, movedTo)) {
       if (!this.vault.getAbstractFileByPath(movedTo)) await this._renameFile(path, movedTo);
-      return;
+      return false;
     }
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
@@ -432,9 +457,10 @@ export class BinaryFileSyncService {
           logger.error(
             `Aborting remote delete for ${path}: conflict backup unavailable`,
           );
-          return;
+          return false;
         }
-        logger.warn(
+        // Routine, once per file of a bulk delete; the sync log lists it.
+        logger.debug(
           `Backed up file before remote delete: ${path} -> ${backup.contentPath}`,
         );
         this.onBackupCreatedCb?.(path, backup.backupId, "remote-file-delete");
@@ -443,17 +469,19 @@ export class BinaryFileSyncService {
       // renamed while it was backed up, it is no longer this path's file.
       if (file.path !== path) {
         logger.warn(`Not deleting ${path}: it was renamed to ${file.path}`);
-        return;
+        return false;
       }
       if (hash && file instanceof TFile && !(await this._isCopy(file, path, hash))) {
         logger.warn(`Not deleting ${path}: it changed while it was backed up`);
-        return;
+        return false;
       }
       this.onRemoteFileWrittenCb?.(path, "delete");
       await this.vault.delete(file);
       await this.onRemoteFileDeletedCb?.(path, movedTo, record);
       logger.debug(`Deleted file: ${path}`);
+      return true;
     }
+    return false;
   }
 
   private async _isCopy(file: TFile, path: string, hash: string): Promise<boolean> {
@@ -508,10 +536,7 @@ export class BinaryFileSyncService {
 
     this.onRemoteFileWrittenCb?.(oldPath, "rename");
     this.onRemoteFileWrittenCb?.(newPath, "rename");
-    const adapter = (this.vault as any).adapter;
-    if (adapter) {
-      await ensureParentDirectory(adapter, newPath);
-    }
+    await ensureVaultParentFolder(this.vault as any, newPath, (folder) => this.onRemoteFolderMadeCb?.(folder));
     if (!(file instanceof TFile)) await this.vault.rename(file, newPath);
     else await this.renameInVault(file, newPath);
     await this.onRemoteFileRenamedCb?.(oldPath, newPath);
