@@ -451,6 +451,8 @@ export class SyncCoordinator {
 
   async stop(): Promise<void> {
     this.running = false;
+    for (const t of this.echoRechecks.values()) clearTimeout(t);
+    this.echoRechecks.clear();
     if (this.fullSyncTimer) {
       clearInterval(this.fullSyncTimer);
       this.fullSyncTimer = null;
@@ -1087,7 +1089,7 @@ export class SyncCoordinator {
             if (await this._holdsNonUtf8(path)) await this._sendTextAsBytes(path);
             break;
           }
-          if (this._isEchoOfRemoteWrite(path, content)) {
+          if (this._isEchoOfRemoteWrite(path, content, event.recheck)) {
             await this._noteDiskText(path, fromEditor, event.savedToDisk, content);
             break;
           }
@@ -3058,16 +3060,40 @@ export class SyncCoordinator {
    * modify event is our own write coming back. Any other content is a real
    * local edit; from then on the remembered write no longer applies.
    */
-  private _isEchoOfRemoteWrite(path: string, content: string): boolean {
+  private _isEchoOfRemoteWrite(path: string, content: string, newestOnly = false): boolean {
     const written = this.remoteWrittenText.get(path);
     if (written === undefined) return false;
+    const newest = written[written.length - 1];
+    if (newest.text === content) return true;
+    // An earlier write, shortly after: usually Obsidian reporting a write
+    // late, after the next one was made. But the user can also put that
+    // very text back (restoring a version, undoing): the file is read again
+    // in a moment, and text still there that is not our newest write is
+    // theirs (see _recheckEcho).
     const since = Date.now() - SyncCoordinator.REMOTE_WRITE_ECHO_MS;
-    // The newest write is an echo however late; earlier ones only shortly after.
-    if (written.some((w, i) => w.text === content && (i === written.length - 1 || w.at >= since))) {
+    if (!newestOnly && written.some((w) => w.text === content && w.at >= since)) {
+      this._recheckEcho(path);
       return true;
     }
     this.remoteWrittenText.delete(path);
     return false;
+  }
+
+  /** Pending re-reads of a file whose change looked like an earlier write of ours. */
+  private echoRechecks = new Map<string, ReturnType<typeof setTimeout>>();
+  private static readonly ECHO_RECHECK_MS = 1500;
+
+  private _recheckEcho(path: string): void {
+    const old = this.echoRechecks.get(path);
+    if (old) clearTimeout(old);
+    this.echoRechecks.set(
+      path,
+      setTimeout(() => {
+        this.echoRechecks.delete(path);
+        if (!this.running) return;
+        void this._enqueueLocalFileChange({ type: "modify", path, isTextFile: true, timestamp: Date.now(), recheck: true });
+      }, SyncCoordinator.ECHO_RECHECK_MS),
+    );
   }
 
   private static readonly REMOTE_WRITE_ECHO_MS = 30000;

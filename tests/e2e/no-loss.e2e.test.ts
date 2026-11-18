@@ -332,8 +332,10 @@ describe('no-loss stage 2: version history', { timeout: 40000 }, () => {
     const long = 'line one of a long note\n'.repeat(20);
     seed(ra, { 'n.md': long });
     const pa = ports();
-    const A = track(await startNode(ra, 'aaaa', pa, []));
-    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    // No periodic exchange: the restored text must go out as a change.
+    const slow = { syncIntervalMs: 60000 };
+    const A = track(await startNode(ra, 'aaaa', pa, [], slow));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa], slow));
     await until(() => B.vault.text('n.md') === long);
     await sleep(800);
     await A.vault.write('n.md', '');
@@ -347,7 +349,11 @@ describe('no-loss stage 2: version history', { timeout: 40000 }, () => {
     expect(alert).toBeTruthy();
     // Restoring brings the text back, and keeps the empty version first.
     expect(await store.restore(entries.find((e, i) => texts[i] === long)!)).toBe(true);
-    await until(() => B.vault.text('n.md') === long && A.vault.text('n.md') === long, 10000);
+    // Right away, though B received this very text moments ago: it is not
+    // B's own write coming back.
+    await until(() => B.vault.text('n.md') === long && A.vault.text('n.md') === long, 6000);
+    expect(B.vault.text('n.md')).toBe(long);
+    expect(A.vault.text('n.md')).toBe(long);
   });
 });
 

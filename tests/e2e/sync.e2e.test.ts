@@ -1266,6 +1266,11 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     // Obsidian reports the first write late, with the text it wrote then.
     await (B.coord as any)._handleLocalFileChange({ type: 'modify', path: 'f.md', content: 'one\ntwo\n', isTextFile: true, timestamp: Date.now() });
     expect(await dm.getContent('f.md')).toBe('one\ntwo\nthree\n');
+    // The file is read again shortly after: it holds the newest write, so
+    // still nothing is taken as an edit.
+    await sleep(2000);
+    expect(await dm.getContent('f.md')).toBe('one\ntwo\nthree\n');
+    expect(B.vault.text('f.md')).toBe('one\ntwo\nthree\n');
   });
 
   it('keeps an edit when the peer\'s text for the new name arrives while following a rename', async () => {

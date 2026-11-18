@@ -88,6 +88,11 @@ export interface FileChangeEvent {
    * and that change was still waiting (`content` holds an editor's text).
    */
   editedBeforeRename?: boolean;
+  /**
+   * A second read of a file whose change matched an earlier remote write
+   * (see SyncCoordinator._recheckEcho): only the newest write is ours now.
+   */
+  recheck?: boolean;
 }
 
 // ─── File metadata for tree sync ─────────────────────────
