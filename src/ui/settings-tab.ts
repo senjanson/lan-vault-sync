@@ -4,18 +4,19 @@ import { getLocalIPv4Addresses } from "../utils/network";
 import { supportsIncomingConnections } from "../utils/runtime";
 import { buildPeerURI, renderQRCode } from "./qr-code";
 import { generateSyncKey } from "../transport/auth";
+import { t } from "../i18n";
 
 function makeCopyable(el: HTMLElement, getText: () => string): void {
   el.addClass("lan-sync-copyable");
-  el.setAttribute("title", "点击复制 / Click to copy");
+  el.setAttribute("title", t("common.clickToCopy"));
   el.addEventListener("click", () => {
     navigator.clipboard
       .writeText(getText())
       .then(() => {
-        new Notice("已复制到剪贴板", 1500);
+        new Notice(t("common.copied"), 1500);
       })
       .catch(() => {
-        new Notice("复制失败，请手动选中文本", 2000);
+        new Notice(t("common.copyFailed"), 2000);
       });
   });
 }
@@ -47,8 +48,8 @@ export class LANSyncSettingTab extends PluginSettingTab {
 
 
     new Setting(containerEl)
-      .setName("Enable sync")
-      .setDesc("Turn LAN Vault Sync on or off.")
+      .setName(t("set.enable"))
+      .setDesc(t("set.enableDesc"))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.enabled)
@@ -64,11 +65,11 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Device name")
-      .setDesc("A friendly name for this device.")
+      .setName(t("set.deviceName"))
+      .setDesc(t("set.deviceNameDesc"))
       .addText((text) =>
         text
-          .setPlaceholder("e.g. MacBook Pro")
+          .setPlaceholder(t("set.deviceNamePlaceholder"))
           .setValue(this.plugin.settings.deviceName)
           .onChange(async (value) => {
             this.plugin.settings.deviceName = value;
@@ -78,15 +79,15 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Port")
+      .setName(t("set.port"))
       .setDesc(
         canAcceptIncoming
-          ? "WebSocket port for sync. Other devices that use a manual address must be given the new port."
-          : "This device cannot accept incoming connections. Keep this port aligned with your desktop peers if needed.",
+          ? t("set.portDesc")
+          : t("set.portDescOutbound"),
       )
       .addText((text) =>
         text
-          .setPlaceholder("auto-assigned")
+          .setPlaceholder(t("set.portPlaceholder"))
           .setValue(String(this.plugin.settings.port))
           .onChange(async (value) => {
             const port = parseInt(value, 10);
@@ -99,22 +100,22 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     // ─── Sync key ───────────────────────────────────────
-    new Setting(containerEl).setName("Sync key").setHeading();
+    new Setting(containerEl).setName(t("set.syncKey")).setHeading();
     containerEl.createEl("p", {
-      text: "Only devices with the same sync key can connect to each other. Scanning this device's QR code copies the key; otherwise enter the same key on every device. Synced data is encrypted with this key.",
+      text: t("set.syncKeyIntro"),
       cls: "setting-item-description",
     });
     let keyInput: { setValue(v: string): unknown } | null = null;
     new Setting(containerEl)
-      .setName("Sync key")
-      .setDesc("Changing it reconnects with the new key when you leave the field.")
+      .setName(t("set.syncKey"))
+      .setDesc(t("set.syncKeyDesc"))
       .addText((text) => {
         keyInput = text;
         text.setValue(this.plugin.settings.syncKey);
         text.inputEl.addEventListener("change", async () => {
           const ok = await this.plugin.setSyncKey(text.getValue());
           if (!ok) {
-            new Notice("LAN Sync: the sync key needs at least 8 letters or digits");
+            new Notice(t("set.syncKeyTooShort"));
             text.setValue(this.plugin.settings.syncKey);
           } else {
             this.display();
@@ -122,30 +123,30 @@ export class LANSyncSettingTab extends PluginSettingTab {
         });
       })
       .addButton((button) =>
-        button.setButtonText("Copy").onClick(async () => {
+        button.setButtonText(t("common.copy")).onClick(async () => {
           await navigator.clipboard.writeText(this.plugin.settings.syncKey);
-          new Notice("LAN Sync: sync key copied");
+          new Notice(t("set.syncKeyCopied"));
         }),
       )
       .addButton((button) =>
-        button.setButtonText("New key").onClick(async () => {
+        button.setButtonText(t("set.newKey")).onClick(async () => {
           await this.plugin.setSyncKey(generateSyncKey());
           keyInput?.setValue(this.plugin.settings.syncKey);
-          new Notice("LAN Sync: new sync key set. Pair your other devices again.");
+          new Notice(t("set.newKeySet"));
           this.display();
         }),
       );
 
     // ─── QR Code (Share This Device) ───────────────────
-    new Setting(containerEl).setName("Pair with QR code").setHeading();
+    new Setting(containerEl).setName(t("set.qrHeading")).setHeading();
     if (!canAcceptIncoming) {
       containerEl.createEl("p", {
-        text: "This device is running in outbound-only mode. On iPhone/iPad, please scan the QR code shown on a desktop device or add the desktop peer manually.",
+        text: t("set.qrOutbound"),
         cls: "setting-item-description",
       });
     } else {
       containerEl.createEl("p", {
-        text: "Let another device scan this QR code to quickly add this device as a peer.",
+        text: t("set.qrIntro"),
         cls: "setting-item-description",
       });
 
@@ -153,7 +154,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
 
       if (ips.length === 0) {
         containerEl.createEl("p", {
-          text: "Unable to detect local IP address. QR code pairing requires a network connection.",
+          text: t("set.qrNoIp"),
           cls: "setting-item-description",
         });
       } else {
@@ -172,7 +173,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
           const uri = buildPeerURI(ip, currentPort, this.plugin.settings.syncKey);
           qrInfo.empty();
           const addrEl = qrInfo.createEl("p", {
-            text: `Address: ${ip}:${currentPort}`,
+            text: t("set.qrAddress", { address: `${ip}:${currentPort}` }),
             cls: "lan-sync-qr-address",
           });
           makeCopyable(addrEl, () => `${ip}:${currentPort}`);
@@ -186,8 +187,8 @@ export class LANSyncSettingTab extends PluginSettingTab {
 
         if (ips.length > 1) {
           new Setting(qrWrapper)
-            .setName("Network interface")
-            .setDesc("Select which IP address to use.")
+            .setName(t("set.networkInterface"))
+            .setDesc(t("set.networkInterfaceDesc"))
             .addDropdown((drop) => {
               for (const ip of ips) {
                 drop.addOption(ip, ip);
@@ -208,9 +209,9 @@ export class LANSyncSettingTab extends PluginSettingTab {
     }
 
     // ─── Manual Peers ───────────────────────────────────
-    new Setting(containerEl).setName("Devices by address").setHeading();
+    new Setting(containerEl).setName(t("set.peersHeading")).setHeading();
     containerEl.createEl("p", {
-      text: "Add peers manually if auto-discovery doesn't work. Format: ip:port",
+      text: t("set.peersIntro"),
       cls: "setting-item-description",
     });
 
@@ -219,7 +220,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
 
     let peerTextInput: import("obsidian").TextComponent;
     new Setting(containerEl)
-      .setName("Add device")
+      .setName(t("set.addDevice"))
       .addText((text) => {
         peerTextInput = text;
         text.setPlaceholder("192.168.1.100:53712");
@@ -232,7 +233,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
         });
       })
       .addButton((btn) =>
-        btn.setButtonText("Add").onClick(async () => {
+        btn.setButtonText(t("common.add")).onClick(async () => {
           await this.addPeerFromInput(
             peerTextInput.getValue(),
             peerContainer,
@@ -242,12 +243,12 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     // ─── Ignored Paths ──────────────────────────────────
-    new Setting(containerEl).setName("Ignored paths").setHeading();
+    new Setting(containerEl).setName(t("set.ignoredHeading")).setHeading();
 
     new Setting(containerEl)
-      .setName("Ignored paths")
+      .setName(t("set.ignoredHeading"))
       .setDesc(
-        "Paths to exclude from sync (one per line). Paths ending with / match directories.",
+        t("set.ignoredDesc"),
       )
       .addTextArea((text) =>
         text
@@ -264,7 +265,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     // ─── Manual Sync ─────────────────────────────────────
-    new Setting(containerEl).setName("Manual sync").setHeading();
+    new Setting(containerEl).setName(t("set.manualHeading")).setHeading();
 
     const syncContainer = containerEl.createDiv({
       cls: "lan-sync-manual-sync",
@@ -281,25 +282,25 @@ export class LANSyncSettingTab extends PluginSettingTab {
     const progressLabel = syncContainer.createDiv({
       cls: "lan-sync-progress-label",
     });
-    progressLabel.setText('Click "Sync Now" to start a full sync.');
+    progressLabel.setText(t("set.manualHint"));
 
     let isSyncing = false;
 
     new Setting(syncContainer)
-      .setName("Full sync")
-      .setDesc("Manually trigger a full sync with all connected peers.")
+      .setName(t("set.fullSync"))
+      .setDesc(t("set.fullSyncDesc"))
       .addButton((btn) => {
         btn
-          .setButtonText("Sync now")
+          .setButtonText(t("set.syncNow"))
           .setCta()
           .onClick(async () => {
             if (isSyncing) return;
             isSyncing = true;
             btn.setDisabled(true);
-            btn.setButtonText("Syncing...");
+            btn.setButtonText(t("set.syncing"));
             progressBarInner.style.width = "0%";
             progressBarInner.removeClass("lan-sync-progress-complete");
-            progressLabel.setText("Starting...");
+            progressLabel.setText(t("set.starting"));
 
             try {
               await this.plugin.manualFullSync(
@@ -311,27 +312,27 @@ export class LANSyncSettingTab extends PluginSettingTab {
                   }
                 },
               );
-              new Notice("LAN Sync: Full sync complete!");
+              new Notice(t("set.syncDone"));
             } catch (err) {
-              progressLabel.setText("Sync failed. Check console for details.");
+              progressLabel.setText(t("set.syncFailedLabel"));
               progressBarInner.style.width = "100%";
               progressBarInner.addClass("lan-sync-progress-error");
-              new Notice("LAN Sync: Sync failed!");
+              new Notice(t("set.syncFailed"));
             } finally {
               isSyncing = false;
               btn.setDisabled(false);
-              btn.setButtonText("Sync now");
+              btn.setButtonText(t("set.syncNow"));
             }
           });
       });
 
     // ─── Advanced ───────────────────────────────────────
-    new Setting(containerEl).setName("Advanced").setHeading();
+    new Setting(containerEl).setName(t("set.advanced")).setHeading();
 
     new Setting(containerEl)
-      .setName("Sync check interval")
+      .setName(t("set.interval"))
       .setDesc(
-        "Interval for periodic full sync check (in seconds). 0 to disable.",
+        t("set.intervalDesc"),
       )
       .addText((text) =>
         text
@@ -347,8 +348,8 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Debug logging")
-      .setDesc("Enable verbose logging in the developer console.")
+      .setName(t("set.debug"))
+      .setDesc(t("set.debugDesc"))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.enableDebugLog)
@@ -359,11 +360,11 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     // ─── Sync Log ───────────────────────────────────────
-    new Setting(containerEl).setName("Sync log").setHeading();
+    new Setting(containerEl).setName(t("set.logHeading")).setHeading();
 
     new Setting(containerEl)
-      .setName("Enable sync log")
-      .setDesc("Record all sync operations for review and restoration.")
+      .setName(t("set.logEnable"))
+      .setDesc(t("set.logEnableDesc"))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.enableSyncLog)
@@ -374,8 +375,8 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Max log entries")
-      .setDesc("Maximum number of sync log entries to keep.")
+      .setName(t("set.logMax"))
+      .setDesc(t("set.logMaxDesc"))
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.maxSyncLogEntries))
@@ -389,24 +390,24 @@ export class LANSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Open sync log")
-      .setDesc("View all sync operations in a side panel.")
+      .setName(t("set.logOpen"))
+      .setDesc(t("set.logOpenDesc"))
       .addButton((btn) =>
-        btn.setButtonText("Open").onClick(() => {
+        btn.setButtonText(t("common.open")).onClick(() => {
           this.plugin.activateSyncLogView();
         }),
       );
 
     new Setting(containerEl)
-      .setName("Clear sync log")
-      .setDesc("Delete all sync log entries.")
+      .setName(t("set.logClear"))
+      .setDesc(t("set.logClearDesc"))
       .addButton((btn) =>
         btn
-          .setButtonText("Clear")
+          .setButtonText(t("common.clear"))
           .setWarning()
           .onClick(async () => {
             await this.plugin.syncLogService?.clearAll();
-            new Notice("Sync log cleared");
+            new Notice(t("set.logCleared"));
           }),
       );
   }

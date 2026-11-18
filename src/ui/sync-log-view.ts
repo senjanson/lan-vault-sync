@@ -3,6 +3,7 @@ import { SYNC_LOG_VIEW_TYPE } from "../constants";
 import { SyncLogEntry, SyncLogEntryType } from "../types";
 import { SyncLogService } from "../sync-log/sync-log-service";
 import { SyncLogModal } from "./sync-log-modal";
+import { t } from "../i18n";
 
 export class SyncLogView extends ItemView {
   private filterType: SyncLogEntryType | "all" = "all";
@@ -30,7 +31,7 @@ export class SyncLogView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Sync Log";
+    return t("log.title");
   }
 
   getIcon(): string {
@@ -53,7 +54,7 @@ export class SyncLogView extends ItemView {
     // Entries
     const entries = this._getFilteredEntries();
     if (entries.length === 0) {
-      container.createEl("p", { text: "暂无同步日志", cls: "lan-sync-muted" });
+      container.createEl("p", { text: t("log.empty"), cls: "lan-sync-muted" });
       return;
     }
 
@@ -74,12 +75,12 @@ export class SyncLogView extends ItemView {
     // Type filter
     const select = bar.createEl("select", { cls: "sync-log-filter-select" });
     const options: [string, string][] = [
-      ["all", "全部类型"],
-      ["remote-overwrite", "远程覆写"],
-      ["remote-delete", "远程删除"],
-      ["local-send", "本地发送"],
-      ["initial-sync-receive", "初始同步"],
-      ["conflict-backup", "冲突备份"],
+      ["all", t("log.allTypes")],
+      ["remote-overwrite", t("log.type.remote-overwrite")],
+      ["remote-delete", t("log.type.remote-delete")],
+      ["local-send", t("log.type.local-send")],
+      ["initial-sync-receive", t("log.type.initial-sync-receive")],
+      ["conflict-backup", t("log.type.conflict-backup")],
     ];
     for (const [value, label] of options) {
       const opt = select.createEl("option", { text: label });
@@ -94,7 +95,7 @@ export class SyncLogView extends ItemView {
     // Search
     const searchInput = bar.createEl("input", {
       type: "text",
-      placeholder: "搜索文件路径...",
+      placeholder: t("log.search"),
       cls: "sync-log-search-input",
     });
     searchInput.value = this.searchQuery;
@@ -156,7 +157,7 @@ export class SyncLogView extends ItemView {
     if (entry.hasSnapshot) {
       const previewBtn = actions.createEl("button", {
         cls: "sync-log-action-btn",
-        title: "预览",
+        title: t("log.preview"),
       });
       setIcon(previewBtn, "eye");
       previewBtn.addEventListener("click", (e) => {
@@ -166,7 +167,7 @@ export class SyncLogView extends ItemView {
 
       const restoreBtn = actions.createEl("button", {
         cls: "sync-log-action-btn",
-        title: "还原",
+        title: t("log.restore"),
       });
       setIcon(restoreBtn, "undo");
       restoreBtn.addEventListener("click", (e) => {
@@ -176,7 +177,7 @@ export class SyncLogView extends ItemView {
 
       const copyBtn = actions.createEl("button", {
         cls: "sync-log-action-btn",
-        title: "复制内容",
+        title: t("log.copyContent"),
       });
       setIcon(copyBtn, "copy");
       copyBtn.addEventListener("click", (e) => {
@@ -186,7 +187,7 @@ export class SyncLogView extends ItemView {
     } else {
       const viewBtn = actions.createEl("button", {
         cls: "sync-log-action-btn",
-        title: "打开文件",
+        title: t("log.openFile"),
       });
       setIcon(viewBtn, "eye");
       viewBtn.addEventListener("click", (e) => {
@@ -196,13 +197,13 @@ export class SyncLogView extends ItemView {
 
       const copyPathBtn = actions.createEl("button", {
         cls: "sync-log-action-btn",
-        title: "复制路径",
+        title: t("log.copyPath"),
       });
       setIcon(copyPathBtn, "copy");
       copyPathBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         navigator.clipboard.writeText(entry.path);
-        new Notice("已复制路径到剪贴板");
+        new Notice(t("log.pathCopied"));
       });
     }
   }
@@ -212,7 +213,7 @@ export class SyncLogView extends ItemView {
     if (file instanceof TFile) {
       this.app.workspace.getLeaf(false).openFile(file);
     } else {
-      new Notice(`文件不存在: ${path}`);
+      new Notice(t("log.fileMissing", { path }));
     }
   }
 
@@ -224,9 +225,9 @@ export class SyncLogView extends ItemView {
   private async _restoreEntry(entry: SyncLogEntry): Promise<void> {
     const success = await this.syncLogService.restoreFromSnapshot(entry);
     if (success) {
-      new Notice(`已还原: ${entry.path}`);
+      new Notice(t("log.restored", { path: entry.path }));
     } else {
-      new Notice(`还原失败: ${entry.path}`);
+      new Notice(t("log.restoreFailed", { path: entry.path }));
     }
   }
 
@@ -234,9 +235,9 @@ export class SyncLogView extends ItemView {
     const content = await this.syncLogService.readSnapshotContent(entry);
     if (content !== null) {
       await navigator.clipboard.writeText(content);
-      new Notice("已复制到剪贴板");
+      new Notice(t("common.copied"));
     } else {
-      new Notice("无法读取快照内容");
+      new Notice(t("log.unreadable"));
     }
   }
 
@@ -258,15 +259,15 @@ export class SyncLogView extends ItemView {
   private _typeLabel(type: SyncLogEntryType): string {
     switch (type) {
       case "remote-overwrite":
-        return "远程覆写";
+        return t("log.type.remote-overwrite");
       case "remote-delete":
-        return "远程删除";
+        return t("log.type.remote-delete");
       case "local-send":
-        return "本地发送";
+        return t("log.type.local-send");
       case "initial-sync-receive":
-        return "初始同步";
+        return t("log.type.initial-sync-receive");
       case "conflict-backup":
-        return "冲突备份";
+        return t("log.type.conflict-backup");
     }
   }
 }

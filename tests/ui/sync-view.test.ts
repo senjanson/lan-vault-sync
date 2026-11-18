@@ -36,7 +36,7 @@ describe('SyncView', () => {
     await view.onOpen();
     const text = content.allText();
     expect(text).toContain('Syncing');
-    expect(text).toContain('Connected Devices (3)');
+    expect(text).toContain('Connected devices (3)');
     expect(text).toContain('iphone');
   });
 
@@ -46,7 +46,7 @@ describe('SyncView', () => {
     await view.onOpen();
     status = { state: 'watching', devices: [device('mac')], unreachable: ['192.168.1.5:50000'] };
     view.refresh();
-    expect(content.allText()).toContain('Connected Devices (1)');
+    expect(content.allText()).toContain('Connected devices (1)');
     expect(content.allText()).toContain('Cannot reach 192.168.1.5:50000');
   });
 });

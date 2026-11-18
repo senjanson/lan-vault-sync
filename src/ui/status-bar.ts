@@ -1,5 +1,6 @@
 import { Plugin } from 'obsidian';
 import { SyncState } from '../types';
+import { t } from '../i18n';
 
 export class StatusBar {
   private el: HTMLElement;
@@ -20,27 +21,27 @@ export class StatusBar {
     switch (state) {
       case 'idle':
         icon.setText('⏸');
-        text.setText('LAN Sync: Off');
+        text.setText(t('status.off'));
         break;
       case 'discovering':
         icon.setText('🔍');
-        text.setText('LAN Sync: Searching...');
+        text.setText(t('status.searching'));
         break;
       case 'connecting':
         icon.setText('🔗');
-        text.setText('LAN Sync: Connecting...');
+        text.setText(t('status.connecting'));
         break;
       case 'initial-sync':
         icon.setText('🔄');
-        text.setText('LAN Sync: Syncing...');
+        text.setText(t('status.syncing'));
         break;
       case 'watching':
         icon.setText('✅');
-        text.setText(`LAN Sync: ${peerCount} peer${peerCount !== 1 ? 's' : ''}`);
+        text.setText(t('status.peers', { count: peerCount }));
         break;
       case 'error':
         icon.setText('⚠️');
-        text.setText('LAN Sync: Error');
+        text.setText(t('status.error'));
         break;
     }
 
@@ -50,7 +51,7 @@ export class StatusBar {
     if (state !== 'idle' && unreachable.length > 0) {
       icon.setText('⚠️');
       const what = unreachable.length === 1 ? unreachable[0] : `${unreachable.length} devices`;
-      text.setText(`${text.textContent} · can't reach ${what}`);
+      text.setText(`${text.textContent} · ${t('status.unreachable', { what })}`);
       this.el.setAttribute('aria-label', `Cannot reach ${unreachable.join(', ')}. Retrying in the background.`);
     } else {
       this.el.removeAttribute('aria-label');

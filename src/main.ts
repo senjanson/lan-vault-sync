@@ -22,6 +22,7 @@ import { SyncView } from "./ui/sync-view";
 import type { SyncViewStatus } from "./ui/sync-view";
 import { SyncLogView } from "./ui/sync-log-view";
 import { canUseNodeRuntime } from "./utils/runtime";
+import { t } from "./i18n";
 
 function generateDeviceId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -115,7 +116,7 @@ export default class LANSyncPlugin extends Plugin {
     // Commands
     this.addCommand({
       id: "toggle-sync",
-      name: "Turn sync on or off",
+      name: t("cmd.toggle"),
       callback: async () => {
         this.settings.enabled = !this.settings.enabled;
         await this.saveSettings();
@@ -129,31 +130,31 @@ export default class LANSyncPlugin extends Plugin {
 
     this.addCommand({
       id: "open-sync-panel",
-      name: "Open sync panel",
+      name: t("cmd.openPanel"),
       callback: () => this.activateView(),
     });
 
     this.addCommand({
       id: "open-sync-log",
-      name: "Open sync log",
+      name: t("cmd.openLog"),
       callback: () => this.activateSyncLogView(),
     });
 
     this.addCommand({
       id: "add-device-by-address",
-      name: "Add device by address",
+      name: t("cmd.addPeer"),
       callback: async () => {
         const input = await textInputDialog(
           this.app,
-          "Add a device by address",
+          t("pair.addTitle"),
           "192.168.1.20:53712",
-          "Add",
+          t("common.add"),
         );
         if (!input) return;
         if (await this.addManualPeer(input)) {
-          new Notice(`LAN Sync: Peer ${input} added`);
+          new Notice(t("notice.peerAdded", { address: input }));
         } else {
-          new Notice(`LAN Sync: Invalid address ${input}. Use ip:port, for example 192.168.1.20:53712.`);
+          new Notice(t("notice.peerInvalid", { address: input }));
         }
       },
     });
@@ -249,7 +250,7 @@ export default class LANSyncPlugin extends Plugin {
     if (!params.address) return;
     const address = params.address.trim();
     if (!parsePeerAddress(address)) {
-      new Notice(`LAN Sync: Failed to add peer. Invalid address: ${address}`);
+      new Notice(t("notice.peerAddFailed", { address }));
       return;
     }
 
@@ -258,14 +259,14 @@ export default class LANSyncPlugin extends Plugin {
     const key = params.key ? params.key.trim() : "";
     const changesKey =
       !!key && normalizeSyncKey(key) !== normalizeSyncKey(this.settings.syncKey);
-    const lines = [`Add the device at ${address} as a sync peer?`];
+    const lines = [t("pair.ask", { address })];
     if (changesKey) {
       lines.push(
-        "This also sets this device's sync key to the one in the link. Other devices that use the current key will stop syncing with this one until they get the new key.",
+        t("pair.keyChange"),
       );
     }
-    lines.push("Only continue if you opened this link yourself, for example by scanning the QR code on your own device.");
-    const ok = await confirmDialog(this.app, "Pair with device", lines, "Pair");
+    lines.push(t("pair.onlyYours"));
+    const ok = await confirmDialog(this.app, t("pair.title"), lines, t("pair.confirm"));
     if (!ok) return;
 
     if (changesKey) {
@@ -273,9 +274,9 @@ export default class LANSyncPlugin extends Plugin {
     }
     const added = await this.addManualPeer(address);
     if (added) {
-      new Notice(`LAN Sync: Peer ${address} added`);
+      new Notice(t("notice.peerAdded", { address }));
     } else {
-      new Notice(`LAN Sync: Failed to add peer. Invalid address: ${address}`);
+      new Notice(t("notice.peerAddFailed", { address }));
     }
   }
 
@@ -300,10 +301,10 @@ export default class LANSyncPlugin extends Plugin {
     const name = failure.deviceName || failure.address;
     new Notice(
       failure.reason === "outdated"
-        ? `LAN Sync: ${name} runs an older version of LAN Vault Sync. Update the plugin on that device to sync with it.`
+        ? t("notice.peerOutdated", { name })
         : failure.reason === "newer"
-          ? `LAN Sync: ${name} runs a newer version of LAN Vault Sync. Update the plugin on this device to sync with it.`
-          : `LAN Sync: ${name} has a different sync key. Use the same key on both devices (Settings → LAN Vault Sync → Sync key).`,
+          ? t("notice.peerNewer", { name })
+          : t("notice.peerBadKey", { name }),
       10000,
     );
   }
@@ -326,9 +327,9 @@ export default class LANSyncPlugin extends Plugin {
       this.unsyncable = [];
       if (!first || this.unloaded) return;
       const more = rest.length > 0
-        ? ` ${rest.length} more file${rest.length > 1 ? "s" : ""} cannot be synced either; the LAN Sync panel lists them.`
+        ? t("notice.cannotSyncMore", { count: rest.length })
         : "";
-      new Notice(`LAN Sync: Cannot sync ${first.path}: ${first.reason}.${more}`, 15000);
+      new Notice(t("notice.cannotSync", { path: first.path, reason: first.reason, more }), 15000);
     }, 1000);
   }
 
@@ -391,7 +392,7 @@ export default class LANSyncPlugin extends Plugin {
 
     await this.coordinator.start();
     const error = this.coordinator.getStartError();
-    if (error) new Notice(`LAN Sync: ${error}`, 15000);
+    if (error) new Notice(t("notice.error", { error }), 15000);
   }
 
   async stopSync(): Promise<void> {
@@ -431,12 +432,12 @@ export default class LANSyncPlugin extends Plugin {
     if (fresh.length === 0) return;
     for (const address of fresh) this.unreachableNotified.add(address);
     new Notice(
-      `LAN Sync: Cannot reach ${fresh.join(", ")}. Retrying in the background.` +
+      t("notice.unreachable", { addresses: fresh.join(", ") }) +
         // In testing this was a phone without local network permission:
         // every connection failed at once.
         (canUseNodeRuntime()
           ? ""
-          : " If that device is on and on the same network, check that Obsidian is allowed to use the local network (iPhone: Settings → Privacy & Security → Local Network)."),
+          : t("notice.localNetworkHint")),
       15000,
     );
   }

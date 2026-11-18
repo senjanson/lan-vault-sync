@@ -1,6 +1,7 @@
 import { App, Modal, Notice, TFile } from "obsidian";
 import { SyncLogEntry } from "../types";
 import { SyncLogService } from "../sync-log/sync-log-service";
+import { t } from "../i18n";
 
 interface DiffLine {
   type: "add" | "remove" | "same";
@@ -20,7 +21,7 @@ export class SyncLogModal extends Modal {
 
   async onOpen(): Promise<void> {
     this.modalEl.addClass("sync-log-modal");
-    this.titleEl.setText(`同步日志 — ${this.entry.path}`);
+    this.titleEl.setText(t("log.modalTitle", { path: this.entry.path }));
     await this.renderBody();
   }
 
@@ -30,11 +31,11 @@ export class SyncLogModal extends Modal {
     // Tabs
     const tabBar = this.contentEl.createDiv({ cls: "sync-log-modal-tabs" });
     const contentTab = tabBar.createEl("button", {
-      text: "快照内容",
+      text: t("log.snapshot"),
       cls: `sync-log-modal-tab ${this.activeTab === "content" ? "is-active" : ""}`,
     });
     const diffTab = tabBar.createEl("button", {
-      text: "差异对比",
+      text: t("log.diff"),
       cls: `sync-log-modal-tab ${this.activeTab === "diff" ? "is-active" : ""}`,
     });
     contentTab.addEventListener("click", () => {
@@ -58,29 +59,29 @@ export class SyncLogModal extends Modal {
     const actions = this.contentEl.createDiv({ cls: "sync-log-modal-actions" });
 
     const restoreBtn = actions.createEl("button", {
-      text: "还原",
+      text: t("log.restore"),
       cls: "mod-cta",
     });
     restoreBtn.addEventListener("click", async () => {
       const success = await this.syncLogService.restoreFromSnapshot(this.entry);
       new Notice(
-        success ? `已还原: ${this.entry.path}` : `还原失败: ${this.entry.path}`,
+        success ? t("log.restored", { path: this.entry.path }) : t("log.restoreFailed", { path: this.entry.path }),
       );
       if (success) this.close();
     });
 
-    const copyBtn = actions.createEl("button", { text: "复制内容" });
+    const copyBtn = actions.createEl("button", { text: t("log.copyContent") });
     copyBtn.addEventListener("click", async () => {
       const content = await this.syncLogService.readSnapshotContent(this.entry);
       if (content !== null) {
         await navigator.clipboard.writeText(content);
-        new Notice("已复制到剪贴板");
+        new Notice(t("common.copied"));
       } else {
-        new Notice("无法读取快照内容");
+        new Notice(t("log.unreadable"));
       }
     });
 
-    const closeBtn = actions.createEl("button", { text: "关闭" });
+    const closeBtn = actions.createEl("button", { text: t("common.close") });
     closeBtn.addEventListener("click", () => this.close());
   }
 
@@ -88,7 +89,7 @@ export class SyncLogModal extends Modal {
     const content = await this.syncLogService.readSnapshotContent(this.entry);
     if (content === null) {
       container.createEl("p", {
-        text: "无法读取快照内容",
+        text: t("log.unreadable"),
         cls: "sync-log-modal-error",
       });
       return;
@@ -103,7 +104,7 @@ export class SyncLogModal extends Modal {
     );
     if (snapshotContent === null) {
       container.createEl("p", {
-        text: "无法读取快照内容",
+        text: t("log.unreadable"),
         cls: "sync-log-modal-error",
       });
       return;
@@ -117,7 +118,7 @@ export class SyncLogModal extends Modal {
 
     // Label: "快照(旧) vs 当前(新)"
     container.createEl("p", {
-      text: "红色 = 快照中有但当前没有，绿色 = 当前新增",
+      text: t("log.diffLegend"),
       cls: "sync-log-diff-legend",
     });
 
@@ -148,8 +149,8 @@ function computeLineDiff(oldText: string, newText: string): DiffLine[] {
   // For very large files, cap the diff to avoid UI freeze
   if (n * m > 1_000_000) {
     return [
-      { type: "remove", content: `(文件过大，共 ${n} 行，已省略详细对比)` },
-      { type: "add", content: `(当前文件共 ${m} 行)` },
+      { type: "remove", content: t("log.diffTooBig", { lines: n }) },
+      { type: "add", content: t("log.diffCurrentLines", { lines: m }) },
     ];
   }
 

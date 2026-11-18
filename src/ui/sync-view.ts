@@ -2,6 +2,7 @@ import { ItemView, WorkspaceLeaf } from 'obsidian';
 import { SYNC_VIEW_TYPE } from '../constants';
 import { SyncState, DeviceInfo } from '../types';
 import { canUseNodeRuntime } from '../utils/runtime';
+import { t } from '../i18n';
 
 export interface SyncViewStatus {
   state: SyncState;
@@ -69,28 +70,28 @@ export class SyncView extends ItemView {
 
     // Status section
     const statusSection = container.createDiv({ cls: 'lan-sync-section' });
-    statusSection.createEl('h4', { text: 'Status' });
+    statusSection.createEl('h4', { text: t('view.status') });
     const statusBadge = statusSection.createDiv({ cls: 'lan-sync-status-badge' });
     statusBadge.createSpan({ text: this._stateLabel(state), cls: `lan-sync-state-${state}` });
     for (const address of unreachable) {
       statusSection.createEl('p', {
-        text: `Cannot reach ${address}. Retrying in the background.`,
+        text: t('view.cannotReach', { address }),
         cls: 'lan-sync-state-error',
       });
     }
     if (unreachable.length > 0 && !canUseNodeRuntime()) {
       statusSection.createEl('p', {
-        text: 'If that device is on and on the same network, check that Obsidian is allowed to use the local network (iPhone: Settings → Privacy & Security → Local Network).',
+        text: t('view.localNetworkHint'),
         cls: 'lan-sync-muted',
       });
     }
 
     // Devices section
     const devicesSection = container.createDiv({ cls: 'lan-sync-section' });
-    devicesSection.createEl('h4', { text: `Connected Devices (${devices.length})` });
+    devicesSection.createEl('h4', { text: t('view.devices', { count: devices.length }) });
 
     if (devices.length === 0) {
-      devicesSection.createEl('p', { text: 'No devices connected', cls: 'lan-sync-muted' });
+      devicesSection.createEl('p', { text: t('view.noDevices'), cls: 'lan-sync-muted' });
     } else {
       const list = devicesSection.createEl('ul', { cls: 'lan-sync-device-list' });
       for (const device of devices) {
@@ -102,11 +103,11 @@ export class SyncView extends ItemView {
 
     // Logs section
     const logsSection = container.createDiv({ cls: 'lan-sync-section' });
-    logsSection.createEl('h4', { text: 'Sync Log' });
+    logsSection.createEl('h4', { text: t('view.events') });
     const logContainer = logsSection.createDiv({ cls: 'lan-sync-logs' });
 
     if (this.logs.length === 0) {
-      logContainer.createEl('p', { text: 'No events yet', cls: 'lan-sync-muted' });
+      logContainer.createEl('p', { text: t('view.noEvents'), cls: 'lan-sync-muted' });
     } else {
       for (const log of this.logs.slice(0, 20)) {
         logContainer.createDiv({ text: log, cls: 'lan-sync-log-entry' });
@@ -116,12 +117,12 @@ export class SyncView extends ItemView {
 
   private _stateLabel(state: SyncState): string {
     switch (state) {
-      case 'idle': return '⏸ Idle';
-      case 'discovering': return '🔍 Discovering...';
-      case 'connecting': return '🔗 Connecting...';
-      case 'initial-sync': return '🔄 Initial Sync...';
-      case 'watching': return '✅ Syncing';
-      case 'error': return '⚠️ Error';
+      case 'idle': return t('state.idle');
+      case 'discovering': return t('state.discovering');
+      case 'connecting': return t('state.connecting');
+      case 'initial-sync': return t('state.initial-sync');
+      case 'watching': return t('state.watching');
+      case 'error': return t('state.error');
     }
   }
 }
