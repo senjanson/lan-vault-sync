@@ -7,6 +7,7 @@
 import { App, ItemView, Modal, Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { addStrings, t } from "../i18n";
 import type { HistoryVault, VersionEntry, VersionGroup, VersionStore } from "./version-store";
+import { peerName } from "../diagnostics/health";
 
 export const RECOVERY_VIEW_TYPE = "lan-vault-sync-recovery";
 
@@ -24,6 +25,16 @@ addStrings("en", {
   "recovery.empty": "No versions kept yet.",
   "recovery.noMatch": "No kept version matches \"{query}\".",
   "recovery.thisDevice": "This device",
+  "recovery.op.remote-file-delete": "deleted by another device",
+  "recovery.op.remote-file-overwrite": "replaced by another device",
+  "recovery.op.remote-file-rename-overwrite": "replaced by a renamed file",
+  "recovery.op.follow-rename": "renamed by another device",
+  "recovery.op.text-merge": "merged with another device's edits",
+  "recovery.op.text-remote-overwrite": "replaced by another device",
+  "recovery.op.merge-write": "merged with another device's edits",
+  "recovery.op.shrink": "emptied or cut short by another device",
+  "recovery.op.before-restore": "before a restore",
+  "recovery.op.restore": "before a restore",
   "recovery.groupHeading": "{peer} · {time} · {count} file(s) · {ops}",
   "recovery.batch": "Batch {batch}",
   "recovery.more": "…and {count} more",
@@ -49,6 +60,16 @@ addStrings("zh", {
   "recovery.empty": "还没有保留任何版本。",
   "recovery.noMatch": "没有与“{query}”匹配的版本。",
   "recovery.thisDevice": "本设备",
+  "recovery.op.remote-file-delete": "被其他设备删除",
+  "recovery.op.remote-file-overwrite": "被其他设备替换",
+  "recovery.op.remote-file-rename-overwrite": "被改名的文件替换",
+  "recovery.op.follow-rename": "被其他设备改名",
+  "recovery.op.text-merge": "与其他设备的修改合并",
+  "recovery.op.text-remote-overwrite": "被其他设备替换",
+  "recovery.op.merge-write": "与其他设备的修改合并",
+  "recovery.op.shrink": "被其他设备清空或删掉大半",
+  "recovery.op.before-restore": "恢复前的版本",
+  "recovery.op.restore": "恢复前的版本",
   "recovery.groupHeading": "{peer} · {time} · {count} 个文件 · {ops}",
   "recovery.batch": "批次 {batch}",
   "recovery.more": "……还有 {count} 个",
@@ -62,6 +83,13 @@ addStrings("zh", {
   "recovery.binary": "非文本内容：{size}，SHA-256 {hash}",
   "recovery.missing": "保留的内容已丢失（哈希 {hash}）。",
 });
+
+/** What replaced a version, in the user's words; the step's name when there are none. */
+function opLabel(op: string): string {
+  const key = `recovery.op.${op}`;
+  const text = t(key);
+  return text === key ? op : text;
+}
 
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -184,10 +212,10 @@ export class RecoveryView extends ItemView {
     const head = box.createDiv({ cls: "lan-sync-recovery-group-head" });
     head.createEl("strong", {
       text: t("recovery.groupHeading", {
-        peer: g.peer ?? t("recovery.thisDevice"),
+        peer: g.peer ? peerName(g.peer) : t("recovery.thisDevice"),
         time: g.from === g.to ? formatTime(g.to) : `${formatTime(g.from)} – ${formatTime(g.to)}`,
         count: g.entries.length,
-        ops: g.ops.join(", "),
+        ops: g.ops.map(opLabel).join(", "),
       }),
     });
     if (g.batch) head.createEl("div", { text: t("recovery.batch", { batch: g.batch }), cls: "lan-sync-muted" });
@@ -206,7 +234,7 @@ export class RecoveryView extends ItemView {
     const li = ul.createEl("li", { cls: "lan-sync-recovery-entry" });
     li.createSpan({ text: e.path, cls: "lan-sync-recovery-path" });
     li.createSpan({
-      text: ` · ${formatTime(e.ts)} · ${formatBytes(e.size)} · ${e.op}`,
+      text: ` · ${formatTime(e.ts)} · ${formatBytes(e.size)} · ${opLabel(e.op)}`,
       cls: "lan-sync-muted",
     });
     const view = li.createEl("button", { text: t("recovery.view") });

@@ -2848,7 +2848,9 @@ export class SyncCoordinator {
     return this.vaultId;
   }
 
-  private duplicateReported = false;
+  /** When another device with this device's ID was last reported (0: never). */
+  private duplicateReported = 0;
+  private static readonly DUPLICATE_REPORT_MS = 10 * 60 * 1000;
   private onDuplicateDeviceCb: ((deviceName: string) => void) | null = null;
 
   /** Another device uses this device's ID: told once per run. */
@@ -2857,8 +2859,11 @@ export class SyncCoordinator {
   }
 
   private _reportDuplicateDevice(name: string): void {
-    if (this.duplicateReported) return;
-    this.duplicateReported = true;
+    // Told again every 10 minutes while the clash lasts; the notice of a
+    // clash already resolved on the other device goes away by itself.
+    const now = Date.now();
+    if (now - this.duplicateReported < SyncCoordinator.DUPLICATE_REPORT_MS) return;
+    this.duplicateReported = now;
     this.eventLog.record({ op: "alert", level: "warn", rule: "duplicate-device-id", msg: `another device (${name || "unnamed"}) uses this device's ID` });
     this.onDuplicateDeviceCb?.(name);
   }

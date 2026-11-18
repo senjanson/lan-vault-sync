@@ -27,6 +27,7 @@ import { t } from "./i18n";
 import { openRecoveryCenter, registerRecoveryCenter } from "./history/recovery-view";
 import { EventLog } from "./diagnostics/event-log";
 import { buildDiagnostics, diagnosticsFileName, DIAGNOSTICS_DIR } from "./diagnostics/export";
+import { alertText } from "./diagnostics/health";
 import { ensureDirectory } from "./utils/path-utils";
 import { effectiveVaultId, isValidVaultId } from "./utils/vault-id";
 
@@ -45,6 +46,9 @@ function generateRandomPort(): number {
     Math.floor(Math.random() * (WS_PORT_MAX - WS_PORT_MIN + 1)) + WS_PORT_MIN
   );
 }
+
+/** How long the notice of another device with this device's ID stays up. */
+const DUPLICATE_NOTICE_MS = 60_000;
 
 export default class LANSyncPlugin extends Plugin {
   settings: LANSyncSettings = DEFAULT_SETTINGS;
@@ -441,13 +445,20 @@ export default class LANSyncPlugin extends Plugin {
     this.syncLogService?.setVersionStore(this.coordinator.versionStore);
 
     // A bulk deletion waits for the user: say so once per new batch.
+    // The notice stays until those deletions are decided, then goes.
     let heldSeen = new Set<string>();
+    const heldNotices: Array<{ ids: string[]; notice: Notice }> = [];
     this.coordinator.onHeldDeletionsChange((held) => {
       const fresh = held.filter((h) => !heldSeen.has(h.id));
       heldSeen = new Set(held.map((h) => h.id));
+      for (let i = heldNotices.length - 1; i >= 0; i--) {
+        if (heldNotices[i].ids.some((id) => heldSeen.has(id))) continue;
+        heldNotices[i].notice.hide();
+        heldNotices.splice(i, 1);
+      }
       if (fresh.length > 0) {
         const count = fresh.reduce((n, h) => n + h.paths.length, 0);
-        new Notice(t("notice.held", { count }), 0);
+        heldNotices.push({ ids: fresh.map((h) => h.id), notice: new Notice(t("notice.held", { count }), 0) });
       }
       this.syncView?.refresh();
     });
@@ -458,17 +469,23 @@ export default class LANSyncPlugin extends Plugin {
     // with each other: offer to give this one a new ID.
     this.coordinator.onDuplicateDevice((name) => {
       const text = t("notice.duplicateDevice", { name: name || "?" });
+      // Shown for a minute: told again while the clash lasts (see
+      // SyncCoordinator._reportDuplicateDevice), so a notice left from a
+      // clash the other device already resolved does not linger.
       if (typeof createFragment !== "function") {
-        new Notice(text, 0);
+        new Notice(text, DUPLICATE_NOTICE_MS);
         return;
       }
-      new Notice(
+      const notice = new Notice(
         createFragment((f) => {
           f.createDiv({ text });
           const btn = f.createEl("button", { text: t("set.regenerateId") });
-          btn.onclick = () => void this.regenerateDeviceId();
+          btn.onclick = () => {
+            notice.hide();
+            void this.regenerateDeviceId();
+          };
         }),
-        0,
+        DUPLICATE_NOTICE_MS,
       );
     });
 
@@ -477,7 +494,7 @@ export default class LANSyncPlugin extends Plugin {
     // own notice above.
     this.coordinator.health.onAlert((a) => {
       if (a.kind === "bulk-held") return;
-      new Notice(t(`alert.${a.kind}`, { msg: a.msg }), 10000);
+      new Notice(alertText(a), 10000);
     });
     let healthTimer: ReturnType<typeof setTimeout> | null = null;
     this.coordinator.health.onChange(() => {

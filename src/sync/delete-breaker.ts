@@ -8,7 +8,7 @@
  *   Nothing is recorded or sent, and the files are not fetched back either.
  * - Deletions from a peer (live or from its file list): once one peer's
  *   deletions within two minutes would pass half of the vault (and at least
- *   10 files), the rest are held.
+ *   10 files), the rest are held. A move is not counted: nothing is lost.
  */
 import type { FileDeletePayload, FileMeta, Tombstone } from "../types";
 
@@ -101,7 +101,11 @@ export class DeleteBreaker {
       batch = { id: `held-${this.nextId++}`, kind: "inferred", since: this.now(), items: new Map() };
       this.batches.set("inferred", batch);
     }
-    for (const item of items) batch.items.set(item.path, item);
+    for (const item of items) {
+      // Already held as a peer's deletion: one decision for one file.
+      if (![...this.batches.values()].some((b) => b !== batch && b.items.has(item.path))) batch.items.set(item.path, item);
+    }
+    if (batch.items.size === 0) this.batches.delete("inferred");
     return batch;
   }
 
@@ -110,6 +114,16 @@ export class DeleteBreaker {
    * that peer's held batch; `created` tells whether the batch is new.
    */
   admit(deviceId: string, item: HeldItem, peer?: string): { ok: true } | { ok: false; batch: Batch; created: boolean } {
+    // A move: the note lives on under its new name, and nothing is lost.
+    // Held, a folder of notes moved on one device asked the user on every
+    // other one, and waited even after the moved notes arrived.
+    if (item.del?.movedTo || item.tree?.record.movedTo) return { ok: true };
+    // The same deletion already waits for the user, held from another
+    // device or found here: passed on by this one, it waits too. Counted
+    // per device, it would have gone under that device's threshold.
+    for (const batch of this.batches.values()) {
+      if (batch.items.has(item.path)) return { ok: false, batch, created: false };
+    }
     const key = `incoming\n${deviceId}`;
     const held = this.batches.get(key);
     if (held) {

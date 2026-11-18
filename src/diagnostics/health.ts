@@ -7,7 +7,7 @@
  * differs at three exchanges in a row is stuck, which is worth an alert.
  */
 
-import { addStrings } from "../i18n";
+import { addStrings, t } from "../i18n";
 import type { EventLog, LogRecord } from "./event-log";
 
 export type AlertKind =
@@ -34,6 +34,22 @@ export interface Alert {
   first: number;
   last: number;
   count: number;
+  /** Values for the alert's text in the user's language (see alertText). */
+  params?: Record<string, string | number>;
+}
+
+/** A device as the user knows it: its name, out of "deviceId (name)". */
+export function peerName(label: string | undefined): string {
+  if (!label) return "?";
+  const m = /\((.+)\)$/.exec(label);
+  return m ? m[1] : label;
+}
+
+/** An alert's text in the user's language. */
+export function alertText(a: Pick<Alert, "kind" | "msg" | "params">): string {
+  const p = a.params ?? {};
+  const key = a.kind === "clock-skew" && p.ahead === 0 ? "alert.clock-skew-behind" : `alert.${a.kind}`;
+  return t(key, { msg: a.msg, ...p });
 }
 
 export interface PeerHealth {
@@ -132,13 +148,14 @@ export class HealthMonitor {
     if (r.op === "alert") {
       const kind = (r.rule ?? "") as AlertKind;
       if (kind === "history-near-cap" || kind === "content-shrank" || kind === "state-backup-used") {
-        this.alert(kind, r.msg ?? "", { path: r.path, peer: r.peer });
+        const file = kind === "state-backup-used" ? (r.msg ?? "").split(":")[0] : r.path ?? "";
+        this.alert(kind, r.msg ?? "", { path: r.path, peer: r.peer, params: { path: file } });
       }
     } else if (r.op === "held" && r.level === "warn") {
       this.alert("bulk-held", r.msg ?? "", { peer: r.peer });
     } else if (r.op === "skip" && r.rule === "too-large") {
       // A file that will not reach this device until the limit is raised.
-      this.alert("too-large", `${r.path}: ${r.msg ?? ""}`, { path: r.path, peer: r.peer, key: r.path });
+      this.alert("too-large", `${r.path}: ${r.msg ?? ""}`, { path: r.path, peer: r.peer, key: r.path, params: { path: r.path ?? "" } });
     } else if (r.op === "error" && r.path) {
       // A file operation that failed (connection errors have no path).
       const keep = /could not keep the old version/.test(r.msg ?? "");
@@ -146,7 +163,11 @@ export class HealthMonitor {
     }
   }
 
-  alert(kind: AlertKind, msg: string, extra: { path?: string; peer?: string; key?: string } = {}): void {
+  alert(
+    kind: AlertKind,
+    msg: string,
+    extra: { path?: string; peer?: string; key?: string; params?: Record<string, string | number> } = {},
+  ): void {
     const now = this.now();
     const key = `${kind}\n${extra.key ?? ""}`;
     const old = this.active.get(key);
@@ -156,6 +177,7 @@ export class HealthMonitor {
       msg,
       path: extra.path,
       peer: extra.peer,
+      params: extra.params,
       first: old?.first ?? now,
       last: now,
       count: (old?.count ?? 0) + 1,
@@ -234,6 +256,7 @@ export class HealthMonitor {
         peer: label,
         path: stuck[0],
         key: peerId,
+        params: { count: stuck.length, peer: peerName(label), files: stuck.slice(0, 3).join(", ") },
       });
     } else {
       this.clear("file-mismatch", peerId);
@@ -243,6 +266,7 @@ export class HealthMonitor {
       this.alert("clock-skew", `${label}'s clock is ${Math.abs(secs)} s ${secs > 0 ? "ahead" : "behind"}`, {
         peer: label,
         key: peerId,
+        params: { peer: peerName(label), secs: Math.abs(secs), ahead: secs > 0 ? 1 : 0 },
       });
     } else {
       this.clear("clock-skew", peerId);
@@ -337,12 +361,13 @@ addStrings("en", {
   "alert.keep-failed": "LAN Vault Sync skipped a change because the old version could not be kept: {msg}",
   "alert.write-failed": "LAN Vault Sync could not write a file: {msg}",
   "alert.bulk-held": "LAN Vault Sync is holding deletions for your confirmation.",
-  "alert.state-backup-used": "LAN Vault Sync found a damaged state file and used its backup: {msg}",
-  "alert.clock-skew": "LAN Vault Sync: {msg}. Set both devices to the right time, or the later edit may be judged wrongly.",
-  "alert.file-mismatch": "LAN Vault Sync: {msg}. Open the sync panel for details.",
-  "alert.history-near-cap": "LAN Vault Sync: {msg}. The oldest versions will be removed first.",
-  "alert.content-shrank": "LAN Vault Sync: {msg}. The earlier version is in the recovery center.",
-  "alert.too-large": "LAN Vault Sync did not take a file over this device's size limit ({msg}). Raise “Largest file to receive” in settings to sync it.",
+  "alert.state-backup-used": "LAN Vault Sync found a damaged state file ({path}) and used its backup. Changes saved just before it may need to sync again.",
+  "alert.clock-skew": "LAN Vault Sync: {peer}'s clock is {secs} s ahead of this device's. Set both devices to the right time, or the later edit may be judged wrongly.",
+  "alert.clock-skew-behind": "LAN Vault Sync: {peer}'s clock is {secs} s behind this device's. Set both devices to the right time, or the later edit may be judged wrongly.",
+  "alert.file-mismatch": "LAN Vault Sync: {count} file(s) still differ from {peer}: {files}. Open the sync panel for details.",
+  "alert.history-near-cap": "LAN Vault Sync: the version history is near its space limit. The oldest versions will be removed first.",
+  "alert.content-shrank": "LAN Vault Sync: a change from another device emptied or cut short {path}. The earlier version is in the recovery center.",
+  "alert.too-large": "LAN Vault Sync did not take {path}: it is larger than this device's limit for received files. Raise “Largest file to receive” in settings to sync it.",
   "health.title": "Health",
   "health.alerts": "Alerts",
   "health.noPeers": "No file list exchanged yet.",
@@ -364,12 +389,13 @@ addStrings("zh", {
   "alert.keep-failed": "LAN Vault Sync 跳过了一次修改，因为没能保存旧版本：{msg}",
   "alert.write-failed": "LAN Vault Sync 没能写入文件：{msg}",
   "alert.bulk-held": "LAN Vault Sync 暂停了一批删除，等你确认。",
-  "alert.state-backup-used": "LAN Vault Sync 发现状态文件损坏，已改用备份：{msg}",
-  "alert.clock-skew": "LAN Vault Sync：{msg}。请把两台设备的时间调准，否则可能判错哪次修改更晚。",
-  "alert.file-mismatch": "LAN Vault Sync：{msg}。详情见同步面板。",
-  "alert.history-near-cap": "LAN Vault Sync：{msg}。会先删除最旧的版本。",
-  "alert.content-shrank": "LAN Vault Sync：{msg}。之前的版本在恢复中心里。",
-  "alert.too-large": "LAN Vault Sync 没有接收一个超过本设备大小上限的文件（{msg}）。在设置里调高“接收文件的大小上限”即可同步它。",
+  "alert.state-backup-used": "LAN Vault Sync 发现状态文件（{path}）损坏，已改用备份。损坏前刚保存的改动可能需要重新同步。",
+  "alert.clock-skew": "LAN Vault Sync：{peer} 的时钟比本设备快 {secs} 秒。请把两台设备的时间调准，否则可能判错哪次修改更晚。",
+  "alert.clock-skew-behind": "LAN Vault Sync：{peer} 的时钟比本设备慢 {secs} 秒。请把两台设备的时间调准，否则可能判错哪次修改更晚。",
+  "alert.file-mismatch": "LAN Vault Sync：有 {count} 个文件与 {peer} 仍不一致：{files}。详情见同步面板。",
+  "alert.history-near-cap": "LAN Vault Sync：版本历史快到空间上限了，会先删除最旧的版本。",
+  "alert.content-shrank": "LAN Vault Sync：其他设备的修改清空了 {path}，或删掉了它的大半内容。之前的版本在恢复中心里。",
+  "alert.too-large": "LAN Vault Sync 没有接收 {path}：它超过了本设备的接收大小上限。在设置里调高“接收文件的大小上限”即可同步它。",
   "health.title": "健康状况",
   "health.alerts": "提醒",
   "health.noPeers": "还没有交换过文件列表。",

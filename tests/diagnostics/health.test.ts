@@ -100,3 +100,26 @@ describe('diagnostics export', () => {
     expect(maskSettings({ ...settings, syncKey: '' }).syncKey).toBe('');
   });
 });
+
+describe('alert text', () => {
+  it('names the device and the files in the user\'s language, with no English left in Chinese', async () => {
+    const { alertText, peerName } = await import('../../src/diagnostics/health');
+    const { setLanguage } = await import('../../src/i18n');
+    const h = new HealthMonitor({ stuckMs: 0 });
+    for (let i = 0; i < 3; i++) h.noteExchange('dev1', { name: 'dev1 (Phone)', differing: ['a.md'], clockOffsetMs: -45000 });
+    const alerts = h.alerts();
+    const mismatch = alerts.find((a) => a.kind === 'file-mismatch')!;
+    const skew = alerts.find((a) => a.kind === 'clock-skew')!;
+    try {
+      setLanguage('zh');
+      expect(alertText(mismatch)).toBe('LAN Vault Sync：有 1 个文件与 Phone 仍不一致：a.md。详情见同步面板。');
+      expect(alertText(skew)).toContain('Phone 的时钟比本设备慢 45 秒');
+      setLanguage('en');
+      expect(alertText(skew)).toContain("Phone's clock is 45 s behind");
+    } finally {
+      setLanguage(null);
+    }
+    expect(peerName('kg9t76s8s5nhzkj5 (v2)')).toBe('v2');
+    expect(peerName(undefined)).toBe('?');
+  });
+});

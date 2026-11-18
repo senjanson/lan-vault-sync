@@ -5,6 +5,7 @@ import { canUseNodeRuntime } from '../utils/runtime';
 import { t } from '../i18n';
 import type { HeldDeletion } from '../sync/delete-breaker';
 import type { Alert, HealthSummary, PeerHealth } from '../diagnostics/health';
+import { alertText, peerName } from '../diagnostics/health';
 
 export interface SyncViewStatus {
   state: SyncState;
@@ -148,7 +149,7 @@ export class SyncView extends ItemView {
     } else {
       const list = section.createEl('ul', { cls: 'lan-sync-device-list' });
       for (const p of shown) {
-        const name = devices.find((d) => d.deviceId === p.id)?.deviceName || p.name || p.id;
+        const name = devices.find((d) => d.deviceId === p.id)?.deviceName || peerName(p.name ?? p.id);
         const time = new Date(p.lastExchange!).toLocaleTimeString();
         const parts = [
           p.unsynced.length > 0
@@ -175,7 +176,7 @@ export class SyncView extends ItemView {
         const row = section.createDiv({ cls: 'lan-sync-alert' });
         const time = new Date(a.last).toLocaleTimeString();
         row.createSpan({
-          text: `${time} ${t(`alert.${a.kind}`, { msg: a.msg })}${a.count > 1 ? ` (×${a.count})` : ''}`,
+          text: `${time} ${alertText(a)}${a.count > 1 ? ` (×${a.count})` : ''}`,
           cls: 'lan-sync-state-error',
         });
         if (this.actions?.dismissAlert) {
@@ -201,7 +202,7 @@ export class SyncView extends ItemView {
       box.createEl('p', {
         text: h.kind === 'inferred'
           ? t('view.heldInferred', { count: h.paths.length })
-          : t('view.heldIncoming', { count: h.paths.length, peer: h.peer ?? h.deviceId ?? '?' }),
+          : t('view.heldIncoming', { count: h.paths.length, peer: peerName(h.peer ?? h.deviceId) }),
         cls: 'lan-sync-state-error',
       });
       const list = box.createEl('ul');
