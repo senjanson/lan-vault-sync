@@ -1,6 +1,7 @@
 import { Plugin } from 'obsidian';
 import { SyncState } from '../types';
 import { t } from '../i18n';
+import type { HealthSummary } from '../diagnostics/health';
 
 export class StatusBar {
   private el: HTMLElement;
@@ -12,7 +13,7 @@ export class StatusBar {
   }
 
   /** `unreachable`: addresses added by hand that keep failing to connect. */
-  update(state: SyncState, peerCount = 0, unreachable: string[] = []): void {
+  update(state: SyncState, peerCount = 0, unreachable: string[] = [], health?: HealthSummary): void {
     this.el.empty();
 
     const icon = this.el.createSpan({ cls: 'lan-sync-status-icon' });
@@ -38,6 +39,14 @@ export class StatusBar {
       case 'watching':
         icon.setText('✅');
         text.setText(t('status.peers', { count: peerCount }));
+        // Plan 5.3: whether the files match, not only who is connected.
+        if (health && health.unsynced > 0) {
+          icon.setText('⚠️');
+          text.setText(t('status.unsynced', { count: health.unsynced }));
+        } else if (health && health.consistent > 0 && health.consistent === peerCount && health.since) {
+          const time = new Date(health.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          text.setText(t('status.consistent', { count: health.consistent, time }));
+        }
         break;
       case 'error':
         icon.setText('⚠️');

@@ -197,6 +197,8 @@ export interface FileMetaSyncPayload {
   folders?: string[];
   /** Files the sender deleted; older versions leave this out. */
   deleted?: Tombstone[];
+  /** Digest of the sender's file list (see vaultDigest); protocol 3. */
+  digest?: string;
   /** When true this is a response to a received FILE_META_SYNC — the receiver
    *  should NOT echo yet another FILE_META_SYNC back to avoid ping-pong. */
   isResponse?: boolean;

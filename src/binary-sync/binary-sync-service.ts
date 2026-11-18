@@ -73,7 +73,7 @@ export class BinaryFileSyncService {
    * decided to take the peer's version (null: it was not here). The peer's
    * version only replaces that one.
    */
-  private expected = new Map<string, { hash: string | null; at: number }>();
+  private expected = new Map<string, { hash: string | null; at: number; from?: string }>();
   private static readonly EXPECT_FOR_MS = 10 * 60 * 1000;
   private admitDeleteCb: ((deviceId: string, del: FileDeletePayload) => boolean) | null = null;
   private notePreconditionCb:
@@ -253,9 +253,19 @@ export class BinaryFileSyncService {
    * version replaces only that (see _receiveFile).
    */
   requestFile(deviceId: string, path: string, expectHash?: string | null): void {
-    if (expectHash !== undefined) this.expected.set(path, { hash: expectHash, at: Date.now() });
+    if (expectHash !== undefined) this.expected.set(path, { hash: expectHash, at: Date.now(), from: deviceId });
     const msg = encodeFileRequest(path);
     this.connectionManager.sendTo(deviceId, msg);
+  }
+
+  /** Files asked of this peer that have not arrived yet. */
+  waitingFrom(deviceId: string): number {
+    const now = Date.now();
+    let n = 0;
+    for (const e of this.expected.values()) {
+      if (e.from === deviceId && now - e.at < BinaryFileSyncService.EXPECT_FOR_MS) n++;
+    }
+    return n;
   }
 
   /** Send a file to a specific peer (not broadcast) */
@@ -389,7 +399,32 @@ export class BinaryFileSyncService {
     }
   }
 
-  private async _receiveFile(
+  /** Files being written from a peer, so that two peers' copies of one file are taken in turn. */
+  private receiving = new Map<string, Promise<void>>();
+
+  /**
+   * Two peers can send the same file at once (each answers a file list).
+   * Taken together, both saw no file here and the second create failed
+   * ("already exists"); taken in turn, the second sees the first's copy.
+   */
+  private _receiveFile(
+    path: string,
+    content: Uint8Array,
+    mtime: number,
+    fromDeviceId?: string,
+    info: FileVersionInfo = {},
+  ): Promise<void> {
+    const previous = this.receiving.get(path) ?? Promise.resolve();
+    const run = previous.then(() => this._receiveFileNow(path, content, mtime, fromDeviceId, info));
+    const tail = run.catch(() => undefined);
+    this.receiving.set(path, tail);
+    void tail.then(() => {
+      if (this.receiving.get(path) === tail) this.receiving.delete(path);
+    });
+    return run;
+  }
+
+  private async _receiveFileNow(
     path: string,
     content: Uint8Array,
     mtime: number,

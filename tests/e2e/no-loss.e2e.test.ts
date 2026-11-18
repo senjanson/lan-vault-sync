@@ -393,3 +393,78 @@ describe('no-loss stage 2: suspicious reads', { timeout: 40000 }, () => {
     expect(B.vault.text('n.md')).toBe('keep me\n');
   });
 });
+
+describe('no-loss stage 3: monitoring', { timeout: 40000 }, () => {
+  it('T11: the event log is still there after a restart', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'a.md': 'a\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('a.md') === 'a\n');
+    await A.vault.rm('a.md');
+    await until(() => !B.vault.exists('a.md'));
+    await sleep(500);
+    B = await restart(B, rb, 'bbbb', pa + 1, [pa]);
+    const recs = await B.coord.eventLog.readAll();
+    expect(recs.some((r) => r.op === 'delete' && r.path === 'a.md' && r.peer?.startsWith('aaaa'))).toBe(true);
+  });
+
+  it('T12: a file that stays different for three exchanges shows in the health panel and the status', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'stuck.png': Buffer.from([1, 2, 3]), 'ok.md': 'ok\n' });
+    const pa = ports();
+    const fast = { health: { stuckMs: 0 } };
+    const A = track(await startNode(ra, 'aaaa', pa, [], { syncIntervalMs: 400 }, fast));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa], { syncIntervalMs: 400 }, fast));
+    // B cannot take this one file (a full disk, say).
+    const bs = (B.coord as any).binarySync;
+    const receive = bs._receiveFile.bind(bs);
+    bs._receiveFile = async (...a: any[]) => (a.some((x) => x === 'stuck.png' || x?.path === 'stuck.png') ? undefined : receive(...a));
+    await until(() => B.coord.health.alerts().some((a) => a.kind === 'file-mismatch'), 15000);
+    const alert = B.coord.health.alerts().find((a) => a.kind === 'file-mismatch');
+    expect(alert?.msg).toContain('stuck.png');
+    expect(B.coord.health.summary(['aaaa']).unsynced).toBe(1);
+    const peer = B.coord.health.peers().find((p) => p.id === 'aaaa')!;
+    expect(peer.unsynced).toEqual(['stuck.png']);
+    expect(B.vault.text('ok.md')).toBe('ok\n');
+    // A sees the same from its side.
+    await until(() => A.coord.health.summary(['bbbb']).unsynced === 1, 5000);
+    expect(A.coord.health.summary(['bbbb']).unsynced).toBe(1);
+  });
+
+  it('T13: when the old version cannot be kept, the file is left alone, with an alert and an error in the log', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'a.md': 'keep me\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('a.md') === 'keep me\n');
+    await sleep(500);
+    const notices: string[] = [];
+    B.coord.health.onAlert((a) => notices.push(a.kind));
+    B.coord.versionStore!.keep = async () => null;
+    await A.vault.rm('a.md');
+    await until(() => notices.includes('keep-failed'), 8000);
+    await sleep(500);
+    expect(B.vault.text('a.md')).toBe('keep me\n');
+    expect(notices).toContain('keep-failed');
+    expect(B.coord.eventLog.recentRecords().some((r) => r.op === 'error' && r.path === 'a.md' && /could not keep/.test(r.msg ?? ''))).toBe(true);
+  });
+});
+
+describe('no-loss stage 3: two peers send one new file at once', { timeout: 20000 }, () => {
+  it('takes the copies in turn, without a failed write', async () => {
+    const rb = tmpRoot('b');
+    const B = track(await startNode(rb, 'bbbb', ports(), []));
+    const bs = (B.coord as any).binarySync;
+    const mk = (b: number[]) => new Uint8Array(b);
+    await Promise.all([
+      bs._receiveFile('new.png', mk([1, 1]), Date.now(), 'aaaa', {}),
+      bs._receiveFile('new.png', mk([1, 1]), Date.now(), 'cccc', {}),
+    ]);
+    expect(B.vault.bin('new.png')?.toString('hex')).toBe('0101');
+    // Was: "File already exists" from the second create, logged as a failed write.
+    expect(B.coord.eventLog.recentRecords().filter((r) => r.op === 'error')).toEqual([]);
+  });
+});

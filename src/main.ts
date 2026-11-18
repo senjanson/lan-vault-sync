@@ -1,4 +1,4 @@
-import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Platform, Plugin, WorkspaceLeaf } from "obsidian";
 import { LANSyncSettings, DEFAULT_SETTINGS } from "./types";
 import {
   PLUGIN_ID,
@@ -24,6 +24,9 @@ import { SyncLogView } from "./ui/sync-log-view";
 import { canUseNodeRuntime } from "./utils/runtime";
 import { t } from "./i18n";
 import { openRecoveryCenter, registerRecoveryCenter } from "./history/recovery-view";
+import { EventLog } from "./diagnostics/event-log";
+import { buildDiagnostics, diagnosticsFileName, DIAGNOSTICS_DIR } from "./diagnostics/export";
+import { ensureDirectory } from "./utils/path-utils";
 
 function generateDeviceId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -102,6 +105,8 @@ export default class LANSyncPlugin extends Plugin {
         resolveHeld: async (id, choice) => {
           await this.coordinator?.resolveHeldDeletions(id, choice);
         },
+        dismissAlert: (key) => this.coordinator?.health.dismiss(key),
+        exportDiagnostics: () => this.exportDiagnostics(),
       });
       return this.syncView;
     });
@@ -146,6 +151,12 @@ export default class LANSyncPlugin extends Plugin {
       id: "open-sync-log",
       name: t("cmd.openLog"),
       callback: () => this.activateSyncLogView(),
+    });
+
+    this.addCommand({
+      id: "export-diagnostics",
+      name: t("cmd.exportDiagnostics"),
+      callback: () => void this.exportDiagnostics(),
     });
 
     this.addCommand({
@@ -407,6 +418,22 @@ export default class LANSyncPlugin extends Plugin {
 
     this.coordinator.onStateChange(() => this.showStatus());
 
+    // Alerts (plan 5.4): a notice at most once per kind per 10 minutes; the
+    // sync panel lists them until they are gone. Held deletions have their
+    // own notice above.
+    this.coordinator.health.onAlert((a) => {
+      if (a.kind === "bulk-held") return;
+      new Notice(t(`alert.${a.kind}`, { msg: a.msg }), 10000);
+    });
+    let healthTimer: ReturnType<typeof setTimeout> | null = null;
+    this.coordinator.health.onChange(() => {
+      if (healthTimer) return;
+      healthTimer = setTimeout(() => {
+        healthTimer = null;
+        this.showStatus();
+      }, 500);
+    });
+
     this.coordinator.onAuthFailed((failure) => this.notifyAuthFailure(failure));
     this.coordinator.onUnsyncableFile((path, reason) => this.notifyUnsyncable(path, reason));
 
@@ -435,12 +462,59 @@ export default class LANSyncPlugin extends Plugin {
       devices: coordinator?.getConnectedPeers() ?? [],
       unreachable: coordinator?.getUnreachablePeers() ?? [],
       held: coordinator?.getHeldDeletions() ?? [],
+      health: coordinator?.health.peers() ?? [],
+      alerts: coordinator?.health.alerts() ?? [],
+      summary: coordinator
+        ? coordinator.health.summary(coordinator.getConnectedPeers().map((d) => d.deviceId))
+        : undefined,
     };
+  }
+
+  /**
+   * Writes a diagnostics file (plan 5.2) into the vault's
+   * .lan-vault-sync/diagnostics folder and copies it to the clipboard where
+   * that works. The sync key is masked.
+   */
+  async exportDiagnostics(): Promise<string | null> {
+    const adapter = this.app.vault.adapter as any;
+    const coordinator = this.coordinator;
+    try {
+      const log = await (coordinator?.eventLog ?? new EventLog(adapter)).readAll(5000);
+      const status = this.getSyncStatus();
+      const text = buildDiagnostics({
+        pluginVersion: this.manifest.version,
+        platform: Platform.isMobile ? (Platform.isIosApp ? "ios" : "android") : ((globalThis as any).process?.platform ?? "desktop"),
+        settings: this.settings,
+        state: status.state,
+        peers: status.devices.map((d) => ({ deviceId: d.deviceId, deviceName: d.deviceName, ip: d.ip, port: d.port })),
+        health: status.health ?? [],
+        alerts: status.alerts ?? [],
+        held: (status.held ?? []).map((h) => ({ id: h.id, kind: h.kind, count: h.paths.length, peer: h.peer })),
+        history: coordinator?.versionStore ? await coordinator.versionStore.usage().catch(() => null) : null,
+        tombstones: coordinator?.getTombstoneCount(),
+        log,
+      });
+      const file = diagnosticsFileName();
+      await ensureDirectory(adapter, DIAGNOSTICS_DIR);
+      await adapter.write(file, text);
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch {
+        /* no clipboard: the file is enough */
+      }
+      new Notice(t(copied ? "notice.diagnosticsCopied" : "notice.diagnostics", { path: file }), 10000);
+      return file;
+    } catch (err) {
+      new Notice(t("notice.error", { error: err instanceof Error ? err.message : String(err) }), 10000);
+      return null;
+    }
   }
 
   private showStatus(): void {
     const status = this.getSyncStatus();
-    this.statusBar?.update(status.state, status.devices.length, status.unreachable);
+    this.statusBar?.update(status.state, status.devices.length, status.unreachable, status.summary);
     this.syncView?.refresh();
     this.notifyUnreachable(status.unreachable);
   }

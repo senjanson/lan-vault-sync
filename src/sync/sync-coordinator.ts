@@ -1,4 +1,5 @@
 import { EventLog, peerLabel } from "../diagnostics/event-log";
+import { HealthMonitor, vaultDigest, type HealthOptions } from "../diagnostics/health";
 import { ApplyGate, BackupKeeper, OpContext, toArrayBuffer } from "./apply-gate";
 import { VersionStore } from "../history/version-store";
 import { canUseNodeRuntime } from "../utils/runtime";
@@ -205,6 +206,8 @@ export class SyncCoordinator {
   private vaultId: string;
   /** Persistent sync log in .lan-vault-sync/logs (see EventLog). */
   readonly eventLog: EventLog;
+  /** How each peer's files compare, and the alerts to show (plan 5.3, 5.4). */
+  readonly health: HealthMonitor;
   /** Old versions kept before a change (plan stage 2); null where the vault cannot hold it. */
   readonly versionStore: VersionStore | null;
   private historyTimer: ReturnType<typeof setInterval> | null = null;
@@ -239,10 +242,13 @@ export class SyncCoordinator {
       trash?: (file: TAbstractFile) => Promise<void>;
       /** Overrides the bulk-deletion limits (tests). */
       deleteLimits?: Partial<DeleteLimits>;
+      health?: HealthOptions;
     },
   ) {
     this.eventLog =
       options?.eventLog ?? new EventLog((vault as any).adapter ?? null);
+    this.health = new HealthMonitor(options?.health);
+    this.health.watch(this.eventLog);
     const adapter = (vault as any).adapter;
     this.versionStore =
       options?.versionStore !== undefined
@@ -513,6 +519,23 @@ export class SyncCoordinator {
     await this._saveAgreedHashes();
     await this.eventLog.flush();
     await this.versionStore?.flush().catch(() => undefined);
+  }
+
+  private loggedOnce = new Map<string, number>();
+
+  /** A record for a decision taken at every exchange, at most hourly. */
+  private _logOnce(key: string, rec: Parameters<EventLog["record"]>[0]): void {
+    const now = Date.now();
+    const at = this.loggedOnce.get(key);
+    if (at !== undefined && now - at < 60 * 60 * 1000) return;
+    if (this.loggedOnce.size > 5000) this.loggedOnce.clear();
+    this.loggedOnce.set(key, now);
+    this.eventLog.record(rec);
+  }
+
+  /** How many deletions this device remembers (diagnostics). */
+  getTombstoneCount(): number {
+    return this.tombstones.list().length;
   }
 
   /** Change how often the file lists are compared, without a restart. */
@@ -1484,6 +1507,7 @@ export class SyncCoordinator {
     }
 
     const treeDiff = diffFileTrees(localTree.files, remoteFiles);
+    this._noteHealth(deviceId, meta, localTree.files, treeDiff);
     this._noteAgreedHashes(deviceId, localTree.files, remoteFiles);
     // Settled again below for the notes that still differ.
     this._forgetHistoryWinners(deviceId);
@@ -1556,6 +1580,7 @@ export class SyncCoordinator {
       // when it sees our deletion record, so don't fetch it back.
       const ownTombstone = this.tombstones.get(file.path);
       if (ownTombstone && TombstoneStore.covers(ownTombstone, file)) {
+        this._logOnce(`own-tombstone\n${deviceId}\n${file.path}`, { op: "skip", path: file.path, peer: this._peerLabel(deviceId), rule: "own-tombstone-skip", before: { hash: file.hash }, msg: "deleted here; not fetched back" });
         this._emitEvent(`Skipping deleted file: ${file.path}`);
         continue;
       }
@@ -1723,6 +1748,15 @@ export class SyncCoordinator {
           this.connectionManager.sendTo(deviceId, msg);
           this._emitEvent(`CRDT merge conflict: ${local.path}`);
         } else {
+          this.eventLog.record({
+            op: "skip",
+            path: local.path,
+            peer: this._peerLabel(deviceId),
+            rule: decision.localWins ? "text-no-history-winner" : "text-no-history-loser",
+            before: { hash: local.hash },
+            after: { hash: remote.hash },
+            msg: decision.keepCopy ? "no shared history: the later version wins, the other is kept" : "no shared history: changed on one side only",
+          });
           // No shared history — fall back to deterministic winner selection
           // with a full backup so zero data is lost.
           const localFile = this.vault.getAbstractFileByPath(local.path);
@@ -2287,6 +2321,30 @@ export class SyncCoordinator {
    * FileMeta.madeAt). Notes gone from here, or from the peer's list, are
    * forgotten.
    */
+  /**
+   * Records how the two file lists compared (plan 5.3). Files whose
+   * deletion waits for the user are left out: they differ on purpose.
+   */
+  private _noteHealth(
+    deviceId: string,
+    meta: FileMetaSyncPayload,
+    localFiles: Map<string, FileMeta>,
+    diff: ReturnType<typeof diffFileTrees>,
+  ): void {
+    const differing = [
+      ...diff.localOnly.map((f) => f.path),
+      ...diff.remoteOnly.map((f) => f.path).filter((p) => !this.breaker.isHeldInferred(p)),
+      ...diff.conflicting.map((c) => c.local.path),
+    ];
+    this.health.noteExchange(deviceId, {
+      name: this._peerLabel(deviceId),
+      differing,
+      digestMatch: typeof meta.digest === "string" ? meta.digest === vaultDigest(localFiles.values()) : undefined,
+      clockOffsetMs: this.connectionManager.getClockOffset(deviceId),
+    });
+    this.health.noteWaiting(deviceId, this.binarySync.waitingFrom(deviceId));
+  }
+
   private _noteAgreedHashes(deviceId: string, localFiles: Map<string, FileMeta>, remoteFiles: Map<string, FileMeta>): void {
     let agreed = this.agreedHashes.get(deviceId);
     if (!agreed) {
@@ -2524,10 +2582,11 @@ export class SyncCoordinator {
         else if (deleted[at].deletedAt < record.deletedAt) deleted[at] = record;
       }
     }
+    const digest = vaultDigest(fileList);
     return encodeFileMetaSync(
       isResponse
-        ? { files, folders: this._listFolders(), deleted, isResponse: true }
-        : { files, folders: this._listFolders(), deleted },
+        ? { files, folders: this._listFolders(), deleted, digest, isResponse: true }
+        : { files, folders: this._listFolders(), deleted, digest },
     );
   }
 
@@ -2856,9 +2915,10 @@ export class SyncCoordinator {
   }
 
   /** Tell the user, once, that a file cannot be synced and why. */
-  private _reportUnsyncable(path: string, reason: string): void {
+  private _reportUnsyncable(path: string, reason: string, rule = "case-clash"): void {
     if (this.reportedUnsyncable.has(path)) return;
     this.reportedUnsyncable.add(path);
+    this.eventLog.record({ op: "skip", level: "warn", path, rule, msg: reason });
     logger.warn(`Cannot sync ${path}: ${reason}`);
     this._emitEvent(`Cannot sync ${path}: ${reason}`);
     this.onUnsyncableCb?.(path, reason);
@@ -3288,6 +3348,7 @@ export class SyncCoordinator {
     }
     const result = await this.docManager.applyFullState(filePath, update, deviceId, decision?.localWins);
     if (result === "kept-local") {
+      this.eventLog.record({ op: "skip", path: filePath, peer: this._peerLabel(deviceId), rule: "full-state-kept-local", msg: "the peer's unrelated history lost; ours sent back" });
       // Our doc wins; send it so the peer adopts it. Not again right away
       // for the same two docs: the peer has ours, and sends its own back
       // only when it decided otherwise, which another send would not
@@ -3353,12 +3414,14 @@ export class SyncCoordinator {
       // is not a merge of both versions.
       if (!hasLineFromNeither(merged, [apart.ours.text, before, apart.theirs.text])) return null;
       if (this._isConflictWinner(apart.ours.mtime, apart.theirs.mtime, deviceId)) {
+        this.eventLog.record({ op: "skip", path: filePath, peer: this._peerLabel(deviceId), rule: "apart-edits", msg: "same lines edited apart: ours is later and kept" });
         this._emitEvent(`Same lines edited apart, keeping this version: ${filePath}`);
         return null;
       }
       // Ours before the merge holds anything typed since we sent it. Not
       // kept, it must stay in the note.
       if (!(await this._createConflictCopy(filePath, before))) return null;
+      this.eventLog.record({ op: "overwrite", path: filePath, peer: this._peerLabel(deviceId), rule: "apart-edits", msg: "same lines edited apart: theirs is later; ours kept as a conflict copy" });
       this._emitEvent(`Same lines edited apart, keeping ${deviceId}'s version: ${filePath}`);
       return apart.theirs.text;
     };
@@ -3552,7 +3615,7 @@ export class SyncCoordinator {
   private _unportableName(filePath: string): boolean {
     const chars = unportableNameChars(filePath);
     if (!chars) return false;
-    this._reportUnsyncable(filePath, `its name contains ${chars}, which Obsidian does not allow in file names on most devices. Rename it to sync it`);
+    this._reportUnsyncable(filePath, `its name contains ${chars}, which Obsidian does not allow in file names on most devices. Rename it to sync it`, "unportable-name");
     return true;
   }
 

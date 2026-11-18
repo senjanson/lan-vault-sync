@@ -189,7 +189,7 @@ describe('SyncCoordinator text conflict safety', () => {
     const buildSpy = vi.spyOn(buildFileTreeModule, 'buildFileTree');
 
     vault.setText('local.md', 'local');
-    (coordinator as any).connectionManager = { sendTo };
+    (coordinator as any).connectionManager = { sendTo, getConnectedPeers: () => [], getClockOffset: () => undefined };
     (coordinator as any).docManager = {
       removeDoc: vi.fn().mockResolvedValue(undefined),
       hasDocState: vi.fn().mockResolvedValue(false),
@@ -228,7 +228,7 @@ describe('SyncCoordinator text conflict safety', () => {
     const buildFileTreeModule = await import('../../src/sync/file-tree');
     const buildSpy = vi.spyOn(buildFileTreeModule, 'buildFileTree');
 
-    (coordinator as any).connectionManager = { sendTo };
+    (coordinator as any).connectionManager = { sendTo, getConnectedPeers: () => [], getClockOffset: () => undefined };
     buildSpy.mockResolvedValueOnce({
       files: new Map([
         ['note.md', { path: 'note.md', hash: 'local-hash', mtime: 1, size: 13, isTextFile: true }],
@@ -293,7 +293,7 @@ describe('SyncCoordinator text conflict safety', () => {
     const localFile = vault.getFile('note.md')!;
     localFile.stat.mtime = 10;
 
-    (coordinator as any).connectionManager = { sendTo };
+    (coordinator as any).connectionManager = { sendTo, getConnectedPeers: () => [], getClockOffset: () => undefined };
     (coordinator as any).watcher = {
       consumePendingModify,
       takePendingModify: vi.fn().mockReturnValue(null),
