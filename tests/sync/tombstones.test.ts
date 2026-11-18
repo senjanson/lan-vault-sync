@@ -32,11 +32,14 @@ describe('TombstoneStore', () => {
     expect(second.list()).toEqual([]);
   });
 
-  it('matches a copy by hash, or by age when no hash is known', () => {
+  it('matches a copy by hash, or without a hash by the version both last shared, never by the clock', () => {
     expect(TombstoneStore.covers({ path: 'a', deletedAt: 10, hash: 'x' }, { hash: 'x', mtime: 99 })).toBe(true);
     expect(TombstoneStore.covers({ path: 'a', deletedAt: 10, hash: 'x' }, { hash: 'y', mtime: 1 })).toBe(false);
-    expect(TombstoneStore.covers({ path: 'a', deletedAt: 10 }, { hash: 'y', mtime: 5 })).toBe(true);
-    expect(TombstoneStore.covers({ path: 'a', deletedAt: 10 }, { hash: 'y', mtime: 20 })).toBe(false);
+    // Was: an older modified time was enough, so an edit made on a device
+    // whose clock is behind was deleted.
+    expect(TombstoneStore.covers({ path: 'a', deletedAt: 10 }, { hash: 'y', mtime: 5 })).toBe(false);
+    expect(TombstoneStore.covers({ path: 'a', deletedAt: 10 }, { hash: 'y', mtime: 5 }, 'y')).toBe(true);
+    expect(TombstoneStore.covers({ path: 'a', deletedAt: 10 }, { hash: 'y', mtime: 5 }, 'z')).toBe(false);
   });
 
   it('keeps where a renamed file went when its old name is removed again', () => {

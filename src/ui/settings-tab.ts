@@ -4,7 +4,19 @@ import { getLocalIPv4Addresses } from "../utils/network";
 import { supportsIncomingConnections } from "../utils/runtime";
 import { buildPeerURI, renderQRCode } from "./qr-code";
 import { generateSyncKey } from "../transport/auth";
-import { t } from "../i18n";
+import { randomVaultId } from "../utils/vault-id";
+import { confirmDialog } from "./confirm-modal";
+import { addStrings, t } from "../i18n";
+
+addStrings("en", {
+  "set.maxReceiveMB": "Largest file to receive (MB)",
+  "set.maxReceiveMBDesc": "Files from other devices larger than this are not taken on this device; the sync log says which. 0 for no limit. Phones start at 200, computers with no limit.",
+});
+
+addStrings("zh", {
+  "set.maxReceiveMB": "接收文件的大小上限（MB）",
+  "set.maxReceiveMBDesc": "其他设备发来的文件超过此大小时，本设备不接收，同步日志会记下是哪些文件。填 0 表示不限。手机默认 200，电脑默认不限。",
+});
 
 function makeCopyable(el: HTMLElement, getText: () => string): void {
   el.addClass("lan-sync-copyable");
@@ -78,6 +90,19 @@ export class LANSyncSettingTab extends PluginSettingTab {
           }),
       );
 
+    // Plan 6.3: a device whose settings were copied from another has its ID.
+    new Setting(containerEl)
+      .setName(t("set.deviceId"))
+      .setDesc(t("set.deviceIdDesc", { id: this.plugin.settings.deviceId }))
+      .addButton((button) =>
+        button.setButtonText(t("set.regenerateId")).onClick(async () => {
+          const ok = await confirmDialog(this.app, t("set.regenerateId"), [t("set.regenerateIdConfirm")], t("set.regenerateId"));
+          if (!ok) return;
+          await this.plugin.regenerateDeviceId();
+          this.display();
+        }),
+      );
+
     new Setting(containerEl)
       .setName(t("set.port"))
       .setDesc(
@@ -130,6 +155,9 @@ export class LANSyncSettingTab extends PluginSettingTab {
       )
       .addButton((button) =>
         button.setButtonText(t("set.newKey")).onClick(async () => {
+          // A new key starts a new group of devices: it gets its own vault
+          // ID, which pairing passes on (plan 6.3).
+          this.plugin.settings.vaultId = randomVaultId();
           await this.plugin.setSyncKey(generateSyncKey());
           keyInput?.setValue(this.plugin.settings.syncKey);
           new Notice(t("set.newKeySet"));
@@ -170,7 +198,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
           selectedIP = ip;
           // Always read the current port from settings (may have changed on this page)
           const currentPort = this.plugin.settings.port;
-          const uri = buildPeerURI(ip, currentPort, this.plugin.settings.syncKey);
+          const uri = buildPeerURI(ip, currentPort, this.plugin.settings.syncKey, this.plugin.getVaultId());
           qrInfo.empty();
           const addrEl = qrInfo.createEl("p", {
             text: t("set.qrAddress", { address: `${ip}:${currentPort}` }),
@@ -357,6 +385,19 @@ export class LANSyncSettingTab extends PluginSettingTab {
             this.plugin.settings.enableDebugLog = value;
             await this.plugin.saveSettings();
           }),
+      );
+
+    new Setting(containerEl)
+      .setName(t("set.maxReceiveMB"))
+      .setDesc(t("set.maxReceiveMBDesc"))
+      .addText((text) =>
+        text.setValue(String(this.plugin.settings.maxReceiveMB)).onChange(async (value) => {
+          const num = parseInt(value, 10);
+          if (!isNaN(num) && num >= 0) {
+            this.plugin.settings.maxReceiveMB = num;
+            await this.plugin.saveSettings();
+          }
+        }),
       );
 
     // ─── Version history ────────────────────────────────

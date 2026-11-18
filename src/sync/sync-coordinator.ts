@@ -1,5 +1,6 @@
 import { EventLog, peerLabel } from "../diagnostics/event-log";
 import { HealthMonitor, vaultDigest, type HealthOptions } from "../diagnostics/health";
+import { effectiveVaultId, randomInstanceId } from "../utils/vault-id";
 import { ApplyGate, BackupKeeper, OpContext, toArrayBuffer } from "./apply-gate";
 import { VersionStore } from "../history/version-store";
 import { canUseNodeRuntime } from "../utils/runtime";
@@ -48,25 +49,17 @@ import {
   SyncState,
 } from "../types";
 import { logger } from "../logger";
-import { AGREED_HASHES_FILE, FILE_INDEX_FILE } from "../constants";
+import { FILE_INDEX_FILE } from "../constants";
 import { ensureParentDirectory, ensureVaultParentFolder, isCaseVariant, isSafeSyncPath, unportableNameChars } from "../utils/path-utils";
 import { supportsIncomingConnections } from "../utils/runtime";
 import { parsePeerAddress } from "../discovery/manual-peers";
 import { isPlainUtf8, utf8Length } from "../utils/utf8";
+import { readJsonWithBackup, writeAtomic } from "../utils/atomic-write";
+import { AgreedVersions, isTime } from "./agreed-versions";
+import { decideConflict, localIsWinner } from "./conflict-rules";
 
 /** Hash recorded in deletion records of folders. */
 const FOLDER_HASH = "folder";
-
-/** AGREED_HASHES_FILE; see SyncCoordinator._agreedHashesToSave. */
-interface SavedAgreedHashes {
-  version: 2;
-  /** Peers by device ID, and when each last sent its file list. */
-  peers: Array<{ id: string; seen: number }>;
-  /** Per note: the hash shared with every peer, or one per peer (null: none). */
-  files: Record<string, string | Array<string | null>>;
-  /** Per note: an earlier time learned for its current version; see FileMeta.madeAt. */
-  times: Record<string, [string, number]>;
-}
 
 /** How long to wait before reading a note again that read as empty. */
 const EMPTY_REREAD_MS = 500;
@@ -171,26 +164,8 @@ export class SyncCoordinator {
   private knownHashes = new Map<string, string>();
   /** Files and hashes saved when sync last ran; see _deletedWhileStopped. */
   private lastRunFiles = new Map<string, string>();
-  /**
-   * Per peer (by device ID) and note, the hash of the content this device
-   * last had in common with that peer, sent to that peer as FileMeta.agreed.
-   * Recorded only when the peer's file list shows the very same content, so
-   * the peer certainly had it. Kept apart from the notes' sync history,
-   * which can be lost on its own.
-   *
-   * Kept per peer: with one record per note, a list exchange with one
-   * device moved it on to a version another device, away meanwhile, never
-   * had; the two then named different versions and the note was settled by
-   * modified times, which kept a needless conflict copy.
-   */
-  private agreedHashes = new Map<string, Map<string, string>>();
-  /** When each peer in agreedHashes last sent its file list, to forget devices gone for good. */
-  private agreedPeersSeen = new Map<string, number>();
-  /**
-   * Earlier times for notes' current versions, learned from peers listing
-   * the same content (path → hash and time); see FileMeta.madeAt.
-   */
-  private versionTimes = new Map<string, { hash: string; at: number }>();
+  /** The versions this device last had in common with each peer; see AgreedVersions. */
+  private agreed: AgreedVersions;
   /**
    * Per attachment: the version last sent to or received from peers, sent
    * as the base of the next local change (FileVersionInfo.base) so a peer
@@ -198,12 +173,11 @@ export class SyncCoordinator {
    * already be the local change itself.
    */
   private syncedHashes = new Map<string, string>();
-  /** agreedHashes, agreedPeersSeen or versionTimes changed since the last save. */
-  private agreedHashesChanged = false;
-  private agreedHashesSave: Promise<void> = Promise.resolve();
   /** Folders a peer deleted, removed here once they hold no files (path → expiry). */
   private pendingFolderDeletes = new Map<string, number>();
   private vaultId: string;
+  /** Random for this run (see DeviceInfo.instance). */
+  private readonly instance = randomInstanceId();
   /** Persistent sync log in .lan-vault-sync/logs (see EventLog). */
   readonly eventLog: EventLog;
   /** How each peer's files compare, and the alerts to show (plan 5.3, 5.4). */
@@ -257,13 +231,18 @@ export class SyncCoordinator {
           ? new VersionStore(adapter, vault as any)
           : null;
     // Generate a vault ID from the vault name
-    this.vaultId = this._hashVaultId(vault.getName());
+    this.vaultId = effectiveVaultId(settings, vault.getName());
 
     this.filter = new FileFilter(settings.ignoredPaths);
     this.stateMachine = new SyncStateMachine();
     this.connectionManager = new ConnectionManager(settings, this.vaultId);
+    this.connectionManager.setInstance(this.instance);
+    this.connectionManager.onDuplicateDevice((name) => this._reportDuplicateDevice(name));
     this.docManager = new YjsDocManager(vault);
     this.tombstones = new TombstoneStore((vault as any).adapter);
+    this.agreed = new AgreedVersions((vault as any).adapter, (file, why) => this._noteStateBackupUsed(file, why));
+    this.tombstones.setOnBackupUsed((file, why) => this._noteStateBackupUsed(file, why));
+    this.docManager.setOnStateBackupUsed((file, why) => this._noteStateBackupUsed(file, why));
     this.backupService =
       options?.backupService ?? new ConflictBackupService(vault);
     this.syncLogService = options?.syncLogService ?? null;
@@ -300,10 +279,12 @@ export class SyncCoordinator {
       ip: "",
       port: settings.port,
       vaultId: this.vaultId,
+      instance: this.instance,
       lastSeen: Date.now(),
       acceptsIncomingConnections: supportsIncomingConnections(),
     };
     this.discovery = new DiscoveryService(localDevice);
+    this.discovery.onDuplicateDevice((name) => this._reportDuplicateDevice(name));
 
     this._wireCallbacks();
   }
@@ -423,7 +404,7 @@ export class SyncCoordinator {
       this.stateMachine.transition("discovering");
       await this.tombstones.load();
       await this._loadFileIndex();
-      await this._loadAgreedHashes();
+      await this.agreed.load();
 
       // Start WebSocket server
       await this.connectionManager.start();
@@ -499,7 +480,7 @@ export class SyncCoordinator {
     await this.syncLogService?.flush();
     await this.tombstones.flush();
     await this._saveFileIndex();
-    await this._saveAgreedHashes();
+    await this.agreed.save();
     await this.eventLog.flush();
 
     this.stateMachine.transition("idle");
@@ -516,7 +497,7 @@ export class SyncCoordinator {
     await this.docManager.persistAll();
     await this.tombstones.flush();
     await this._saveFileIndex();
-    await this._saveAgreedHashes();
+    await this.agreed.save();
     await this.eventLog.flush();
     await this.versionStore?.flush().catch(() => undefined);
   }
@@ -728,22 +709,11 @@ export class SyncCoordinator {
       // next file list: a file sent live and then changed on both devices
       // before they list again would otherwise look changed on both sides.
       if (fromDeviceId) {
-        let agreed = this.agreedHashes.get(fromDeviceId);
-        if (!agreed) this.agreedHashes.set(fromDeviceId, (agreed = new Map()));
-        if (agreed.get(path) !== hash) {
-          agreed.set(path, hash);
-          this.agreedHashesChanged = true;
-        }
+        this.agreed.noteShared(fromDeviceId, path, hash);
       }
       // The sender's time for this version, kept now rather than at the next
       // file list (plan 4.5): our own modified time is when we wrote it.
-      if (SyncCoordinator._isTime(info?.madeAt) && (!info?.hash || info.hash === hash)) {
-        const learned = this.versionTimes.get(path);
-        if (!learned || learned.hash !== hash || info!.madeAt! < learned.at) {
-          this.versionTimes.set(path, { hash, at: info!.madeAt! });
-          this.agreedHashesChanged = true;
-        }
-      }
+      if (isTime(info?.madeAt) && (!info?.hash || info.hash === hash)) this.agreed.noteMadeAt(path, hash, info!.madeAt!);
       if (this.filter.isTextFile(path)) await this._storedTextAsBytes(path, hash, content, fromDeviceId);
     });
 
@@ -1508,7 +1478,12 @@ export class SyncCoordinator {
 
     const treeDiff = diffFileTrees(localTree.files, remoteFiles);
     this._noteHealth(deviceId, meta, localTree.files, treeDiff);
-    this._noteAgreedHashes(deviceId, localTree.files, remoteFiles);
+    // As shared before this exchange: a deleted file's record goes below,
+    // and a deletion record without a hash is weighed against it.
+    const agreedBefore = this.agreed.snapshot(deviceId);
+    this.agreed.noteLists(deviceId, localTree.files, remoteFiles, (local) => {
+      if (!local.isTextFile) this.syncedHashes.set(local.path, local.hash);
+    });
     // Settled again below for the notes that still differ.
     this._forgetHistoryWinners(deviceId);
     for (const f of remoteFiles.values()) {
@@ -1579,7 +1554,7 @@ export class SyncCoordinator {
       // Deleted here while the peer was away: the peer removes its copy
       // when it sees our deletion record, so don't fetch it back.
       const ownTombstone = this.tombstones.get(file.path);
-      if (ownTombstone && TombstoneStore.covers(ownTombstone, file)) {
+      if (ownTombstone && TombstoneStore.covers(ownTombstone, file, agreedBefore.get(file.path))) {
         this._logOnce(`own-tombstone\n${deviceId}\n${file.path}`, { op: "skip", path: file.path, peer: this._peerLabel(deviceId), rule: "own-tombstone-skip", before: { hash: file.hash }, msg: "deleted here; not fetched back" });
         this._emitEvent(`Skipping deleted file: ${file.path}`);
         continue;
@@ -1633,7 +1608,7 @@ export class SyncCoordinator {
         this.connectionManager.sendTo(deviceId, msg);
         this._emitEvent(`Requesting text state: ${file.path}`);
       } else {
-        this.binarySync.requestFile(deviceId, file.path, null);
+        this.binarySync.requestFile(deviceId, file.path, null, file);
         this._emitEvent(`Requesting: ${file.path}`);
       }
     }
@@ -1657,7 +1632,7 @@ export class SyncCoordinator {
       // when it sees ours, and gets the file.
       const revival = this.tombstones.getRevival(file.path);
       const revived = !!revival && !!peerTombstone && !peerTombstone.movedTo && peerTombstone.deletedAt <= revival.deletedAt;
-      if (peerTombstone && !revived && TombstoneStore.covers(peerTombstone, file)) {
+      if (peerTombstone && !revived && TombstoneStore.covers(peerTombstone, file, agreedBefore.get(file.path))) {
         if (!this._admitDelete(deviceId, file.path, { tree: { record: peerTombstone, expectHash: file.hash } })) continue;
         const ctx: OpContext = { peer: this._peerLabel(deviceId), rule: "tombstone-covers" };
         if (await this.binarySync.applyRemoteDelete(file.path, peerTombstone, file.hash, ctx)) {
@@ -2100,7 +2075,7 @@ export class SyncCoordinator {
       // an earlier one a peer gave for the same content (see FileMeta.madeAt
       // and _madeAt). Attachments too: a device that receives an old version
       // late has a later modified time than a newer version made elsewhere.
-      const madeAt = this._madeAt(path, meta.hash, meta.mtime);
+      const madeAt = this.agreed.madeAt(path, meta.hash, meta.mtime);
       if (meta.isTextFile) {
         const crdt = await this.docManager.crdtDigest(path);
         tree.files.set(path, { ...current, crdt: crdt || undefined, madeAt });
@@ -2285,11 +2260,26 @@ export class SyncCoordinator {
     if (file.isTextFile) await this.docManager.removeDoc(file.path);
   }
 
+  /**
+   * A state file was damaged and read from its backup: the user is told,
+   * since changes saved just before (a deletion, a shared version) may
+   * have been lost with it.
+   */
+  private _noteStateBackupUsed(file: string, why: string): void {
+    const name = file.slice(file.lastIndexOf("/") + 1);
+    this.eventLog.record({ op: "alert", level: "warn", rule: "state-backup-used", msg: `${name}: ${why}` });
+  }
+
   private async _loadFileIndex(): Promise<void> {
     const adapter = (this.vault as any).adapter;
     try {
-      if (!adapter || !(await adapter.exists(FILE_INDEX_FILE))) return;
-      const saved = JSON.parse(await adapter.read(FILE_INDEX_FILE)) as Record<string, string>;
+      if (!adapter) return;
+      // Without this list, files deleted while sync was off are not known
+      // as deleted, so a damaged file is read from its backup.
+      const saved = await readJsonWithBackup<Record<string, string>>(adapter, FILE_INDEX_FILE, (file, why) =>
+        this._noteStateBackupUsed(file, why),
+      );
+      if (!saved || typeof saved !== "object") return;
       for (const [path, hash] of Object.entries(saved)) {
         if (typeof hash === "string") this.lastRunFiles.set(path, hash);
       }
@@ -2305,7 +2295,7 @@ export class SyncCoordinator {
     for (const [path, hash] of this.knownHashes) index[path] = hash;
     try {
       await ensureParentDirectory(adapter, FILE_INDEX_FILE);
-      await adapter.write(FILE_INDEX_FILE, JSON.stringify(index));
+      await writeAtomic(adapter, FILE_INDEX_FILE, JSON.stringify(index));
     } catch (err) {
       logger.warn("Could not save the list of synced files:", err);
     }
@@ -2343,164 +2333,6 @@ export class SyncCoordinator {
       clockOffsetMs: this.connectionManager.getClockOffset(deviceId),
     });
     this.health.noteWaiting(deviceId, this.binarySync.waitingFrom(deviceId));
-  }
-
-  private _noteAgreedHashes(deviceId: string, localFiles: Map<string, FileMeta>, remoteFiles: Map<string, FileMeta>): void {
-    let agreed = this.agreedHashes.get(deviceId);
-    if (!agreed) {
-      agreed = new Map();
-      this.agreedHashes.set(deviceId, agreed);
-    }
-    for (const [path, remote] of remoteFiles) {
-      const local = localFiles.get(path);
-      if (!local || local.isTextFile !== remote.isTextFile || local.hash !== remote.hash) continue;
-      if (!local.isTextFile) this.syncedHashes.set(path, local.hash);
-      const madeAt = local.madeAt ?? local.mtime;
-      if (SyncCoordinator._isTime(remote.madeAt) && remote.madeAt < madeAt) {
-        this.versionTimes.set(path, { hash: local.hash, at: remote.madeAt });
-        this.agreedHashesChanged = true;
-      }
-      if (agreed.get(path) === local.hash) continue;
-      agreed.set(path, local.hash);
-      this.agreedHashesChanged = true;
-    }
-    // A note the peer no longer lists has no version it would name for it.
-    for (const path of agreed.keys()) {
-      if (remoteFiles.has(path)) continue;
-      agreed.delete(path);
-      this.agreedHashesChanged = true;
-    }
-    for (const records of this.agreedHashes.values()) {
-      for (const path of records.keys()) {
-        if (localFiles.has(path)) continue;
-        records.delete(path);
-        this.agreedHashesChanged = true;
-      }
-    }
-    for (const path of this.versionTimes.keys()) {
-      if (localFiles.has(path)) continue;
-      this.versionTimes.delete(path);
-      this.agreedHashesChanged = true;
-    }
-    // Only a day's precision is needed (see _forgetOldAgreedPeers); a save
-    // at every exchange would not be.
-    const now = Date.now();
-    if (now - (this.agreedPeersSeen.get(deviceId) ?? 0) > SyncCoordinator.DAY_MS) {
-      this.agreedPeersSeen.set(deviceId, now);
-      this.agreedHashesChanged = true;
-    }
-    this._forgetOldAgreedPeers();
-    // Saved right away: the app may be closed without notice before the
-    // next save, and a version recorded later is lost with it.
-    if (this.agreedHashesChanged) void this._saveAgreedHashes();
-  }
-
-  private static readonly DAY_MS = 24 * 60 * 60 * 1000;
-  /** Peers whose file list has not come for this long are forgotten (a reinstall gets a new device ID). */
-  private static readonly AGREED_PEER_TTL_MS = 90 * SyncCoordinator.DAY_MS;
-  /** At most this many peers are remembered, the most recently seen ones. */
-  private static readonly MAX_AGREED_PEERS = 32;
-
-  /**
-   * Forget the versions shared with peers not seen for long. Such a peer
-   * coming back settles notes changed on both sides by time again, keeping
-   * a conflict copy, as before these records existed.
-   */
-  private _forgetOldAgreedPeers(): void {
-    const now = Date.now();
-    const bySeen = [...this.agreedHashes.keys()].sort(
-      (a, b) => (this.agreedPeersSeen.get(b) ?? 0) - (this.agreedPeersSeen.get(a) ?? 0),
-    );
-    bySeen.forEach((peer, i) => {
-      if (i < SyncCoordinator.MAX_AGREED_PEERS && now - (this.agreedPeersSeen.get(peer) ?? 0) <= SyncCoordinator.AGREED_PEER_TTL_MS) return;
-      this.agreedHashes.delete(peer);
-      this.agreedPeersSeen.delete(peer);
-      this.agreedHashesChanged = true;
-    });
-  }
-
-  /** A time in a peer's file list that can be compared with ours. */
-  private static _isTime(value: unknown): value is number {
-    return typeof value === "number" && Number.isFinite(value) && value > 0;
-  }
-
-  /**
-   * Read the records saved by _saveAgreedHashes. A file in the earlier form
-   * (one hash per note, {path: hash}, from test builds) is ignored: it does
-   * not say which peer a version was shared with, which is the very thing
-   * that was wrong with it. The records are made again at the next file
-   * list exchange with each peer.
-   */
-  private async _loadAgreedHashes(): Promise<void> {
-    const adapter = (this.vault as any).adapter;
-    try {
-      if (!adapter || !(await adapter.exists(AGREED_HASHES_FILE))) return;
-      const saved = JSON.parse(await adapter.read(AGREED_HASHES_FILE)) as Partial<SavedAgreedHashes>;
-      if (saved?.version !== 2 || !Array.isArray(saved.peers)) return;
-      const peers: Array<Map<string, string> | null> = saved.peers.map((p) => {
-        if (!p || typeof p.id !== "string" || !SyncCoordinator._isTime(p.seen)) return null;
-        const records = new Map<string, string>();
-        this.agreedHashes.set(p.id, records);
-        this.agreedPeersSeen.set(p.id, p.seen);
-        return records;
-      });
-      for (const [path, hashes] of Object.entries(saved.files ?? {})) {
-        peers.forEach((records, i) => {
-          const hash = typeof hashes === "string" ? hashes : Array.isArray(hashes) ? hashes[i] : null;
-          if (records && typeof hash === "string") records.set(path, hash);
-        });
-      }
-      for (const [path, time] of Object.entries(saved.times ?? {})) {
-        if (Array.isArray(time) && typeof time[0] === "string" && SyncCoordinator._isTime(time[1])) {
-          this.versionTimes.set(path, { hash: time[0], at: time[1] });
-        }
-      }
-      this._forgetOldAgreedPeers();
-    } catch (err) {
-      logger.warn("Could not read the versions last shared with peers:", err);
-    }
-  }
-
-  /**
-   * The records in the form saved: a note's hash is written once when every
-   * peer has the same one (the usual case), so the file is no larger than
-   * one record per note; otherwise one entry per peer, in the order of
-   * `peers`, null where there is none.
-   */
-  private _agreedHashesToSave(): SavedAgreedHashes {
-    const ids = [...this.agreedHashes.keys()];
-    const files: SavedAgreedHashes["files"] = {};
-    const paths = new Set<string>();
-    for (const records of this.agreedHashes.values()) for (const path of records.keys()) paths.add(path);
-    for (const path of paths) {
-      const hashes = ids.map((id) => this.agreedHashes.get(id)!.get(path) ?? null);
-      files[path] = hashes.every((h) => h !== null && h === hashes[0]) ? hashes[0]! : hashes;
-    }
-    const times: SavedAgreedHashes["times"] = {};
-    for (const [path, { hash, at }] of this.versionTimes) times[path] = [hash, at];
-    return {
-      version: 2,
-      peers: ids.map((id) => ({ id, seen: this.agreedPeersSeen.get(id) ?? Date.now() })),
-      files,
-      times,
-    };
-  }
-
-  /** Saves run one after another, so an older list never overwrites a newer one. */
-  private _saveAgreedHashes(): Promise<void> {
-    this.agreedHashesSave = this.agreedHashesSave.then(async () => {
-      const adapter = (this.vault as any).adapter;
-      if (!adapter || !this.agreedHashesChanged) return;
-      this.agreedHashesChanged = false;
-      try {
-        await ensureParentDirectory(adapter, AGREED_HASHES_FILE);
-        await adapter.write(AGREED_HASHES_FILE, JSON.stringify(this._agreedHashesToSave()));
-      } catch (err) {
-        this.agreedHashesChanged = true;
-        logger.warn("Could not save the versions last shared with peers:", err);
-      }
-    });
-    return this.agreedHashesSave;
   }
 
   private async _primeKnownHashes(): Promise<void> {
@@ -2563,7 +2395,7 @@ export class SyncCoordinator {
    * each peer it goes to.
    */
   private _encodeTree(fileList: FileMeta[], deviceId: string, isResponse?: boolean): Uint8Array {
-    const agreed = this.agreedHashes.get(deviceId);
+    const agreed = this.agreed.forPeer(deviceId);
     const files = agreed?.size
       ? fileList.map((f) => {
           const hash = agreed.get(f.path);
@@ -3009,14 +2841,24 @@ export class SyncCoordinator {
     return null;
   }
 
-  private _hashVaultId(name: string): string {
-    let hash = 0;
-    for (let i = 0; i < name.length; i++) {
-      const char = name.charCodeAt(i);
-      hash = (hash << 5) - hash + char;
-      hash |= 0;
-    }
-    return "vault-" + Math.abs(hash).toString(36);
+  /** This vault's ID, for pairing links. */
+  getVaultId(): string {
+    return this.vaultId;
+  }
+
+  private duplicateReported = false;
+  private onDuplicateDeviceCb: ((deviceName: string) => void) | null = null;
+
+  /** Another device uses this device's ID: told once per run. */
+  onDuplicateDevice(cb: (deviceName: string) => void): void {
+    this.onDuplicateDeviceCb = cb;
+  }
+
+  private _reportDuplicateDevice(name: string): void {
+    if (this.duplicateReported) return;
+    this.duplicateReported = true;
+    this.eventLog.record({ op: "alert", level: "warn", rule: "duplicate-device-id", msg: `another device (${name || "unnamed"}) uses this device's ID` });
+    this.onDuplicateDeviceCb?.(name);
   }
 
   private _emitEvent(msg: string): void {
@@ -3488,9 +3330,7 @@ export class SyncCoordinator {
     // A version that came from a peer (or that a peer listed too) is not
     // only here: the version store keeps it when replaced, and a visible copy
     // of an old version would only be clutter.
-    const fromPeer =
-      this.versionTimes.get(local.path)?.hash === local.hash ||
-      [...this.agreedHashes.values()].some((agreed) => agreed.get(local.path) === local.hash);
+    const fromPeer = this.agreed.sharedWithSomeone(local.path, local.hash);
     if (decision.keepCopy && !fromPeer) {
       const file = this.vault.getAbstractFileByPath(local.path);
       if (!(file instanceof TFile)) return;
@@ -3498,7 +3338,7 @@ export class SyncCoordinator {
       if ((await computeFileHash(toArrayBuffer(bytes))) !== local.hash) return; // changed since the list: next round
       if (!(await this._createBinaryConflictCopy(local.path, bytes, local.hash))) return;
     }
-    this.binarySync.requestFile(deviceId, remote.path, local.hash);
+    this.binarySync.requestFile(deviceId, remote.path, local.hash, remote);
     this.eventLog.record({ op: "skip", path: local.path, peer: this._peerLabel(deviceId), rule, before: { hash: local.hash }, after: { hash: remote.hash }, msg: decision.keepCopy ? "fetching the later version; ours kept as a copy" : "fetching theirs: changed there only" });
     this._emitEvent(`Requesting newer binary: ${remote.path}`);
   }
@@ -3632,77 +3472,26 @@ export class SyncCoordinator {
     local: FileMeta,
     remote: FileMeta,
   ): { localWins: boolean; keepCopy: boolean } {
-    // One side deleted the very copy the other still has, and then made a
-    // new note under the name (see TombstoneStore.revive): the new note
-    // wins, and the deleted copy is not kept again as a conflict copy.
-    const ours = this.tombstones.getRevival(local.path);
-    if (ours?.hash && ours.hash === remote.hash) return { localWins: true, keepCopy: false };
-    if (remote.revives?.hash && remote.revives.hash === local.hash) return { localWins: false, keepCopy: false };
-    // Both devices last had the same version in common, and one of them
-    // still has it: the note was changed on the other side only, so that
-    // side wins whatever the times say, and the old version is not kept
-    // again as a copy. This is the case of a device that lost the notes'
-    // sync history. The versions are the ones shared with each other (see
-    // agreedHashes), and only when both name the same one: a device that
-    // names none (it lost everything, or runs an older version) cannot tell.
-    // When only one side names it (a file sent live and changed before the
-    // two listed their files again), that side's word is enough: a side
-    // that still has the version they last shared did not change it. Each
-    // device reads the same two claims, so both decide alike.
-    const mine = this._agreedWith(deviceId, local.path);
-    const theirs = remote.agreed;
-    const has = (hash: string) => (!!mine && hash === mine) || (!!theirs && hash === theirs);
-    if (!mine || !theirs || mine === theirs) {
-      const localSame = has(local.hash);
-      const remoteSame = has(remote.hash);
-      if (remoteSame && !localSame) return { localWins: true, keepCopy: false };
-      if (localSame && !remoteSame) return { localWins: false, keepCopy: false };
-    }
-    // Changed on both sides: the version made later wins. When both lists
-    // say when each version was made (FileMeta.madeAt), that is used: it is
-    // the same on every device that has the version, so every device that
-    // meets the other version decides alike. A device's modified time of a
-    // version it received is when it wrote it, by its own clock, and
-    // differs from device to device: one peer that wrote the earlier
-    // version late won while another lost, and both versions were kept as
-    // copies with the earlier one ending up in the note. A peer that does
-    // not send it (an older version) decides by modified times, so then do we.
-    const made = SyncCoordinator._isTime(local.madeAt) && SyncCoordinator._isTime(remote.madeAt);
-    return {
-      localWins: this._isConflictWinner(made ? local.madeAt! : local.mtime, made ? remote.madeAt! : remote.mtime, deviceId),
-      keepCopy: true,
-    };
-  }
-
-  /**
-   * When the version of a file with this content was made: its modified
-   * time, or an earlier time a peer gave for the same content. One learned
-   * for content we no longer have does not apply to any other.
-   */
-  private _madeAt(path: string, hash: string, mtime: number): number {
-    const learned = this.versionTimes.get(path);
-    if (learned && learned.hash !== hash) {
-      this.versionTimes.delete(path);
-      this.agreedHashesChanged = true;
-      return mtime;
-    }
-    return learned ? Math.min(learned.at, mtime) : mtime;
+    return decideConflict({
+      local,
+      remote,
+      deviceId: this.settings.deviceId,
+      remoteDeviceId: deviceId,
+      agreed: this.agreed.with(deviceId, local.path),
+      revivedHash: this.tombstones.getRevival(local.path)?.hash,
+    });
   }
 
   /** The version of an attachment peers are thought to have: see syncedHashes. */
   private _syncedBase(path: string): string | undefined {
     const synced = this.syncedHashes.get(path);
     if (synced) return synced;
-    for (const agreed of this.agreedHashes.values()) {
-      const hash = agreed.get(path);
-      if (hash) return hash;
-    }
-    return undefined;
+    return this.agreed.anyFor(path);
   }
 
-  /** The version of a note this device last had in common with a peer; see agreedHashes. */
+  /** The version of a note this device last had in common with a peer; see AgreedVersions. */
   private _agreedWith(deviceId: string, path: string): string | undefined {
-    return this.agreedHashes.get(deviceId)?.get(path);
+    return this.agreed.with(deviceId, path);
   }
 
   private _peerPathKey(deviceId: string, path: string): string {
@@ -3775,15 +3564,8 @@ export class SyncCoordinator {
     return undefined;
   }
 
-  private _isConflictWinner(
-    localMtime: number,
-    remoteMtime: number,
-    remoteDeviceId: string,
-  ): boolean {
-    if (localMtime !== remoteMtime) {
-      return localMtime > remoteMtime;
-    }
-    return this.settings.deviceId < remoteDeviceId;
+  private _isConflictWinner(localMtime: number, remoteMtime: number, remoteDeviceId: string): boolean {
+    return localIsWinner(localMtime, remoteMtime, this.settings.deviceId, remoteDeviceId);
   }
 }
 

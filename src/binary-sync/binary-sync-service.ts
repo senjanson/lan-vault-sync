@@ -28,6 +28,7 @@ import { logger } from "../logger";
 import {
   CHUNK_SIZE,
   CHUNKED_FILE_THRESHOLD,
+  INCOMING_DIR,
   MAX_SYNC_FILE_SIZE,
 } from "../constants";
 import { ensureVaultParentFolder, isCaseVariant, isSafeSyncPath } from "../utils/path-utils";
@@ -35,13 +36,48 @@ import { ensureVaultParentFolder, isCaseVariant, isSafeSyncPath } from "../utils
 interface IncomingFile extends FileVersionInfo {
   path: string;
   mtime: number;
-  data: Uint8Array;
+  totalSize: number;
   received: number;
+  /** Temporary file the chunks are written to (see INCOMING_DIR); null when they are kept in `data`. */
+  tempPath: string | null;
+  data: Uint8Array | null;
+}
+
+/** The part of Obsidian's DataAdapter that receiving into a temporary file needs. */
+interface TempAdapter {
+  exists(path: string): Promise<boolean>;
+  mkdir(path: string): Promise<void>;
+  writeBinary(path: string, data: ArrayBuffer): Promise<void>;
+  appendBinary(path: string, data: ArrayBuffer): Promise<void>;
+  readBinary(path: string): Promise<ArrayBuffer>;
+  remove(path: string): Promise<void>;
+  list?(path: string): Promise<{ files: string[]; folders: string[] }>;
+}
+
+/** What is sent for one version of a file. */
+interface OutgoingFile {
+  content: Uint8Array;
+  mtime: number;
+  info: FileVersionInfo;
 }
 
 export class BinaryFileSyncService {
   /** Chunked files being received, keyed by `${deviceId}\n${path}`. */
   private incoming = new Map<string, IncomingFile>();
+  /** Temporary files left by an earlier run are removed before new ones are made. */
+  private incomingCleaned: Promise<void>;
+  private tempSeq = 0;
+  /** Files refused as too large, by path and hash, so each is logged once. */
+  private refusedLarge = new Set<string>();
+  /**
+   * Large files to each peer go one after another, each read when its turn
+   * comes, so several are not held in memory at once.
+   */
+  private outgoing = new Map<string, Promise<void>>();
+  /** Large transfers queued or running, by `${deviceId}\n${path}`; see _sendMessage. */
+  private outgoingPaths = new Map<string, number>();
+  /** Goes up when a peer disconnects, so transfers queued for it are dropped. */
+  private outgoingEpoch = new Map<string, number>();
   /** Deletions being applied, by path; see _deleteFile. */
   private deleting = new Map<string, Promise<boolean>>();
   private isDeletedCb: ((path: string, hash: string) => boolean) | null = null;
@@ -89,6 +125,7 @@ export class BinaryFileSyncService {
     private isTextPath: (path: string) => boolean = () => false,
   ) {
     this.gate = new ApplyGate({ vault, keeper: new BackupKeeper(backupService), log: new EventLog(null) });
+    this.incomingCleaned = this._cleanIncoming();
   }
 
   setGate(gate: ApplyGate): void {
@@ -190,6 +227,7 @@ export class BinaryFileSyncService {
       case MessageType.FILE_DATA: {
         const data = decodeFileData(payload);
         if (!this.isAllowedPath(data.path)) break;
+        if (this._refuseTooLarge(deviceId, data.path, data.content.byteLength, data.hash)) break;
         await this._receiveFile(data.path, data.content, data.mtime, deviceId, data);
         break;
       }
@@ -227,7 +265,20 @@ export class BinaryFileSyncService {
     const hash = await computeFileHash(toExactArrayBuffer(content));
     const info: FileVersionInfo = { hash, madeAt: madeAt ?? file.stat.mtime };
     if (base && base !== hash) info.base = base;
-    for (const msg of this._encodeFile(path, content, file.stat.mtime, info)) {
+    const out: OutgoingFile = { content, mtime: file.stat.mtime, info };
+    if (content.byteLength > CHUNKED_FILE_THRESHOLD) {
+      // One copy of the content is shared by the transfers to every peer.
+      for (const deviceId of this.connectionManager.getConnectedPeerIds()) {
+        if (this._overPeerLimit(deviceId, content.byteLength)) continue;
+        this._queueTransfer(deviceId, path, async () => out);
+      }
+      return hash;
+    }
+    const msg = encodeFileData({ path, content, mtime: file.stat.mtime, ...info });
+    const peers = this.connectionManager.getConnectedPeerIds?.() ?? [];
+    if (peers.some((id) => this.outgoingPaths.has(`${id}\n${path}`))) {
+      for (const deviceId of peers) this._sendMessage(deviceId, path, msg);
+    } else {
       this.connectionManager.broadcast(msg);
     }
     return hash;
@@ -252,7 +303,10 @@ export class BinaryFileSyncService {
    * copy when the peer's version was chosen (null: we have none): the peer's
    * version replaces only that (see _receiveFile).
    */
-  requestFile(deviceId: string, path: string, expectHash?: string | null): void {
+  requestFile(deviceId: string, path: string, expectHash?: string | null, listed?: { size: number; hash: string }): void {
+    // A file over the receive limit is not asked for: it would be sent whole
+    // and thrown away, at every round.
+    if (listed && this._refuseTooLarge(deviceId, path, listed.size, listed.hash)) return;
     if (expectHash !== undefined) this.expected.set(path, { hash: expectHash, at: Date.now(), from: deviceId });
     const msg = encodeFileRequest(path);
     this.connectionManager.sendTo(deviceId, msg);
@@ -278,12 +332,34 @@ export class BinaryFileSyncService {
     const file = this.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
 
-    const content = new Uint8Array(await this.vault.readBinary(file));
-    const hash = await computeFileHash(toExactArrayBuffer(content));
-    const info: FileVersionInfo = { hash, madeAt: opts.madeAt ?? file.stat.mtime };
-    if (opts.base) info.base = opts.base;
-    for (const msg of this._encodeFile(path, content, file.stat.mtime, info)) {
-      this.connectionManager.sendTo(deviceId, msg);
+    // The peer said it would refuse a file this large: it is not sent.
+    if (this._overPeerLimit(deviceId, file.stat.size)) return;
+    if (file.stat.size > CHUNKED_FILE_THRESHOLD) {
+      // Read when its turn comes (see _queueTransfer); `madeAt` belongs to
+      // the version seen now, so it is dropped if the file changes before.
+      const seenMtime = file.stat.mtime;
+      this._queueTransfer(deviceId, path, () => this._readOutgoing(path, opts, seenMtime));
+      return;
+    }
+    const out = await this._readOutgoing(path, opts);
+    if (!out) return;
+    if (out.content.byteLength > CHUNKED_FILE_THRESHOLD) {
+      this._queueTransfer(deviceId, path, async () => out);
+      return;
+    }
+    this._sendMessage(deviceId, path, encodeFileData({ path, content: out.content, mtime: out.mtime, ...out.info }));
+  }
+
+  /** Whether a peer said it takes no file of this size (see maxReceiveMB). */
+  private _overPeerLimit(deviceId: string, size: number): boolean {
+    const limit = this.connectionManager.peerReceiveLimit?.(deviceId) ?? 0;
+    return limit > 0 && size > limit;
+  }
+
+  /** Resolves once every queued large transfer has finished (tests). */
+  async outgoingIdle(): Promise<void> {
+    while (this.outgoing.size > 0) {
+      await Promise.all([...this.outgoing.values()]);
     }
   }
 
@@ -315,50 +391,185 @@ export class BinaryFileSyncService {
       logger.warn(`Requested file not found: ${path}`);
       return;
     }
+    // A large file is queued, not awaited: this runs in the peer's message
+    // queue, which must not wait the minutes a large transfer can take.
+    await this.sendFileToPeer(deviceId, path);
+  }
 
+  /**
+   * Drop partially received files from a peer that went away, with their
+   * temporary files, and the large transfers still queued for it.
+   */
+  dropIncoming(deviceId: string): void {
+    for (const [key, entry] of this.incoming) {
+      if (!key.startsWith(`${deviceId}\n`)) continue;
+      this.incoming.delete(key);
+      if (entry.tempPath) void this._removeTemp(entry.tempPath);
+    }
+    if (this.outgoing.has(deviceId)) {
+      this.outgoingEpoch.set(deviceId, (this.outgoingEpoch.get(deviceId) ?? 0) + 1);
+    }
+  }
+
+  private async _readOutgoing(
+    path: string,
+    opts: { base?: string; madeAt?: number },
+    seenMtime?: number,
+  ): Promise<OutgoingFile | null> {
+    const file = this.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return null;
     const content = new Uint8Array(await this.vault.readBinary(file));
     const hash = await computeFileHash(toExactArrayBuffer(content));
-    for (const msg of this._encodeFile(path, content, file.stat.mtime, { hash, madeAt: file.stat.mtime })) {
+    const madeAt = seenMtime === undefined || seenMtime === file.stat.mtime ? opts.madeAt : undefined;
+    const info: FileVersionInfo = { hash, madeAt: madeAt ?? file.stat.mtime };
+    if (opts.base) info.base = opts.base;
+    return { content, mtime: file.stat.mtime, info };
+  }
+
+  /**
+   * Send one message about a file. While a large transfer of the same file
+   * to this peer is queued or running, the message waits behind it, so an
+   * older version cannot arrive after a newer one.
+   */
+  private _sendMessage(deviceId: string, path: string, msg: Uint8Array): void {
+    if (this.outgoingPaths.has(`${deviceId}\n${path}`)) {
+      void this._enqueue(deviceId, path, async () => this.connectionManager.sendTo(deviceId, msg));
+    } else {
       this.connectionManager.sendTo(deviceId, msg);
     }
   }
 
-  /** Drop partially received files from a peer that went away. */
-  dropIncoming(deviceId: string): void {
-    for (const key of this.incoming.keys()) {
-      if (key.startsWith(`${deviceId}\n`)) this.incoming.delete(key);
+  /**
+   * Send a large file as FILE_CHUNK messages (a single message over ~100 MiB
+   * is refused by the ws library and closes the connection). The chunks go
+   * out paced by what the connection still has to send (see
+   * ConnectionManager.sendToPaced), each built only when it can go.
+   */
+  private _queueTransfer(deviceId: string, path: string, load: () => Promise<OutgoingFile | null>): void {
+    const epoch = this.outgoingEpoch.get(deviceId) ?? 0;
+    void this._enqueue(deviceId, path, async () => {
+      if ((this.outgoingEpoch.get(deviceId) ?? 0) !== epoch || !this.connectionManager.isConnectedTo(deviceId)) return;
+      const out = await load();
+      if (!out) return;
+      const sent = await this.connectionManager.sendToPaced(deviceId, this._chunkFrames(path, out));
+      if (!sent) logger.info(`Stopped sending ${path} to ${deviceId}: the peer disconnected`);
+    });
+  }
+
+  private _enqueue(deviceId: string, path: string, task: () => Promise<void>): Promise<void> {
+    const key = `${deviceId}\n${path}`;
+    this.outgoingPaths.set(key, (this.outgoingPaths.get(key) ?? 0) + 1);
+    const run = (this.outgoing.get(deviceId) ?? Promise.resolve())
+      .then(task)
+      .catch((err) => logger.error(`Failed to send ${path} to ${deviceId}:`, err))
+      .finally(() => {
+        const left = (this.outgoingPaths.get(key) ?? 1) - 1;
+        if (left > 0) this.outgoingPaths.set(key, left);
+        else this.outgoingPaths.delete(key);
+        if (this.outgoing.get(deviceId) === run) this.outgoing.delete(deviceId);
+      });
+    this.outgoing.set(deviceId, run);
+    return run;
+  }
+
+  private *_chunkFrames(path: string, out: OutgoingFile): Generator<Uint8Array> {
+    const { content, mtime, info } = out;
+    for (let offset = 0; offset < content.byteLength; offset += CHUNK_SIZE) {
+      yield encodeFileChunk({
+        path,
+        mtime,
+        totalSize: content.byteLength,
+        offset,
+        content: content.subarray(offset, offset + CHUNK_SIZE),
+        ...(offset === 0 ? info : {}),
+      });
     }
   }
 
   /**
-   * Encode a file as one FILE_DATA message, or as FILE_CHUNK messages when it
-   * is large: a single message over ~100 MiB is refused by the ws library and
-   * closed the connection, so big files never synced.
+   * Refuse a file over this device's receive limit (maxReceiveMB), before
+   * any of it is kept. Logged once per version of the file.
    */
-  private _encodeFile(path: string, content: Uint8Array, mtime: number, info: FileVersionInfo = {}): Uint8Array[] {
-    if (content.byteLength <= CHUNKED_FILE_THRESHOLD) {
-      return [encodeFileData({ path, content, mtime, ...info })];
+  private _refuseTooLarge(deviceId: string, path: string, size: number, hash?: string): boolean {
+    const limit = this.connectionManager.receiveLimitBytes?.() ?? 0;
+    if (!limit || size <= limit) return false;
+    const key = `${path}\n${hash ?? size}`;
+    if (!this.refusedLarge.has(key)) {
+      this.refusedLarge.add(key);
+      const mb = (n: number) => Math.round((n / (1024 * 1024)) * 10) / 10;
+      const msg = `${mb(size)} MB is over this device's limit of ${mb(limit)} MB for received files; not taken`;
+      logger.warn(`${path}: ${msg}`);
+      this.gate.log.record({ op: "skip", level: "warn", path, peer: this.peerLabelCb(deviceId), rule: "too-large", msg });
     }
-    const messages: Uint8Array[] = [];
-    for (let offset = 0; offset < content.byteLength; offset += CHUNK_SIZE) {
-      messages.push(
-        encodeFileChunk({
-          path,
-          mtime,
-          totalSize: content.byteLength,
-          offset,
-          content: content.subarray(offset, offset + CHUNK_SIZE),
-          ...(offset === 0 ? info : {}),
-        }),
-      );
-    }
-    return messages;
+    // It will not arrive, so it is not waited for.
+    if (this.expected.get(path)?.from === deviceId) this.expected.delete(path);
+    return true;
   }
 
+  /** The adapter, when it can receive into a temporary file; null keeps chunks in memory. */
+  private _tempAdapter(): TempAdapter | null {
+    const adapter = (this.vault as unknown as { adapter?: Partial<TempAdapter> }).adapter;
+    if (
+      adapter &&
+      typeof adapter.appendBinary === "function" &&
+      typeof adapter.writeBinary === "function" &&
+      typeof adapter.readBinary === "function" &&
+      typeof adapter.remove === "function" &&
+      typeof adapter.exists === "function" &&
+      typeof adapter.mkdir === "function"
+    ) {
+      return adapter as TempAdapter;
+    }
+    return null;
+  }
+
+  /** Remove temporary files left by an earlier run (the app quit mid-transfer). */
+  private async _cleanIncoming(): Promise<void> {
+    const adapter = (this.vault as unknown as { adapter?: Partial<TempAdapter> }).adapter;
+    if (!adapter?.list || !adapter.remove || !adapter.exists) return;
+    try {
+      if (!(await adapter.exists(INCOMING_DIR))) return;
+      const { files } = await adapter.list(INCOMING_DIR);
+      for (const file of files) await adapter.remove(file).catch(() => undefined);
+    } catch (err) {
+      logger.debug("Could not clean up partly received files:", err);
+    }
+  }
+
+  private async _removeTemp(path: string): Promise<void> {
+    try {
+      const adapter = this._tempAdapter();
+      if (adapter && (await adapter.exists(path))) await adapter.remove(path);
+    } catch (err) {
+      logger.debug(`Could not remove ${path}:`, err);
+    }
+  }
+
+  private async _newTempPath(adapter: TempAdapter, deviceId: string): Promise<string> {
+    if (!(await adapter.exists(INCOMING_DIR))) await adapter.mkdir(INCOMING_DIR);
+    // Named after the peer only for reading; the device ID comes from the network.
+    const peer = deviceId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 40);
+    return `${INCOMING_DIR}/${peer}-${Date.now().toString(36)}-${++this.tempSeq}.part`;
+  }
+
+  private _discardIncoming(key: string): void {
+    const entry = this.incoming.get(key);
+    if (!entry) return;
+    this.incoming.delete(key);
+    if (entry.tempPath) void this._removeTemp(entry.tempPath);
+  }
+
+  /**
+   * Take one chunk of a large file. Chunks are written to a temporary file as
+   * they come (where the adapter can append), so a large file is not held in
+   * memory while it arrives; once all are there, the file is checked against
+   * the hash the peer sent and only then goes the way of any received file.
+   */
   private async _receiveChunk(
     deviceId: string,
     chunk: { path: string; mtime: number; totalSize: number; offset: number; content: Uint8Array } & FileVersionInfo,
   ): Promise<void> {
+    await this.incomingCleaned;
     const key = `${deviceId}\n${chunk.path}`;
     const { totalSize, offset, content } = chunk;
     if (
@@ -366,37 +577,100 @@ export class BinaryFileSyncService {
       !Number.isSafeInteger(offset) || offset < 0 || offset + content.byteLength > totalSize
     ) {
       logger.warn(`Ignoring malformed file chunk for ${chunk.path}`);
-      this.incoming.delete(key);
+      this._discardIncoming(key);
       return;
     }
 
     let entry = this.incoming.get(key);
-    if (offset === 0 || !entry || entry.data.byteLength !== totalSize) {
+    if (offset === 0) {
       // A new transfer of this file starts (a stale partial one is dropped).
-      if (offset !== 0) return;
+      this._discardIncoming(key);
+      if (this._refuseTooLarge(deviceId, chunk.path, totalSize, chunk.hash)) return;
+      const adapter = this._tempAdapter();
+      let tempPath: string | null = null;
+      if (adapter) {
+        try {
+          tempPath = await this._newTempPath(adapter, deviceId);
+        } catch (err) {
+          logger.warn(`Could not make a temporary file for ${chunk.path}; receiving it in memory:`, err);
+        }
+      }
       entry = {
         path: chunk.path,
         mtime: chunk.mtime,
-        data: new Uint8Array(totalSize),
+        totalSize,
         received: 0,
+        tempPath,
+        data: tempPath ? null : new Uint8Array(totalSize),
         hash: chunk.hash,
         base: chunk.base,
         madeAt: chunk.madeAt,
       };
       this.incoming.set(key, entry);
+    } else if (!entry || entry.totalSize !== totalSize) {
+      // The rest of a transfer that was dropped, refused or never started.
+      return;
     }
     if (offset !== entry.received) {
       logger.warn(`Out-of-order chunk for ${chunk.path}; dropping transfer`);
-      this.incoming.delete(key);
+      this._discardIncoming(key);
       return;
     }
 
-    entry.data.set(content, offset);
-    entry.received += content.byteLength;
-    if (entry.received === totalSize) {
-      this.incoming.delete(key);
-      await this._receiveFile(entry.path, entry.data, entry.mtime, deviceId, entry);
+    try {
+      if (entry.tempPath) {
+        const adapter = this._tempAdapter()!;
+        const bytes = toExactArrayBuffer(content);
+        // The first chunk replaces whatever a file of that name held.
+        if (offset === 0) await adapter.writeBinary(entry.tempPath, bytes);
+        else await adapter.appendBinary(entry.tempPath, bytes);
+      } else {
+        entry.data!.set(content, offset);
+      }
+    } catch (err) {
+      logger.warn(`Could not write a received part of ${chunk.path}; dropping transfer:`, err);
+      if (this.incoming.get(key) === entry) this._discardIncoming(key);
+      else if (entry.tempPath) await this._removeTemp(entry.tempPath);
+      return;
     }
+    if (this.incoming.get(key) !== entry) {
+      // Dropped while the chunk was being written (the peer disconnected);
+      // the write may have made the file again.
+      if (entry.tempPath) await this._removeTemp(entry.tempPath);
+      return;
+    }
+    entry.received += content.byteLength;
+    if (entry.received < totalSize) return;
+
+    this.incoming.delete(key);
+    let whole: Uint8Array;
+    let buffer: ArrayBuffer;
+    try {
+      if (entry.tempPath) {
+        buffer = await this._tempAdapter()!.readBinary(entry.tempPath);
+        whole = new Uint8Array(buffer);
+      } else {
+        whole = entry.data!;
+        buffer = whole.buffer as ArrayBuffer;
+      }
+    } catch (err) {
+      logger.warn(`Could not read back the received ${chunk.path}:`, err);
+      return;
+    } finally {
+      if (entry.tempPath) await this._removeTemp(entry.tempPath);
+    }
+    if (whole.byteLength !== totalSize) {
+      logger.warn(`Received ${chunk.path} has ${whole.byteLength} bytes, not ${totalSize}; discarded`);
+      return;
+    }
+    const hash = await computeFileHash(buffer);
+    if (entry.hash && entry.hash !== hash) {
+      const msg = "the received file does not match the hash the peer sent; discarded";
+      logger.warn(`${chunk.path}: ${msg}`);
+      this.gate.log.record({ op: "skip", level: "warn", path: chunk.path, peer: this.peerLabelCb(deviceId), rule: "bad-hash", after: { hash, size: totalSize }, msg });
+      return;
+    }
+    await this._receiveFile(entry.path, whole, entry.mtime, deviceId, entry, hash);
   }
 
   /** Files being written from a peer, so that two peers' copies of one file are taken in turn. */
@@ -413,9 +687,10 @@ export class BinaryFileSyncService {
     mtime: number,
     fromDeviceId?: string,
     info: FileVersionInfo = {},
+    knownHash?: string,
   ): Promise<void> {
     const previous = this.receiving.get(path) ?? Promise.resolve();
-    const run = previous.then(() => this._receiveFileNow(path, content, mtime, fromDeviceId, info));
+    const run = previous.then(() => this._receiveFileNow(path, content, mtime, fromDeviceId, info, knownHash));
     const tail = run.catch(() => undefined);
     this.receiving.set(path, tail);
     void tail.then(() => {
@@ -430,6 +705,8 @@ export class BinaryFileSyncService {
     mtime: number,
     fromDeviceId?: string,
     info: FileVersionInfo = {},
+    /** The content's hash when the caller has just computed it (a large file). */
+    knownHash?: string,
   ): Promise<void> {
     const ctx: OpContext = {
       peer: fromDeviceId ? this.peerLabelCb(fromDeviceId) : undefined,
@@ -458,7 +735,7 @@ export class BinaryFileSyncService {
       // (see isPlainUtf8). Otherwise an existing note's content is synced
       // through its CRDT document, never overwritten here.
       if (currentContent && this.isTextPath(path) && isPlainUtf8(content) && isPlainUtf8(currentContent)) return;
-      const hash = await computeFileHash(toExactArrayBuffer(content));
+      const hash = knownHash ?? await computeFileHash(toExactArrayBuffer(content));
       if (info.hash && info.hash !== hash) {
         this.gate.failed("receive", path, ctx, new Error("content does not match the hash the peer sent"));
         return;

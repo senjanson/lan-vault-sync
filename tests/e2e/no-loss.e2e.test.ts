@@ -468,3 +468,49 @@ describe('no-loss stage 3: two peers send one new file at once', { timeout: 2000
     expect(B.coord.eventLog.recentRecords().filter((r) => r.op === 'error')).toEqual([]);
   });
 });
+
+describe('no-loss stage 4: deletion records without a hash', { timeout: 20000 }, () => {
+  it('keeps an edit that looks older than the deletion, as on a device whose clock is behind', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(rb, { 'x.md': 'edited on B\n' });
+    const hourAgo = new Date(Date.now() - 3600_000);
+    fs.utimesSync(path.join(rb, 'x.md'), hourAgo, hourAgo);
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    // An old record of A's deletion, from before records carried the hash.
+    (A.coord as any).tombstones.add('x.md', undefined, Date.now());
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => A.vault.text('x.md') === 'edited on B\n', 8000);
+    await sleep(500);
+    // Was: B's copy was older than the deletion by its clock, and deleted.
+    expect(B.vault.text('x.md')).toBe('edited on B\n');
+    expect(A.vault.text('x.md')).toBe('edited on B\n');
+  });
+});
+
+describe('no-loss stage 4: vault and device identity', { timeout: 20000 }, () => {
+  const V1 = 'v-0123456789abcdef01', V2 = 'v-fedcba987654321001';
+
+  it('syncs devices that share a vault ID, and not a device of another vault', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+    seed(ra, { 'a.md': 'a\n' });
+    const pa = ports();
+    track(await startNode(ra, 'aaaa', pa, [], { vaultId: V1 }));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa], { vaultId: V1 }));
+    const C = track(await startNode(rc, 'cccc', pa + 2, [pa], { vaultId: V2 }));
+    await until(() => B.vault.text('a.md') === 'a\n');
+    await sleep(1000);
+    expect(B.vault.text('a.md')).toBe('a\n');
+    expect(C.vault.exists('a.md')).toBe(false);
+  });
+
+  it('tells when another device uses this device\'s ID', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports();
+    const A = track(await startNode(ra, 'same', pa, []));
+    const B = track(await startNode(rb, 'same', pa + 1, [pa]));
+    const told = (n: Node) => n.coord.eventLog.recentRecords().some((r) => r.rule === 'duplicate-device-id');
+    await until(() => told(A) || told(B), 8000);
+    expect(told(A) || told(B)).toBe(true);
+  });
+});

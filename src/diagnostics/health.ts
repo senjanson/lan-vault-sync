@@ -18,7 +18,8 @@ export type AlertKind =
   | "clock-skew"
   | "file-mismatch"
   | "history-near-cap"
-  | "content-shrank";
+  | "content-shrank"
+  | "too-large";
 
 /** Kinds that describe a state: they go away when the state does. */
 const STATE_KINDS = new Set<AlertKind>(["clock-skew", "file-mismatch", "history-near-cap"]);
@@ -135,6 +136,9 @@ export class HealthMonitor {
       }
     } else if (r.op === "held" && r.level === "warn") {
       this.alert("bulk-held", r.msg ?? "", { peer: r.peer });
+    } else if (r.op === "skip" && r.rule === "too-large") {
+      // A file that will not reach this device until the limit is raised.
+      this.alert("too-large", `${r.path}: ${r.msg ?? ""}`, { path: r.path, peer: r.peer, key: r.path });
     } else if (r.op === "error" && r.path) {
       // A file operation that failed (connection errors have no path).
       const keep = /could not keep the old version/.test(r.msg ?? "");
@@ -338,6 +342,7 @@ addStrings("en", {
   "alert.file-mismatch": "LAN Vault Sync: {msg}. Open the sync panel for details.",
   "alert.history-near-cap": "LAN Vault Sync: {msg}. The oldest versions will be removed first.",
   "alert.content-shrank": "LAN Vault Sync: {msg}. The earlier version is in the recovery center.",
+  "alert.too-large": "LAN Vault Sync did not take a file over this device's size limit ({msg}). Raise “Largest file to receive” in settings to sync it.",
   "health.title": "Health",
   "health.alerts": "Alerts",
   "health.noPeers": "No file list exchanged yet.",
@@ -364,6 +369,7 @@ addStrings("zh", {
   "alert.file-mismatch": "LAN Vault Sync：{msg}。详情见同步面板。",
   "alert.history-near-cap": "LAN Vault Sync：{msg}。会先删除最旧的版本。",
   "alert.content-shrank": "LAN Vault Sync：{msg}。之前的版本在恢复中心里。",
+  "alert.too-large": "LAN Vault Sync 没有接收一个超过本设备大小上限的文件（{msg}）。在设置里调高“接收文件的大小上限”即可同步它。",
   "health.title": "健康状况",
   "health.alerts": "提醒",
   "health.noPeers": "还没有交换过文件列表。",

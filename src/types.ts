@@ -1,4 +1,6 @@
 import { App } from "obsidian";
+import { canUseNodeRuntime } from "./utils/runtime";
+import { PHONE_MAX_RECEIVE_MB } from "./constants";
 
 // ─── Settings ────────────────────────────────────────────
 export interface LANSyncSettings {
@@ -9,10 +11,14 @@ export interface LANSyncSettings {
   autoSync: boolean;
   syncIntervalMs: number;
   ignoredPaths: string[];
-  conflictStrategy: "crdt-auto" | "last-write-wins" | "keep-both";
   manualPeers: string[]; // "ip:port" list
   /** Shared pairing key; only devices with the same key can connect. */
   syncKey: string;
+  /**
+   * Which vault this is, shared by pairing (plan 6.3). Empty on installs
+   * from before 0.5: the vault's folder name stands in for it, as it did.
+   */
+  vaultId: string;
   enableDebugLog: boolean;
   enableSyncLog: boolean;
   maxSyncLogEntries: number;
@@ -20,6 +26,8 @@ export interface LANSyncSettings {
   historyKeepDays: number;
   /** Space the version history may take on a phone, in MB; 0 for no limit. */
   historyMaxMB: number;
+  /** Largest file taken from a peer, in MB; 0 for no limit. */
+  maxReceiveMB: number;
 }
 
 export const DEFAULT_SETTINGS: LANSyncSettings = {
@@ -30,14 +38,17 @@ export const DEFAULT_SETTINGS: LANSyncSettings = {
   autoSync: true,
   syncIntervalMs: 30000,
   ignoredPaths: [".obsidian/", ".trash/"],
-  conflictStrategy: "crdt-auto",
   manualPeers: [],
   syncKey: "",
+  vaultId: "",
   enableDebugLog: false,
   enableSyncLog: true,
   maxSyncLogEntries: 500,
   historyKeepDays: 30,
   historyMaxMB: 500,
+  // A phone may not have room for a large file (or the memory to receive it
+  // where its storage cannot append); a desktop takes any size.
+  maxReceiveMB: canUseNodeRuntime() ? 0 : PHONE_MAX_RECEIVE_MB,
 };
 
 // ─── Device ──────────────────────────────────────────────
@@ -49,6 +60,10 @@ export interface DeviceInfo {
   vaultId: string;
   lastSeen: number;
   acceptsIncomingConnections?: boolean;
+  /** Random for each run of the plugin: tells two devices with one device ID apart. */
+  instance?: string;
+  /** Largest file the device takes, in bytes; 0 or none for no limit. */
+  maxReceiveBytes?: number;
 }
 
 // ─── File events ─────────────────────────────────────────
@@ -161,6 +176,10 @@ export interface HandshakePayload {
   proof?: string;
   /** Sync protocol version; plugin 0.3 and older send none (version 1). */
   protocolVersion?: number;
+  /** See DeviceInfo.instance. */
+  instance?: string;
+  /** See DeviceInfo.maxReceiveBytes; so that a peer does not send what we would refuse. */
+  maxReceiveBytes?: number;
 }
 
 export interface AuthPayload {

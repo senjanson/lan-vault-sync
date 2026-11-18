@@ -6,6 +6,7 @@ import {
   SYNC_LOG_VIEW_TYPE,
   WS_PORT_MIN,
   WS_PORT_MAX,
+  FILE_INDEX_FILE,
 } from "./constants";
 import { setDebugEnabled, setLogSink } from "./logger";
 import { parsePeerAddress } from "./discovery/manual-peers";
@@ -27,6 +28,7 @@ import { openRecoveryCenter, registerRecoveryCenter } from "./history/recovery-v
 import { EventLog } from "./diagnostics/event-log";
 import { buildDiagnostics, diagnosticsFileName, DIAGNOSTICS_DIR } from "./diagnostics/export";
 import { ensureDirectory } from "./utils/path-utils";
+import { effectiveVaultId, isValidVaultId } from "./utils/vault-id";
 
 function generateDeviceId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -237,6 +239,8 @@ export default class LANSyncPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // Unused since 0.5: every conflict keeps both versions.
+    delete (this.settings as unknown as Record<string, unknown>).conflictStrategy;
   }
 
   async saveSettings(): Promise<void> {
@@ -277,6 +281,10 @@ export default class LANSyncPlugin extends Plugin {
     // Any web page or message can open an obsidian:// link, so nothing is
     // changed without the user's confirmation.
     const key = params.key ? params.key.trim() : "";
+    // The vault the link's device syncs (plan 6.3); links from before 0.5
+    // carry none.
+    const vault = params.vault && isValidVaultId(params.vault.trim()) ? params.vault.trim() : "";
+    const changesVault = !!vault && vault !== this.getVaultId();
     const changesKey =
       !!key && normalizeSyncKey(key) !== normalizeSyncKey(this.settings.syncKey);
     const lines = [t("pair.ask", { address })];
@@ -289,6 +297,11 @@ export default class LANSyncPlugin extends Plugin {
     const ok = await confirmDialog(this.app, t("pair.title"), lines, t("pair.confirm"));
     if (!ok) return;
 
+    if (changesVault) {
+      this.settings.vaultId = vault;
+      await this.saveSettings();
+      if (!changesKey && this.coordinator) await this.startSync();
+    }
     if (changesKey) {
       await this.setSyncKey(key);
     }
@@ -298,6 +311,29 @@ export default class LANSyncPlugin extends Plugin {
     } else {
       new Notice(t("notice.peerAddFailed", { address }));
     }
+  }
+
+  /** This vault's ID as peers know it (see utils/vault-id). */
+  getVaultId(): string {
+    return this.coordinator?.getVaultId() ?? effectiveVaultId(this.settings, this.app.vault.getName());
+  }
+
+  /**
+   * A new device ID, for a device that shares its ID with another. The
+   * record of files synced so far is cleared with it: it was made under the
+   * old ID, and read under the new one it could take files for deleted.
+   */
+  async regenerateDeviceId(): Promise<void> {
+    const running = !!this.coordinator;
+    if (running) await this.stopSync();
+    this.settings.deviceId = generateDeviceId();
+    await this.saveSettings();
+    const adapter = this.app.vault.adapter as any;
+    for (const f of [FILE_INDEX_FILE, `${FILE_INDEX_FILE}.bak`, `${FILE_INDEX_FILE}.tmp`]) {
+      if (await adapter.exists(f).catch(() => false)) await adapter.remove(f).catch(() => undefined);
+    }
+    new Notice(t("notice.idRegenerated", { id: this.settings.deviceId }));
+    if (running) await this.startSync();
   }
 
   /** Change the pairing key and reconnect with it. */
@@ -417,6 +453,24 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     this.coordinator.onStateChange(() => this.showStatus());
+
+    // Two devices with one ID (settings copied with the vault) cannot sync
+    // with each other: offer to give this one a new ID.
+    this.coordinator.onDuplicateDevice((name) => {
+      const text = t("notice.duplicateDevice", { name: name || "?" });
+      if (typeof createFragment !== "function") {
+        new Notice(text, 0);
+        return;
+      }
+      new Notice(
+        createFragment((f) => {
+          f.createDiv({ text });
+          const btn = f.createEl("button", { text: t("set.regenerateId") });
+          btn.onclick = () => void this.regenerateDeviceId();
+        }),
+        0,
+      );
+    });
 
     // Alerts (plan 5.4): a notice at most once per kind per 10 minutes; the
     // sync panel lists them until they are gone. Held deletions have their

@@ -55,6 +55,11 @@ export class YjsDocManager {
 
   private keepsWrittenContent: (filePath: string) => boolean = () => false;
 
+  /** Told when the saved notes' index was damaged and read from its backup. */
+  setOnStateBackupUsed(listener: (path: string, why: string) => void): void {
+    this.persistence.setOnBackupUsed(listener);
+  }
+
   constructor(private vault: Vault) {
     this.pool = new DocPool();
     this.persistence = new StatePersistence(vault, (vault as any).adapter);

@@ -25,6 +25,13 @@ export class DiscoveryService {
     this.onLostCb = cb;
   }
 
+  private onDuplicateCb: ((deviceName: string) => void) | null = null;
+
+  /** Another device of this vault announces this device's ID. */
+  onDuplicateDevice(cb: (deviceName: string) => void): void {
+    this.onDuplicateCb = cb;
+  }
+
   async start(): Promise<void> {
     // Try UDP broadcast (may not work on mobile)
     this.udp = new UdpBroadcast(this.localDevice);
@@ -67,6 +74,12 @@ export class DiscoveryService {
     // UDP discovery hears every vault on the network. Another vault's
     // devices refuse the pairing, so they are not listed or called at all.
     if (device.vaultId !== this.localDevice.vaultId) return;
+    if (device.deviceId === this.localDevice.deviceId) {
+      if (device.instance && this.localDevice.instance && device.instance !== this.localDevice.instance) {
+        this.onDuplicateCb?.(device.deviceName ?? "");
+      }
+      return;
+    }
     const existing = this.devices.get(device.deviceId);
     device.lastSeen = Date.now();
     this.devices.set(device.deviceId, device);

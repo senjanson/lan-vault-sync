@@ -27,9 +27,12 @@ export const LOG_RULES: Record<string, string> = {
   "empty-folder": "A folder left empty by a peer's deletions.",
   "case-clash": "A peer's file whose name differs only in case from one here: not stored on this device.",
   "unportable-name": "A file whose name other devices cannot store: not synced.",
+  "duplicate-device-id": "Another device uses this device's ID; the two cannot sync until one gets a new ID.",
   "content-shrank": "A sync write emptied a note or cut it below half: the old version was kept.",
   "history-near-cap": "Version history is near its size limit.",
   "restore": "A version restored from the recovery center.",
   "keep-failed": "The old version could not be kept, so the change was not made.",
   "write-failed": "Writing a file failed.",
+  "too-large": "A peer's file over this device's size limit for received files (maxReceiveMB): refused before any of it was kept.",
+  "bad-hash": "A large file arrived whole but did not match the hash the peer sent: discarded, the file here was left as it was.",
 };
