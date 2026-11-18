@@ -343,12 +343,14 @@ describe('e2e file system work per file in bulk changes', { timeout: 60000 }, ()
     await until(() => !B.vault.exists('bulk'), 15000);
     await sleep(1500);
     expect(B.vault.exists('bulk')).toBe(false);
-    // Each file is backed up first (a read, its folders, the copy and its
-    // details). The records of deletions are written once, not per file.
+    // Each file's old version is kept first (a read and the copy; the
+    // folders are made once). The records of deletions are written once.
     // Was 1365 calls (803 lookups) and the same single write.
     expect(counter.calls.get('exists') ?? 0).toBeLessThan(10);
     expect(counter.total()).toBeLessThan(80 * 8);
-    expect(fs.readdirSync(path.join(rb, '.obsidian/plugins/lan-vault-sync/conflicts'))).toHaveLength(80);
+    await B.coord.versionStore!.flush();
+    const kept = await B.coord.versionStore!.list();
+    expect(new Set(kept.filter((e) => e.path.startsWith('bulk/')).map((e) => e.path)).size).toBe(80);
   });
 
   it('takes in a peer\'s new files in a few calls per file', async () => {

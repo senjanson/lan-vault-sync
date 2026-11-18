@@ -259,13 +259,20 @@ export class BinaryFileSyncService {
   }
 
   /** Send a file to a specific peer (not broadcast) */
-  async sendFileToPeer(deviceId: string, path: string): Promise<void> {
+  /**
+   * Sends our file to one peer. `base` is the version the peer is thought to
+   * have, so it replaces only that; `madeAt` is when this version was made,
+   * when known better than the file's modified time.
+   */
+  async sendFileToPeer(deviceId: string, path: string, opts: { base?: string; madeAt?: number } = {}): Promise<void> {
     const file = this.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
 
     const content = new Uint8Array(await this.vault.readBinary(file));
     const hash = await computeFileHash(toExactArrayBuffer(content));
-    for (const msg of this._encodeFile(path, content, file.stat.mtime, { hash, madeAt: file.stat.mtime })) {
+    const info: FileVersionInfo = { hash, madeAt: opts.madeAt ?? file.stat.mtime };
+    if (opts.base) info.base = opts.base;
+    for (const msg of this._encodeFile(path, content, file.stat.mtime, info)) {
       this.connectionManager.sendTo(deviceId, msg);
     }
   }
@@ -393,9 +400,15 @@ export class BinaryFileSyncService {
       peer: fromDeviceId ? this.peerLabelCb(fromDeviceId) : undefined,
       rule: "binary-newer",
     };
-    const expected = this.expected.get(path);
-    if (expected) {
+    // Kept until the file is written, not taken by the first arrival: a
+    // refused answer can be followed by another (the request went out
+    // after each file list), which must be refused too.
+    let expected = this.expected.get(path);
+    if (expected && Date.now() - expected.at >= BinaryFileSyncService.EXPECT_FOR_MS) {
       this.expected.delete(path);
+      expected = undefined;
+    }
+    if (expected) {
       ctx.rule = expected.hash ? "binary-newer" : "remote-only";
     } else {
       ctx.rule = "live-write";
@@ -418,6 +431,7 @@ export class BinaryFileSyncService {
       // Already here as it is: rewriting it would only change its mtime,
       // and a file sent as bytes would be sent back by its modify event.
       if (currentContent && this._isSameBinary(currentContent, content)) {
+        if (expected) this.expected.delete(path);
         await this.onRemoteFileStoredCb?.(path, hash, content, fromDeviceId, info);
         return;
       }
@@ -430,7 +444,7 @@ export class BinaryFileSyncService {
       const actual = currentContent ? { hash: currentHash!, size: currentContent.byteLength } : null;
       // The peer's version was chosen over the one we had then; it changed
       // here since (or was made here): both sides changed it.
-      if (expected && Date.now() - expected.at < BinaryFileSyncService.EXPECT_FOR_MS && currentHash !== expected.hash) {
+      if (expected && currentHash !== expected.hash) {
         this.gate.preconditionFailed("overwrite", path, ctx, expected.hash ?? undefined, actual, "changed here while the peer's version was on its way");
         return;
       }
@@ -440,6 +454,7 @@ export class BinaryFileSyncService {
         return;
       }
       if (!existing && this.canCreateCb && !(await this.canCreateCb(path))) return;
+      if (expected) this.expected.delete(path);
       // Mark remote write BEFORE modifying vault to prevent echo-back
       this.onRemoteFileWrittenCb?.(path, "write", content);
       if (existing instanceof TFile && currentContent) {

@@ -1304,10 +1304,10 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     await (B.coord as any)._flushPendingLocalTextChange('f.md');
     await dm.applyLocalChange('f.md', 'one\nfrom B\n');
     // Another peer moved the note on and removes the unedited copy of g.md;
-    // backing it up takes a while.
-    const backups = (B.coord as any).binarySync.backupService;
-    const backup = backups.backupBinaryFile.bind(backups);
-    backups.backupBinaryFile = async (...a: unknown[]) => { await sleep(300); return backup(...a); };
+    // keeping its old version takes a while.
+    const store = (B.coord as any).versionStore;
+    const keep = store.keep.bind(store);
+    store.keep = async (...a: unknown[]) => { await sleep(300); return keep(...a); };
     const hash = await computeFileHash(new TextEncoder().encode('one\n').buffer);
     const del = decodeMessage(encodeFileDelete({ path: 'g.md', hash }));
     const deleting = (B.coord as any)._handleMessage('cccc', del.type, del.payload);

@@ -4,6 +4,7 @@ import { SyncLogEntry, SyncLogEntryType, LANSyncSettings } from "../types";
 import { SYNC_LOG_FILE_PATH, MAX_SYNC_LOG_ENTRIES } from "../constants";
 import { logger } from "../logger";
 import { ensureParentDirectory } from "../utils/path-utils";
+import type { VersionStore } from "../history/version-store";
 
 export class SyncLogService {
   private entries: SyncLogEntry[] = [];
@@ -19,6 +20,13 @@ export class SyncLogService {
     private settings: LANSyncSettings,
     private backupService: ConflictBackupService,
   ) {}
+
+  private versionStore: VersionStore | null = null;
+
+  /** Versions kept since 0.5 are in the version store, by content hash. */
+  setVersionStore(store: VersionStore | null): void {
+    this.versionStore = store;
+  }
 
   onChange(cb: () => void): void {
     this.onChangeCb = cb;
@@ -71,7 +79,20 @@ export class SyncLogService {
 
   async readSnapshotContent(entry: SyncLogEntry): Promise<string | null> {
     if (!entry.snapshotId) return null;
-    return this.backupService.readTextBackup(entry.snapshotId, entry.path);
+    return this._readText(entry.snapshotId, entry.path);
+  }
+
+  private async _readText(id: string, path: string): Promise<string | null> {
+    const old = await this.backupService.readTextBackup(id, path).catch(() => null);
+    if (old !== null) return old;
+    const bytes = await this._readStored(id);
+    return bytes ? new TextDecoder().decode(bytes) : null;
+  }
+
+  private async _readStored(id: string): Promise<ArrayBuffer | null> {
+    if (!this.versionStore || !/^[0-9a-f]{64}$/.test(id)) return null;
+    const bytes = await this.versionStore.read(id).catch(() => null);
+    return bytes ? (bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer) : null;
   }
 
   async restoreFromSnapshot(entry: SyncLogEntry): Promise<boolean> {
@@ -81,10 +102,7 @@ export class SyncLogService {
       const isText = entry.details?.isText ?? true;
 
       if (isText) {
-        const content = await this.backupService.readTextBackup(
-          entry.snapshotId,
-          entry.path,
-        );
+        const content = await this._readText(entry.snapshotId, entry.path);
         if (content === null) return false;
 
         const file = this.vault.getAbstractFileByPath(entry.path);
@@ -104,10 +122,9 @@ export class SyncLogService {
           await this.vault.create(entry.path, content);
         }
       } else {
-        const content = await this.backupService.readBinaryBackup(
-          entry.snapshotId,
-          entry.path,
-        );
+        const content =
+          (await this.backupService.readBinaryBackup(entry.snapshotId, entry.path)) ??
+          (await this._readStored(entry.snapshotId));
         if (content === null) return false;
 
         const file = this.vault.getAbstractFileByPath(entry.path);

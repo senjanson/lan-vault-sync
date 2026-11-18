@@ -29,6 +29,8 @@ async function restart(n: Node, root: string, id: string, port: number, peers: n
   return track(await startNode(root, id, port, peers, {}, options));
 }
 
+const copies = (root: string) => fs.readdirSync(root).filter((f) => f.includes('(conflict ')).sort();
+
 describe('no-loss stage 1', { timeout: 40000 }, () => {
   it('T1: keeps a file changed between the file-list decision and the deletion, and gives it back', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
@@ -187,6 +189,9 @@ describe('no-loss stage 1', { timeout: 40000 }, () => {
       : [];
     const versions = [B.vault.bin('p.png'), ...kept(backups)].map((b) => b?.toString('hex'));
     expect(versions).toContain('0303');
+    // And it wins, as the later of two changed versions (stage 2).
+    expect(B.vault.bin('p.png')?.toString('hex')).toBe('0303');
+    expect(A.vault.bin('p.png')?.toString('hex')).toBe('0303');
   });
 
   it('records remote deletions in the persistent log with rule, peer and hash', async () => {
@@ -239,5 +244,152 @@ describe('e2e relayed edits of a deleted note', { timeout: 40000 }, () => {
     peer.ws.close();
     // Each device passes it on at most once, to the two others.
     expect(relayed).toBeLessThanOrEqual(6);
+  });
+});
+
+describe('no-loss stage 2: attachment versions', { timeout: 60000 }, () => {
+
+  it('T6: a newer attachment edited offline beats an older version another device received later', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+    seed(ra, { 'p.png': Buffer.from([1]) });
+    const pa = ports();
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.bin('p.png')?.toString('hex') === '01');
+    await sleep(500);
+    await A.coord.stop();
+    nodes = nodes.filter((x) => x !== A);
+    // Edited on A while sync was off.
+    fs.writeFileSync(path.join(ra, 'p.png'), Buffer.from([2]));
+    await sleep(1500);
+    // C gets the old version from B, later than A's edit.
+    const C0 = track(await startNode(rc, 'cccc', pa + 2, [pa + 1]));
+    await until(() => C0.vault.bin('p.png')?.toString('hex') === '01');
+    await sleep(500);
+    for (const n of [B, C0]) await n.coord.stop();
+    nodes = nodes.filter((x) => x !== B && x !== C0);
+    const C = track(await startNode(rc, 'cccc', pa + 2, []));
+    A = track(await startNode(ra, 'aaaa', pa, [pa + 2]));
+    await until(() => C.vault.bin('p.png')?.toString('hex') === '02', 15000);
+    await sleep(1500);
+    expect(A.vault.bin('p.png')?.toString('hex')).toBe('02');
+    expect(C.vault.bin('p.png')?.toString('hex')).toBe('02');
+  });
+
+  it('T7: an attachment changed on both devices keeps the later version and the other as a visible copy', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'p.png': Buffer.from([1]) });
+    const pa = ports();
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.bin('p.png')?.toString('hex') === '01');
+    // Meet again so both record the version they have in common.
+    B = await restart(B, rb, 'bbbb', pa + 1, [pa]);
+    await sleep(1500);
+    await B.coord.stop();
+    nodes = nodes.filter((x) => x !== B);
+    await A.vault.writeBin('p.png', new Uint8Array([2]));
+    await sleep(1200);
+    fs.writeFileSync(path.join(rb, 'p.png'), Buffer.from([3, 3]));
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => A.vault.bin('p.png')?.toString('hex') === '0303' && copies(ra).length === 1 && copies(rb).length === 1, 15000);
+    await sleep(1500);
+    for (const [r, n] of [[ra, A], [rb, B]] as const) {
+      expect(n.vault.bin('p.png')?.toString('hex')).toBe('0303');
+      expect(copies(r)).toHaveLength(1);
+      expect(fs.readFileSync(path.join(r, copies(r)[0])).toString('hex')).toBe('02');
+    }
+  });
+});
+
+describe('no-loss stage 2: attachment sent live, then changed on one side', { timeout: 40000 }, () => {
+  it('takes the change without a copy of the version both had', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await sleep(1000);
+    // Made after the two listed their files: it is sent live only.
+    await A.vault.writeBin('p.png', new Uint8Array([1]));
+    await until(() => B.vault.bin('p.png')?.toString('hex') === '01');
+    await sleep(800);
+    await B.coord.stop();
+    nodes = nodes.filter((x) => x !== B);
+    fs.writeFileSync(path.join(rb, 'p.png'), Buffer.from([2, 2]));
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => A.vault.bin('p.png')?.toString('hex') === '0202', 15000);
+    await sleep(1500);
+    // Was: A kept its unchanged version as a visible conflict copy.
+    expect(copies(ra)).toEqual([]);
+    expect(copies(rb)).toEqual([]);
+    expect(B.vault.bin('p.png')?.toString('hex')).toBe('0202');
+  });
+});
+
+describe('no-loss stage 2: version history', { timeout: 40000 }, () => {
+  it('T9: a note emptied by a peer can be restored, and the shrink is recorded', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const long = 'line one of a long note\n'.repeat(20);
+    seed(ra, { 'n.md': long });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('n.md') === long);
+    await sleep(800);
+    await A.vault.write('n.md', '');
+    await until(() => B.vault.text('n.md') === '', 10000);
+    await sleep(1500);
+    const store = B.coord.versionStore!;
+    const entries = await store.list({ path: 'n.md' });
+    const texts = await Promise.all(entries.map(async (e) => new TextDecoder().decode((await store.read(e.hash))!)));
+    expect(texts).toContain(long);
+    const alert = B.coord.eventLog.recentRecords().find((r) => r.op === 'alert' && r.rule === 'content-shrank' && r.path === 'n.md');
+    expect(alert).toBeTruthy();
+    // Restoring brings the text back, and keeps the empty version first.
+    expect(await store.restore(entries.find((e, i) => texts[i] === long)!)).toBe(true);
+    await until(() => B.vault.text('n.md') === long && A.vault.text('n.md') === long, 10000);
+  });
+});
+
+describe('no-loss stage 2: suspicious reads', { timeout: 40000 }, () => {
+  it('does not send a note cut short while the app was closed, and writes it back whole', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const long = Array.from({ length: 40 }, (_, i) => `line ${i} of the note\n`).join('');
+    seed(ra, { 'n.md': long });
+    const pa = ports();
+    let A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('n.md') === long);
+    await sleep(800);
+    await A.coord.stop();
+    nodes = nodes.filter((x) => x !== A);
+    // A write cut off: the start of the note only.
+    fs.writeFileSync(path.join(ra, 'n.md'), long.slice(0, 200));
+    A = track(await startNode(ra, 'aaaa', pa, []));
+    await sleep(2500);
+    expect(B.vault.text('n.md')).toBe(long);
+    expect(fs.readFileSync(path.join(ra, 'n.md'), 'utf8')).toBe(long);
+  });
+
+  it('reads a note again before taking an empty read as an edit', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'n.md': 'keep me\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('n.md') === 'keep me\n');
+    await sleep(800);
+    let calls = 0;
+    const read = (A.coord as any)._readTextFile.bind(A.coord);
+    (A.coord as any)._readTextFile = async (p: string) => { const r = await read(p); if (p === 'n.md') calls++; return r; };
+    // The storage briefly shows the file empty.
+    fs.writeFileSync(path.join(ra, 'n.md'), '');
+    A.vault.trigger('modify', A.vault.files.get('n.md'));
+    // Back once the change has been read (after the watcher's pause).
+    await until(() => calls > 0, 5000);
+    await sleep(150);
+    fs.writeFileSync(path.join(ra, 'n.md'), 'keep me\n');
+    await sleep(2500);
+    expect(B.vault.text('n.md')).toBe('keep me\n');
   });
 });

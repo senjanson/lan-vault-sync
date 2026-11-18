@@ -359,6 +359,44 @@ export class LANSyncSettingTab extends PluginSettingTab {
           }),
       );
 
+    // ─── Version history ────────────────────────────────
+    new Setting(containerEl).setName(t("set.historyHeading")).setHeading();
+
+    new Setting(containerEl)
+      .setName(t("set.historyKeepDays"))
+      .setDesc(t("set.historyKeepDaysDesc"))
+      .addText((text) =>
+        text.setValue(String(this.plugin.settings.historyKeepDays)).onChange(async (value) => {
+          const num = parseInt(value, 10);
+          if (!isNaN(num) && num >= 1 && num <= 3650) {
+            this.plugin.settings.historyKeepDays = num;
+            await this.plugin.saveSettings();
+          }
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName(t("set.historyMaxMB"))
+      .setDesc(t("set.historyMaxMBDesc"))
+      .addText((text) =>
+        text.setValue(String(this.plugin.settings.historyMaxMB)).onChange(async (value) => {
+          const num = parseInt(value, 10);
+          if (!isNaN(num) && num >= 0) {
+            this.plugin.settings.historyMaxMB = num;
+            await this.plugin.saveSettings();
+          }
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName(t("set.recoveryOpen"))
+      .setDesc(t("set.recoveryOpenDesc"))
+      .addButton((btn) =>
+        btn.setButtonText(t("common.open")).onClick(() => {
+          void this.plugin.activateRecoveryCenter();
+        }),
+      );
+
     // ─── Sync Log ───────────────────────────────────────
     new Setting(containerEl).setName(t("set.logHeading")).setHeading();
 

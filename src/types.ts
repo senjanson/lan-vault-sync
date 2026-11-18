@@ -16,6 +16,10 @@ export interface LANSyncSettings {
   enableDebugLog: boolean;
   enableSyncLog: boolean;
   maxSyncLogEntries: number;
+  /** Days old versions are kept in the version history (.lan-vault-sync/history). */
+  historyKeepDays: number;
+  /** Space the version history may take on a phone, in MB; 0 for no limit. */
+  historyMaxMB: number;
 }
 
 export const DEFAULT_SETTINGS: LANSyncSettings = {
@@ -32,6 +36,8 @@ export const DEFAULT_SETTINGS: LANSyncSettings = {
   enableDebugLog: false,
   enableSyncLog: true,
   maxSyncLogEntries: 500,
+  historyKeepDays: 30,
+  historyMaxMB: 500,
 };
 
 // ─── Device ──────────────────────────────────────────────

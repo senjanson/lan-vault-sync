@@ -23,6 +23,7 @@ import type { SyncViewStatus } from "./ui/sync-view";
 import { SyncLogView } from "./ui/sync-log-view";
 import { canUseNodeRuntime } from "./utils/runtime";
 import { t } from "./i18n";
+import { openRecoveryCenter, registerRecoveryCenter } from "./history/recovery-view";
 
 function generateDeviceId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -106,6 +107,9 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     // Register sync log view
+    // Recovery center: old versions kept before sync changed a file.
+    registerRecoveryCenter(this, () => this.coordinator?.versionStore ?? null);
+
     this.registerView(SYNC_LOG_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
       this.syncLogView = new SyncLogView(leaf, this.syncLogService!);
       return this.syncLogView;
@@ -387,6 +391,7 @@ export default class LANSyncPlugin extends Plugin {
       trash: (file) => this.app.fileManager.trashFile(file),
     });
     setLogSink(this.coordinator.eventLog);
+    this.syncLogService?.setVersionStore(this.coordinator.versionStore);
 
     // A bulk deletion waits for the user: say so once per new batch.
     let heldSeen = new Set<string>();
@@ -504,5 +509,9 @@ export default class LANSyncPlugin extends Plugin {
     if (leaf) {
       workspace.revealLeaf(leaf);
     }
+  }
+
+  async activateRecoveryCenter(): Promise<void> {
+    await openRecoveryCenter(this);
   }
 }
