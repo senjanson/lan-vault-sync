@@ -27,6 +27,8 @@ export class DiskVault {
       writeBinary: async (p: string, d: ArrayBuffer) => fs.writeFileSync(abs(p), Buffer.from(d)),
       readBinary: async (p: string) => { const b = fs.readFileSync(abs(p)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); },
       remove: async (p: string) => fs.rmSync(abs(p)),
+      append: async (p: string, d: string) => fs.appendFileSync(abs(p), d),
+      stat: async (p: string) => (fs.existsSync(abs(p)) ? { size: fs.statSync(abs(p)).size, mtime: fs.statSync(abs(p)).mtimeMs, type: fs.statSync(abs(p)).isDirectory() ? 'folder' : 'file' } : null),
       rename: async (a: string, b: string) => fs.renameSync(abs(a), abs(b)),
       list: async (p: string) => {
         const entries = fs.existsSync(abs(p)) ? fs.readdirSync(abs(p), { withFileTypes: true }) : [];

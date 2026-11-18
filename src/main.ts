@@ -7,7 +7,7 @@ import {
   WS_PORT_MIN,
   WS_PORT_MAX,
 } from "./constants";
-import { setDebugEnabled } from "./logger";
+import { setDebugEnabled, setLogSink } from "./logger";
 import { parsePeerAddress } from "./discovery/manual-peers";
 import { SyncCoordinator } from "./sync/sync-coordinator";
 import { generateSyncKey, normalizeSyncKey } from "./transport/auth";
@@ -203,6 +203,7 @@ export default class LANSyncPlugin extends Plugin {
 
   async onunload(): Promise<void> {
     this.unloaded = true;
+    setLogSink(null);
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -380,6 +381,7 @@ export default class LANSyncPlugin extends Plugin {
       syncLogService: this.syncLogService!,
       workspace: this.app.workspace,
     });
+    setLogSink(this.coordinator.eventLog);
 
     this.coordinator.onStateChange(() => this.showStatus());
 

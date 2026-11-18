@@ -1,3 +1,4 @@
+import { EventLog, peerLabel } from "../diagnostics/event-log";
 import { Vault, TAbstractFile, TFile, TFolder, Workspace } from "obsidian";
 import * as Y from "yjs";
 import fastDiff from "fast-diff";
@@ -184,6 +185,8 @@ export class SyncCoordinator {
   /** Folders a peer deleted, removed here once they hold no files (path → expiry). */
   private pendingFolderDeletes = new Map<string, number>();
   private vaultId: string;
+  /** Persistent sync log in .lan-vault-sync/logs (see EventLog). */
+  readonly eventLog: EventLog;
   private syncLogService: SyncLogService | null;
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
@@ -204,8 +207,11 @@ export class SyncCoordinator {
       backupService?: ConflictBackupService;
       syncLogService?: SyncLogService;
       workspace?: Workspace;
+      eventLog?: EventLog;
     },
   ) {
+    this.eventLog =
+      options?.eventLog ?? new EventLog((vault as any).adapter ?? null);
     // Generate a vault ID from the vault name
     this.vaultId = this._hashVaultId(vault.getName());
 
@@ -292,6 +298,7 @@ export class SyncCoordinator {
 
   async start(): Promise<void> {
     if (!this.settings.enabled) return;
+    void this.eventLog.prune().catch(() => undefined);
     this.startError = null;
 
     try {
@@ -370,6 +377,7 @@ export class SyncCoordinator {
     await this.tombstones.flush();
     await this._saveFileIndex();
     await this._saveAgreedHashes();
+    await this.eventLog.flush();
 
     this.stateMachine.transition("idle");
     this._emitEvent("Sync service stopped");
@@ -386,6 +394,7 @@ export class SyncCoordinator {
     await this.tombstones.flush();
     await this._saveFileIndex();
     await this._saveAgreedHashes();
+    await this.eventLog.flush();
   }
 
   /** Change how often the file lists are compared, without a restart. */
@@ -456,6 +465,7 @@ export class SyncCoordinator {
 
     this.connectionManager.onPeerConnected(async (device) => {
       this._emitEvent(`Connected to ${device.deviceId}`);
+      this.eventLog.record({ op: "connect", peer: peerLabel(device.deviceId, device.deviceName) });
       // The peer count shown to the user changes even when the state does not.
       this.onStateChangeCb?.(this.stateMachine.getState());
       this.pendingInitialBootstrapPeers.add(device.deviceId);
@@ -472,6 +482,7 @@ export class SyncCoordinator {
       this._forgetSent(deviceId);
       this._forgetApartTexts(deviceId);
       this._emitEvent(`Disconnected: ${deviceId}`);
+      this.eventLog.record({ op: "disconnect", peer: this._peerLabel(deviceId) });
       this.onStateChangeCb?.(this.stateMachine.getState());
     });
 
@@ -2720,7 +2731,16 @@ export class SyncCoordinator {
 
   private _emitEvent(msg: string): void {
     logger.info(msg);
+    this.eventLog.record({ op: "log", msg });
     this.onSyncEventCb?.(msg);
+  }
+
+  /** A peer for the persistent log: "deviceId (name)". */
+  private _peerLabel(deviceId: string): string | undefined {
+    const name = this.connectionManager
+      .getConnectedPeers()
+      .find((d) => d.deviceId === deviceId)?.deviceName;
+    return peerLabel(deviceId, name);
   }
 
   /**
