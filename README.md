@@ -1,159 +1,160 @@
-# LAN Vault Sync — Obsidian Plugin
+# LAN Vault Sync
 
-> Real-time, conflict-free vault synchronization across your local network — no cloud, no server, no subscription.
+> Sync your Obsidian vault directly over your local network. No cloud, no server, no account. Free and open source.
 
-Edit on your Mac and see changes appear instantly on your iPhone. All traffic stays on your LAN.
+English | [中文](README-zh.md)
 
-![Obsidian](https://img.shields.io/badge/Obsidian-v1.4.0%2B-7C3AED?logo=obsidian&logoColor=white)
-![Platform](https://img.shields.io/badge/platform-desktop%20%7C%20mobile-blue)
+![Obsidian](https://img.shields.io/badge/Obsidian-1.4.0%2B-7C3AED?logo=obsidian&logoColor=white)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
----
+Write a note on your computer and it shows up on your phone on the same Wi-Fi a few seconds later, and the other way round. Your data only travels between your own devices, encrypted all the way.
 
-## Why LAN Vault Sync?
-
-Most sync solutions route your notes through a third-party server. LAN Vault Sync is different:
-
-- **Zero cloud** — data never leaves your local network
-- **Zero configuration** — devices discover each other automatically via UDP broadcast
-- **Zero conflicts** (for text) — Yjs CRDT merges concurrent edits at the character level, the same technology that powers Google Docs-style collaboration
-- **Zero subscription** — fully open source and free forever
+![The sync panel on a Mac: both devices in sync, the work laptop syncs only the Work folder](assets/screenshots/en/desktop-panel.png)
 
 ---
 
-## Features
+## Highlights
 
-| Feature | Details |
-|---|---|
-| **Real-time sync** | File changes pushed to all peers within seconds via WebSocket |
-| **CRDT text merge** | Markdown / text files merged automatically at character level using [Yjs](https://github.com/yjs/yjs) — no conflicts, no data loss |
-| **Binary file sync** | Images, PDFs, and other attachments synced via SHA-256 hash comparison. Changed on one side, that side wins; changed on both, the later version wins and the other is kept (see [Conflict Resolution](#conflict-resolution)) |
-| **Auto-discovery** | Devices find each other via UDP broadcast — zero configuration needed |
-| **Manual peers** | Add peers by `IP:port` for networks where broadcast is blocked |
-| **QR code pairing** | Generate a QR code on desktop; scan with your phone to add the peer instantly — no typing required |
-| **Offline-friendly** | Edit while offline; changes are merged automatically on reconnect |
-| **P2P architecture** | Every device is equal — no central server or hub required |
-| **Version history** | Every version replaced or deleted by sync is kept for 30 days in `.lan-vault-sync/history`; restore it from the recovery center |
-| **Sync one folder** | A device can sync only one folder of the vault (a work computer only `Work`, say); the other devices keep to it on their own |
-| **Delete protection** | Many deletions at once, or deletions found after sync was off, wait for your confirmation |
-| **Sync health** | The status bar and sync panel show, per device, whether everything is in sync, and raise an alert when something needs you |
-| **Diagnostics export** | One command writes a diagnostics file to share when something goes wrong, with the sync key masked |
+- **Your data stays on your network.** Devices connect to each other directly; nothing goes through an outside server.
+- **Edit anywhere, no conflicts.** Notes are merged character by character with the [Yjs](https://github.com/yjs/yjs) CRDT. Edit on two devices while they are apart, and the edits come together when they meet again. Nothing is lost.
+- **Attachments too.** Images, PDFs and other files are compared by content hash; large files are streamed and checked when they arrive.
+- **Undo a sync.** Before a sync deletes or replaces a file, the old version is kept. Put it back from the recovery center.
+- **Deletion guard.** When many files are deleted at once, or many are missing after sync was off, sync stops and asks you first.
+- **Sync only one folder.** For example, the work laptop syncs only `Work`. The other devices keep to it on their own, and not even the names of your other notes reach that laptop.
+- **Always know where you stand.** The status bar and sync panel show whether all files match on each device, and tell you when something needs you.
+- **Desktop and mobile.** macOS, Windows, Linux, iOS and Android. The interface follows Obsidian's language: English and Chinese.
 
----
+## Screenshots
 
-## How It Works
+<table>
+  <tr>
+    <td align="center"><img src="assets/screenshots/en/phone-note.png" width="240" alt="A note on the phone"></td>
+    <td align="center"><img src="assets/screenshots/en/phone-panel.png" width="240" alt="The sync panel on the phone"></td>
+    <td align="center"><img src="assets/screenshots/en/phone-folder-picker.png" width="240" alt="Choosing the folder to sync on the phone"></td>
+  </tr>
+  <tr>
+    <td align="center">A line added on the Mac, already on the phone</td>
+    <td align="center">The sync panel: is each device in sync?</td>
+    <td align="center">Choose the one folder to sync</td>
+  </tr>
+</table>
 
-```
-Device A (Mac)                        Device B (iPhone / iPad)
-┌──────────────────┐  WebSocket P2P  ┌──────────────────┐
-│  Obsidian        │◄───────────────►│  Obsidian        │
-│  + LAN Vault Sync│   Yjs CRDT      │  + LAN Vault Sync│
-└──────────────────┘   updates       └──────────────────┘
-         ▲                                    ▲
-         │         UDP broadcast              │
-         └────────────────────────────────────┘
-               (auto-discovery, LAN only)
-```
-
-1. On startup, each device announces itself via UDP broadcast and listens for announcements from peers.
-2. Devices establish WebSocket connections to each other (every node is both server and client).
-3. File tree metadata is exchanged; missing or changed files are requested.
-4. **Text files** (`.md`, `.txt`, etc.) sync via Yjs CRDT — edits from multiple devices are merged automatically, even if made simultaneously while offline.
-5. **Binary files** (images, PDFs, etc.) sync via SHA-256 hash comparison; the most-recently-modified version wins.
+![The recovery center: versions kept before a sync deleted or replaced files, by device and time](assets/screenshots/en/desktop-recovery.png)
 
 ---
 
 ## Installation
 
-### From Obsidian Community Plugins *(coming soon)*
+### From Community plugins (coming soon)
 
-1. Open **Settings → Community Plugins → Browse**
-2. Search for **LAN Vault Sync**
-3. Click **Install**, then **Enable**
+1. Open **Settings → Community plugins → Browse**.
+2. Search for **LAN Vault Sync**, click **Install**, then **Enable**.
 
-### Manual Installation
+### Manual installation
 
-1. Go to the [Releases](https://github.com/your-username/obsidian-lan-vault-sync/releases) page and download the latest `main.js`, `manifest.json`, and `styles.css`.
-2. In your vault, create the folder `.obsidian/plugins/lan-vault-sync/`.
-3. Copy the three downloaded files into that folder.
-4. In Obsidian, go to **Settings → Community Plugins**, toggle off **Restricted Mode**, and enable **LAN Vault Sync**.
+1. Download `main.js`, `manifest.json` and `styles.css` of the latest release from the [Releases page](https://github.com/senjanson/lan-vault-sync/releases).
+2. Create the folder `.obsidian/plugins/lan-vault-sync/` in your vault and put the three files in it.
+3. In Obsidian, open **Settings → Community plugins**, turn off Restricted mode, and enable **LAN Vault Sync**.
 
-### Upgrading to 0.5
-
-- **Update every device at the same time.** Version 0.5 speaks sync protocol 3 and does not sync with 0.4 or older. A device with an older version is refused with a notice that names it.
-- **New `.lan-vault-sync/` folder in the vault.** It holds the version history (`history/`), the activity log, diagnostics exports and files being received. Obsidian does not show it and it is not synced. Exclude it from other sync or backup tools if you like; deleting it only loses the version history.
-- **Pair again to share the vault ID.** Each vault now has its own ID, sent in the pairing link and QR code, so two vaults with the same folder name are told apart. Devices paired before keep working: until you pair again, the vault's folder name stands in for the ID, as before.
-- **Recovery center.** Run *Open recovery center* to see every version that sync replaced or deleted, and put any back. An attachment changed on one side only no longer leaves a conflict copy: the changed side wins. Changed on both sides, the later version wins; the losing side keeps a conflict copy beside the file only if its version exists on no other device, and the replaced version also goes to the history.
-- **Large files.** Files are streamed and checked on arrival. Phones take files up to 200 MB by default (setting *Largest file to receive*); a larger file is not sent to them and the sync panel says which.
-- **Same device ID on two devices** (for example after copying a vault with its `.obsidian` folder) is now detected. Use *New device ID* in settings on one of them.
-- The *Conflict strategy* setting is gone: every conflict keeps both versions.
-
-### Upgrading to 0.4
-
-- **Update every device at the same time.** Version 0.4 encrypts sync traffic, so it does not sync with 0.3 or older. A device with an older version is refused with a notice that names it.
-- **Set command hotkeys again.** The commands were renamed to follow Obsidian's guidelines, so hotkeys set for the old ones no longer apply.
-- The first connection after the update sends every note once more; later connections only send notes that differ.
+Install it on every device you want to sync, preferably the same version on all of them (see [Upgrading](#upgrading)).
 
 ---
 
-## Usage
+## Getting started
 
-### Quick Start
+1. **Put all devices on the same local network** (the same Wi-Fi or wired network).
+2. **Pair them**: every device needs the same sync key. The easiest way is to scan the QR code on your computer with your phone; see below.
+3. **Wait a few seconds**: the devices find each other and start syncing. When the status bar shows "LAN Sync: in sync with N", you are done.
 
-1. Install the plugin on **two or more devices** connected to the same Wi-Fi or LAN.
-2. Open Obsidian on each device.
-3. The plugin automatically discovers peers and begins syncing within seconds.
+### Pair with a QR code (recommended)
 
-### QR Code Pairing (Recommended for Mobile)
+1. On your computer, open **Settings → LAN Vault Sync** and find **Pair with QR code**.
+2. Scan the QR code with your phone's camera and open the link in Obsidian.
+3. The plugin asks whether to pair with that computer. Confirm, and the phone adds the computer's address and takes over the sync key and vault ID from the QR code.
 
-The easiest way to connect a phone or tablet — no typing required:
+![The sync key and the pairing QR code in settings](assets/screenshots/en/desktop-pairing.png)
 
-1. On the **desktop (Mac / Windows / Linux)**: open **Settings → LAN Vault Sync** and find the **Pair with QR code** section. A QR code is displayed automatically.
-2. On your **phone / tablet**: scan the QR code with the system camera (or any QR scanner).
-3. The camera will prompt you to open Obsidian, and the plugin asks whether to pair with that device. Confirm, and it adds the desktop's IP:port as a peer and takes over the **sync key** from the QR code.
+If your computer has more than one network connection (Wi-Fi and Ethernet, say), a **Network interface** menu appears above the QR code. Pick the address on the phone's network.
 
-> **Tip:** If your desktop has multiple network interfaces (e.g. Wi-Fi + Ethernet), use the dropdown above the QR code to select the correct IP before scanning.
+### Sync key
 
-### Sync Key
+Only devices with the same sync key can connect to each other, and the key is also used to encrypt what is synced. Each device makes a random key the first time it starts. Pairing by QR code copies it; otherwise, enter the same key on every device under **Settings → LAN Vault Sync → Sync key**. You are told when a device's key does not match.
 
-Only devices with the **same sync key** can connect to each other. Each device creates a random key on first start (**Settings → LAN Vault Sync → Sync Key**). QR pairing copies the key; when adding a peer by hand, enter the same key on both devices. A notice appears when keys don't match. All devices need a plugin version with sync keys.
+### Add a device by address
 
-### Manual Peer Connection
+Devices find each other with UDP broadcasts. Guest and company networks sometimes block them. Then add the device by hand:
 
-Auto-discovery uses UDP broadcast, which is blocked on some managed Wi-Fi networks (guest networks, corporate networks). In that case:
+1. In the computer's settings, note the address shown under the QR code, for example `192.168.1.20:53712`.
+2. On the other device, open **Settings → LAN Vault Sync → Devices by address**, enter that address and click **Add**. The command **Add device by address** does the same.
 
-1. On **Device A**: open plugin settings and note the displayed **IP address** and **port** (default: `53712`).
-2. On **Device B**: go to **Settings → LAN Vault Sync → Devices by address** → enter `192.168.x.x:53712`.
-3. Alternatively, use the command palette: **LAN Vault Sync: Add device by address**.
+---
 
-### Sync Only One Folder
+## Everyday use
 
-A device can be limited to one folder of the vault. Say the whole vault syncs between your home computer and your phone, and your work computer should get only the `Work` folder, without even the names of your other notes. On the work computer, open **Settings → LAN Vault Sync → What to sync → Sync only this folder**, click **Choose folder** and pick `Work`. Nothing has to be set on the other devices: each device says its folder when it connects, and the other side keeps to it. The work computer syncs only `Work` with your phone, and the phone, which has the whole vault, passes changes on to your home computer.
+### Status bar and sync panel
 
-- **Same name everywhere.** The folder is matched by its path, so it must have exactly the same name on every device, case included (`Work` and `work` are two different folders). The settings and the sync panel warn when the folder is missing on a device.
-- **Moving out is deleting.** Moving a file out of the folder deletes it on the devices that sync only that folder, and moving one in adds it. Deleted versions go to the version history and can be restored from the recovery center.
-- **Choose the folder before pairing.** Set it before the device first syncs, so that the rest of the vault never reaches it.
-- **Not with older versions.** A device with a folder set does not sync with devices that run a plugin version without this setting; update the plugin on every device.
-- **The folder name is sent in the clear** when two devices connect, before the encrypted connection is set up.
+The status bar shows whether this device is in sync with the others, for example "LAN Sync: in sync with 2 · 12:02 PM". The time is when the files last matched: just the time for today, with the date for an earlier day. Files not yet in sync, and anything that needs you, show up there too.
 
-The sync panel marks a connection limited to one folder with *syncs only Work*. Only one folder can be chosen, and ignored paths still apply inside it.
+Click the status bar, or run **Open sync panel**, to see:
 
-### Status Bar
+- the connected devices and their addresses;
+- **Health** for each device: whether all files match, and when that was checked. A device that syncs only one folder is marked "syncs only Work";
+- devices that are away stay listed as "disconnected · last in sync Nov 18, 2:02 PM", also after Obsidian restarts. A device not seen for 30 days is dropped;
+- alerts that need you (click **Dismiss** to close one) and recent sync events;
+- the **Export diagnostics** button.
 
-The status bar says whether this device is in sync with the others, for example *LAN Sync: in sync with 3 · 14:02*, or how many files are still different, or that something needs you. Click it to open the sync panel, which shows each device, any alerts, and buttons to dismiss them or export diagnostics. A device that is away stays listed, also after a restart, with when its files last all matched; it is dropped after 30 days without being seen.
+### Recovery center (version history)
+
+Before a sync deletes or replaces a file, the old version is saved to `.lan-vault-sync/history/` and kept for 30 days. Run **Open recovery center** to see each batch of changes: which device, when, and whether files were deleted or replaced. Click **View** to look at a version, **Restore** to put it back, or **Restore all** for the whole batch. The current file is kept before a restore, so a restore can be undone too.
+
+On a phone the version history takes up to 500 MB by default; beyond that the oldest versions go first (setting **Space limit on a phone**).
+
+### Deletion guard
+
+In these two cases nothing is deleted right away. The files are listed in the sync panel, and you choose **Delete them** or **Keep them**:
+
+- Many files are missing on this device since sync last ran: more than 20 at once, or more than 5% of the vault and at least 10. You may have deleted them, or another tool may have.
+- Another device deletes more than half of the vault (and at least 10 files) within two minutes. Moves and renames do not count.
+
+### Sync only one folder
+
+Sometimes a device should get only part of the vault. Say the whole vault syncs between your home computer and your phone, and your work laptop should get only the `Work` folder, without even the names of your other notes. Work and home do not need to share a network: the phone syncs with the work laptop at work and with the home computer at home, and carries the changes across.
+
+On the work laptop, open **Settings → LAN Vault Sync → What to sync → Sync only this folder**, click **Choose folder** and pick `Work`. Computers and phones use the same folder list.
+
+!["Sync only this folder" in settings](assets/screenshots/en/desktop-sync-folder.png)
+
+The other devices need no setting. Each device says which folder it syncs when it connects, and the other side keeps to it: it sends only what is in that folder and does not take anything outside it.
+
+- **Same name everywhere.** Folders are matched by path, so the folder must have exactly the same name on every device, case included (`Work` and `work` are two folders). The sync panel tells you when a device's folder does not exist here.
+- **Moving out deletes, moving in adds.** A file moved out of the folder is deleted on the device that syncs only that folder, and its old version goes to the recovery center. A file moved in is synced over.
+- **Choose the folder before pairing.** Set it before the device first syncs, and nothing else in the vault ever reaches it.
+- **Changing it later deletes nothing.** Switch back to the whole vault and the device receives the rest. Switch to a folder again and files already outside it stay as they are, on both sides.
+- **No sync with older versions.** A device with a folder set does not sync with plugin versions that do not support this, and tells you that device is older. Devices without a folder sync with older versions as before.
+- **The folder name is sent unencrypted.** When two devices connect, they tell each other their folder names before the encrypted connection is set up.
+- Only one folder can be chosen. **Ignored paths** still apply inside it.
+
+### Large files
+
+Large files are sent in chunks and collected outside the vault; a file is put into the vault only once all of it has arrived and its hash checks out. A transfer cut off halfway leaves nothing half-written behind. A phone takes files of up to 200 MB by default (setting **Largest file to receive**). Larger files are not sent to it; the sync panel lists them apart, and they do not count as out of sync.
+
+### Export diagnostics
+
+When something goes wrong, run **Export diagnostics (sync key masked)**, or click **Export diagnostics** in the sync panel. The file is written to `.lan-vault-sync/diagnostics/` and copied to the clipboard, with the sync key masked.
 
 ### Commands
 
-Open the command palette (`Cmd/Ctrl + P`) and search for:
+Search for "LAN Vault Sync" in the command palette (`Cmd/Ctrl + P`):
 
-- **LAN Vault Sync: Turn sync on or off** — start or stop the sync service
-- **LAN Vault Sync: Open sync panel** — open the sidebar panel with connected peers and sync log
-- **LAN Vault Sync: Add device by address** — add a peer by `IP:port`
-- **LAN Vault Sync: Open sync log** — open the sync log
-- **LAN Vault Sync: Open recovery center** — see and restore versions that sync replaced or deleted
-- **LAN Vault Sync: Export diagnostics** — write a diagnostics file (sync key masked) to `.lan-vault-sync/diagnostics/` and copy it
-
-Version 0.4 renamed these commands, so hotkeys set for them before must be set again.
+| Command | What it does |
+|---|---|
+| Turn sync on or off | Start or stop syncing |
+| Open sync panel | Open the sync panel in the sidebar |
+| Open recovery center | See and restore versions a sync deleted or replaced |
+| Open sync log | See which files were replaced or deleted |
+| Add device by address | Add a device by `IP:port` |
+| Export diagnostics (sync key masked) | Write a diagnostics file |
 
 ---
 
@@ -161,115 +162,154 @@ Version 0.4 renamed these commands, so hotkeys set for them before must be set a
 
 | Setting | Default | Description |
 |---|---|---|
-| Enable Sync | On | Master on/off switch |
-| Device Name | Auto-generated | Friendly name shown to other peers |
-| Port | `53712` | WebSocket listening port |
-| Sync only this folder | Whole vault | The one folder this device syncs; other devices keep to it (see [Sync Only One Folder](#sync-only-one-folder)) |
-| Ignored Paths | `.obsidian/`, `.trash/` | Glob patterns excluded from sync |
-| Sync Check Interval | `30s` | Period between full file-tree verification passes |
-| Debug Logging | Off | Write verbose logs to the developer console |
-| Keep old versions for (days) | `30` | How long the version history keeps replaced and deleted versions |
-| Space limit on a phone (MB) | `500` | Space the history may take on a phone; oldest versions go first |
-| Largest file to receive (MB) | `200` on phones, `0` (no limit) on computers | Larger files from other devices are not taken |
-| Device ID | Generated | Shown with a *New device ID* button, for when two devices share one |
+| Enable sync | On | Turns syncing on or off |
+| Device name | Generated | The name other devices show |
+| Device ID | Generated | Must differ on every device. If two devices show the same ID (after copying a whole vault, say), click **New device ID** |
+| Port | Random on first start (49200–65000) | The port other devices connect to. Phones only connect out; no need to change it |
+| Sync key | Random | Only devices with the same key connect; also used for encryption. Copy it, or click **New key** |
+| Sync only this folder | Whole vault | The one folder this device syncs; other devices keep to it (see [Sync only one folder](#sync-only-one-folder)) |
+| Ignored paths | `.obsidian/`, `.trash/` | Paths not synced, one per line, matched from the start. A path ending in `/` is a folder |
+| Sync check interval | 30 s | How often the full file lists are compared. 0 turns it off (changes still sync right away) |
+| Debug logging | Off | Detailed log in the developer console |
+| Largest file to receive (MB) | Phone 200, computer 0 (no limit) | Larger files from other devices are not taken |
+| Keep old versions for (days) | 30 | How long the version history keeps versions |
+| Space limit on a phone (MB) | 500 | Most space the version history may take on a phone; 0 for no limit |
+| Enable sync log / Max log entries | On / 500 | Records files that were replaced or deleted |
 
 ---
 
-## Technical Details
+## FAQ
 
-### Architecture
+**My phone cannot reach my computer.**
+Make sure both are on the same Wi-Fi, and that it is not a guest network that keeps devices apart. On iPhone, allow Obsidian to use the local network (**Settings → Privacy & Security → Local Network**). If broadcasts are blocked, pair with the QR code or [add the device by address](#add-a-device-by-address). The sync panel shows addresses it cannot reach.
 
-- **Topology**: Peer-to-peer mesh — each node runs a WebSocket server and connects to every known peer as a client
-- **Text sync**: [Yjs](https://github.com/yjs/yjs) CRDT with [`fast-diff`](https://github.com/jhchen/fast-diff) for efficient delta computation
-- **Binary sync**: SHA-256 hash comparison; full file transferred when hashes differ
-- **Discovery**: UDP broadcast on port `53713` (same subnet only)
-- **CRDT persistence**: Yjs document states saved to `.obsidian/plugins/lan-vault-sync/crdt-state/`
-- **Version history**: Replaced and deleted versions kept in `.lan-vault-sync/history/` for 30 days
-- **State files**: Written to a temporary file and renamed, with a `.bak` of the previous one, so a crash mid-save cannot lose the record of synced or deleted files
+**"… runs an older (or newer) version of LAN Vault Sync"?**
+All devices need the same major version of the plugin. The message says which device to update.
 
-### Conflict Resolution
+**"… belongs to another vault"?**
+Each vault has its own ID, which pairing passes on. Scan the other device's QR code again on this device.
 
-| File type | Strategy |
+**"Another device uses this device's ID"?**
+Usually a whole vault was copied, `.obsidian` folder included. Click **New device ID** in the settings of one of them.
+
+**Does it sync while the phone is in the background?**
+The system pauses Obsidian in the background. When you return to Obsidian it reconnects and catches up.
+
+---
+
+## How it works
+
+```
+  Computer A                              Phone B
+┌──────────────────┐  encrypted WebSocket ┌──────────────────┐
+│ Obsidian         │◄────────────────────►│ Obsidian         │
+│ + LAN Vault Sync │   notes: Yjs updates │ + LAN Vault Sync │
+└──────────────────┘   files: chunks      └──────────────────┘
+          ▲                                        │
+          └──────── UDP broadcast (discovery) ─────┘
+```
+
+1. Each device announces itself to the local network with UDP broadcasts (port 53713).
+2. Devices open WebSocket connections, prove to each other that they know the sync key, and encrypt everything after that.
+3. They exchange file lists to find files the other lacks or has in another version, and deletions.
+4. **Notes** (`.md`, `.txt`, `.canvas` and other plain text) sync through the Yjs CRDT, so edits made at the same time or offline merge character by character.
+5. **Attachments** are compared by SHA-256 hash; large ones are streamed in chunks and checked on arrival.
+
+### Conflicts
+
+| File type | What happens |
 |---|---|
-| Text (`.md`, `.txt`, `.canvas`, …) | Yjs CRDT — automatic, **lossless** merge at character level |
-| Binary (images, PDFs, audio, …) | Changed on one side: that side wins, no copy. Changed on both: the later version wins; the losing side keeps a conflict copy (`name (conflict 1a2b3c).ext`) if its version exists only on that device. The replaced version also goes to the version history |
+| Notes | Merged character by character; both sides' edits are kept |
+| Attachments changed on one side | The changed version is kept |
+| Attachments changed on both sides | The later version is kept. The other goes to the version history; if it existed only on this device, a copy `name (conflict 1a2b3c).ext` is also kept next to the file |
 
-### Mobile Compatibility
+### On phones
 
-- Mobile devices (iOS / Android) act as WebSocket **clients** only — they cannot run a server due to OS restrictions.
-- A desktop device must be reachable on the network to act as a server for mobile clients.
-- Auto-discovery may not work on mobile; use **Pair with QR code** or **Devices by address** as a fallback.
-- Sync resumes automatically when the Obsidian app returns to the foreground.
+- Phones do not let Obsidian accept connections, so a phone always connects to a computer. At least one computer running Obsidian must be on the network.
+- Discovery may not work on a phone; pair with the QR code.
 
-### Privacy & Security
+### Privacy and security
 
-- All traffic is **LAN-only**. No data is sent to any external server.
-- Only devices that know the sync key can connect; the key itself is never sent over the network.
+- Everything stays on your local network; nothing is sent to an outside server. No account, no data collection, no telemetry.
+- Only devices that know the sync key can connect; the key itself never goes over the network.
+- What is synced is encrypted with AES-256-GCM, with a key derived from the sync key and different for every connection, so others on the same network cannot read or change it.
 - A device set to sync only one folder sends that folder's name unencrypted when it connects.
-- Since version 0.4, synced data is encrypted (AES-256-GCM) with keys derived from the sync key, fresh for each connection. Others on the network cannot read or change it.
-- No analytics, telemetry, or account required.
+
+### What the plugin keeps in your vault
+
+- `.lan-vault-sync/`: the version history (`history/`), sync logs, diagnostics, files being received, and when each device was last in sync. Obsidian does not show this folder and does not sync it. If you also use another sync or backup tool you may exclude it; deleting it loses only the version history, the logs and those times, not your notes.
+- `.obsidian/plugins/lan-vault-sync/`: the plugin's settings and the CRDT state of your notes. State files are written to a temporary file and renamed, with the previous copy kept as a backup, so a crash while saving loses nothing.
 
 ---
 
-## Requirements
+## Upgrading
 
-- Obsidian **v1.4.0** or later
-- All devices on the **same local network** (same Wi-Fi or Ethernet segment)
-- For mobile sync: at least one **desktop device** must be running and reachable on the LAN
+Upgrade all devices together: different major versions of the plugin do not sync with each other, and you are told which device to update.
+
+<details>
+<summary><b>Upgrading to 0.5</b></summary>
+
+- Uses sync protocol 3 and does not sync with 0.4 or earlier.
+- Adds the `.lan-vault-sync/` folder for the version history, logs and diagnostics.
+- Each vault now has its own ID, passed on by the pairing QR code and link, so two vaults with the same name are no longer mixed up. Devices paired before keep working: until they pair again, the vault's folder name stands in for the ID.
+- Adds the recovery center. An attachment changed on one side no longer leaves a conflict copy.
+- Large files are streamed; a phone takes files of up to 200 MB by default.
+- Two devices with the same device ID are detected.
+- The "Conflict strategy" setting is gone: every conflict keeps both versions.
+
+</details>
+
+<details>
+<summary><b>Upgrading to 0.4</b></summary>
+
+- What is synced is now encrypted; does not sync with 0.3 or earlier.
+- Commands were renamed to follow Obsidian's guidelines; set their hotkeys again.
+- The first connection after upgrading sends all notes once more; after that only notes that differ.
+
+</details>
 
 ---
 
 ## Development
 
 ```bash
-# Clone and install
-git clone https://github.com/your-username/obsidian-lan-vault-sync
-cd obsidian-lan-vault-sync
+git clone https://github.com/senjanson/lan-vault-sync
+cd lan-vault-sync
 npm install
 
-# Development build — watch mode (auto-recompile on save)
-npm run dev
-
-# Production build
-npm run build
-
-# Run tests
-npm test
+npm run dev     # development build, rebuilds on save
+npm run build   # production build
+npm test        # run the tests
 ```
 
-Enable the **Hot Reload** community plugin in Obsidian to automatically reload the plugin after each build.
-
-See [doc/debug-and-testing.md](doc/debug-and-testing.md) for a full multi-device test guide.
+Copy (or symlink) the built `main.js`, `manifest.json` and `styles.css` into `.obsidian/plugins/lan-vault-sync/` of a test vault. With the **Hot Reload** community plugin, the plugin reloads after every build.
 
 ---
 
 ## Roadmap
 
-- [x] QR code pairing — scan to add a peer instantly (mobile-friendly)
-- [ ] End-to-end encryption (TLS / WireGuard)
-- [ ] Sync progress indicator per file
-- [x] Sync only one folder on a device, which its peers keep to
-- [ ] Selective sync with several folders, or different folders per peer
-- [ ] Conflict resolution UI for binary files
-- [ ] mDNS / Bonjour discovery as alternative to UDP broadcast
+- [x] Pairing by QR code
+- [x] Encrypted sync
+- [x] Version history and recovery center
+- [x] A device syncs only one folder; the others keep to it
+- [ ] Several folders, or different folders for different devices
+- [ ] Per-file sync progress
+- [ ] A comparison view for attachment conflicts
+- [ ] mDNS / Bonjour discovery alongside UDP broadcast
 
 ---
 
 ## Contributing
 
-Pull requests and issues are welcome. Please open an issue before submitting a large PR.
-
----
+Issues and pull requests are welcome. For larger changes, please open an issue first.
 
 ## License
 
 [MIT](LICENSE)
 
----
-
 ## Acknowledgements
 
-- [Yjs](https://github.com/yjs/yjs) — CRDT framework by Kevin Jahns
-- [ws](https://github.com/websockets/ws) — WebSocket library for Node.js
-- [fast-diff](https://github.com/jhchen/fast-diff) — fast string diff
-- [Obsidian](https://obsidian.md) — the best local-first knowledge base
+- [Yjs](https://github.com/yjs/yjs): the CRDT framework by Kevin Jahns
+- [ws](https://github.com/websockets/ws): WebSocket library for Node.js
+- [fast-diff](https://github.com/jhchen/fast-diff): text diffing
+- [Obsidian](https://obsidian.md)
