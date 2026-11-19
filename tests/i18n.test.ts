@@ -23,3 +23,21 @@ describe("i18n", () => {
     }
   });
 });
+
+describe('dates and times', () => {
+  it('follow the UI language, not the system region', async () => {
+    const { setLanguage, formatTime, formatDate, formatDateTime } = await import('../src/i18n');
+    const ts = new Date(2026, 10, 18, 16, 28, 29).getTime();
+    try {
+      setLanguage('zh');
+      expect(formatTime(ts)).toBe('16:28:29');
+      expect(formatDate(ts)).toBe('2026/11/18');
+      expect(formatDateTime(ts)).toBe('2026/11/18 16:28:29');
+      setLanguage('en');
+      expect(formatTime(ts)).toBe('4:28:29 PM');
+      expect(formatDate(ts)).toBe('11/18/2026');
+    } finally {
+      setLanguage(null);
+    }
+  });
+});

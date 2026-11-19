@@ -68,4 +68,21 @@ describe('SyncView', () => {
     await content.find('Keep them').onclick();
     expect(resolveHeld).toHaveBeenCalledWith('h1', 'keep');
   });
+
+  it('puts Keep first and says so when a held group was already handled', async () => {
+    const { Notice } = await import('obsidian');
+    (Notice as any).shown = [];
+    const resolveHeld = vi.fn(async () => false);
+    const { view, content } = openView(() => ({
+      state: 'watching',
+      devices: [],
+      unreachable: [],
+      held: [{ id: 'h1', kind: 'incoming', peer: 'pixel', since: 0, paths: ['a.md'] }],
+    }), { resolveHeld });
+    await view.onOpen();
+    const text = content.allText();
+    expect(text.indexOf('| Keep them |')).toBeLessThan(text.indexOf('| Delete them'));
+    await content.find('Keep them').onclick();
+    expect((Notice as any).shown.join(' ')).toContain('already handled');
+  });
 });

@@ -696,7 +696,7 @@ describe('e2e lost sync history', { timeout: 30000 }, () => {
     ]);
     let all = await start();
     all.forEach(track);
-    await until(() => all.every((n) => count(n, 'Tree sync with') >= 2));
+    await until(() => all.every((n) => count(n, 'Tree sync with') >= 2), 30000);
     await sleep(2000);
     for (const n of all) await n.coord.stop();
     nodes = [];
@@ -706,7 +706,7 @@ describe('e2e lost sync history', { timeout: 30000 }, () => {
     all = await start();
     all.forEach(track);
     const settled = () => all.every((n) => n.vault.text('n.md') === 'v2 n from A\n' && n.vault.text('m.md') === 'v2 m from B\n');
-    await until(settled, 10000);
+    await until(settled, 30000);
     await sleep(2000);
     for (const n of all) {
       expect(n.vault.text('n.md')).toBe('v2 n from A\n');

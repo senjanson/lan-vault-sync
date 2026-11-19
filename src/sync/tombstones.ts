@@ -99,7 +99,7 @@ export class TombstoneStore {
     return out;
   }
 
-  add(path: string, hash?: string, deletedAt = this.now(), movedTo?: string): void {
+  add(path: string, hash?: string, deletedAt = this.now(), movedTo?: string, by?: string): void {
     const existing = this.entries.get(path);
     if (existing && existing.deletedAt >= deletedAt) return;
     // Deleted again: it no longer undoes the earlier deletion.
@@ -110,6 +110,7 @@ export class TombstoneStore {
     // again does not undo the rename: peers still need to know where it went.
     const moved = movedTo ?? existing?.movedTo;
     if (moved) entry.movedTo = moved;
+    if (by) entry.by = by;
     this._set(entry);
     this._changed();
   }

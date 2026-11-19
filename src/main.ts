@@ -109,7 +109,7 @@ export default class LANSyncPlugin extends Plugin {
     this.registerView(SYNC_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
       this.syncView = new SyncView(leaf, () => this.getSyncStatus(), {
         resolveHeld: async (id, choice) => {
-          await this.coordinator?.resolveHeldDeletions(id, choice);
+          return (await this.coordinator?.resolveHeldDeletions(id, choice)) ?? false;
         },
         dismissAlert: (key) => this.coordinator?.health.dismiss(key),
         exportDiagnostics: () => this.exportDiagnostics(),
@@ -616,7 +616,7 @@ export default class LANSyncPlugin extends Plugin {
     onProgress: (percent: number, message: string) => void,
   ): Promise<void> {
     if (!this.coordinator) {
-      onProgress(100, "Sync is not running");
+      onProgress(100, t("progress.not-running"));
       return;
     }
     await this.coordinator.manualFullSync(onProgress);

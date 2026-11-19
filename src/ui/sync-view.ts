@@ -1,8 +1,8 @@
-import { ItemView, WorkspaceLeaf } from 'obsidian';
+import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import { SYNC_VIEW_TYPE } from '../constants';
 import { SyncState, DeviceInfo } from '../types';
 import { canUseNodeRuntime } from '../utils/runtime';
-import { t } from '../i18n';
+import { t, formatTime } from '../i18n';
 import type { HeldDeletion } from '../sync/delete-breaker';
 import type { Alert, HealthSummary, PeerHealth } from '../diagnostics/health';
 import { alertText, peerName } from '../diagnostics/health';
@@ -22,7 +22,8 @@ export interface SyncViewStatus {
 }
 
 export interface SyncViewActions {
-  resolveHeld(id: string, choice: 'delete' | 'keep'): Promise<void>;
+  /** False when the group no longer waits (it was already answered). */
+  resolveHeld(id: string, choice: 'delete' | 'keep'): Promise<boolean | void>;
   dismissAlert?(key: string): void;
   exportDiagnostics?(): Promise<unknown>;
 }
@@ -68,7 +69,7 @@ export class SyncView extends ItemView {
   }
 
   addLog(message: string): void {
-    const timestamp = new Date().toLocaleTimeString();
+    const timestamp = formatTime(Date.now());
     this.logs.unshift(`[${timestamp}] ${message}`);
     // Keep last 100 entries
     if (this.logs.length > 100) this.logs.pop();
@@ -150,7 +151,7 @@ export class SyncView extends ItemView {
       const list = section.createEl('ul', { cls: 'lan-sync-device-list' });
       for (const p of shown) {
         const name = devices.find((d) => d.deviceId === p.id)?.deviceName || peerName(p.name ?? p.id);
-        const time = new Date(p.lastExchange!).toLocaleTimeString();
+        const time = formatTime(p.lastExchange!);
         const parts = [
           p.unsynced.length > 0
             ? t('health.differing', { name, count: p.unsynced.length, time })
@@ -174,7 +175,7 @@ export class SyncView extends ItemView {
       section.createEl('h5', { text: t('health.alerts') });
       for (const a of alerts) {
         const row = section.createDiv({ cls: 'lan-sync-alert' });
-        const time = new Date(a.last).toLocaleTimeString();
+        const time = formatTime(a.last);
         row.createSpan({
           text: `${time} ${alertText(a)}${a.count > 1 ? ` (×${a.count})` : ''}`,
           cls: 'lan-sync-state-error',
@@ -209,12 +210,14 @@ export class SyncView extends ItemView {
       for (const p of h.paths.slice(0, 5)) list.createEl('li', { text: p });
       if (h.paths.length > 5) list.createEl('li', { text: t('view.heldMore', { count: h.paths.length - 5 }) });
       const row = box.createDiv({ cls: 'lan-sync-held-actions' });
-      const del = row.createEl('button', { text: t('view.heldDelete'), cls: 'mod-warning' });
+      // Keeping, the safe answer, comes first.
       const keep = row.createEl('button', { text: t('view.heldKeep'), cls: 'mod-cta' });
+      const del = row.createEl('button', { text: t('view.heldDelete'), cls: 'mod-warning' });
       const act = (choice: 'delete' | 'keep') => async () => {
         del.disabled = true;
         keep.disabled = true;
-        await this.actions?.resolveHeld(h.id, choice);
+        const done = await this.actions?.resolveHeld(h.id, choice);
+        if (done === false) new Notice(t('view.heldGone'));
         this.render();
       };
       del.onclick = act('delete');

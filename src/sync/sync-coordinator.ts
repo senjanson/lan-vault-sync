@@ -1,5 +1,7 @@
 import { EventLog, peerLabel } from "../diagnostics/event-log";
-import { HealthMonitor, vaultDigest, type HealthOptions } from "../diagnostics/health";
+import { HealthMonitor, peerName, vaultDigest, type HealthOptions } from "../diagnostics/health";
+import { currentLanguage, t, tIn, type Lang } from "../i18n";
+import "./sync-events";
 import { effectiveVaultId, randomInstanceId } from "../utils/vault-id";
 import { ApplyGate, BackupKeeper, OpContext, toArrayBuffer } from "./apply-gate";
 import { VersionStore } from "../history/version-store";
@@ -193,7 +195,7 @@ export class SyncCoordinator {
   private syncLogService: SyncLogService | null;
 
   private onStateChangeCb: ((state: SyncState) => void) | null = null;
-  private startError: string | null = null;
+  private startError: { key: string; vars: Record<string, string | number> } | null = null;
   private running = false;
   private onSyncEventCb: ((msg: string) => void) | null = null;
   private onAuthFailedCb: ((failure: AuthFailure) => void) | null = null;
@@ -260,7 +262,7 @@ export class SyncCoordinator {
       trash: options?.trash,
       // Something changed since the decision: decide again from fresh lists.
       onPreconditionFailed: () => this._scheduleTreeSync(),
-      onKeepFailed: (path, op) => this._emitEvent(`Skipped ${op} for ${path}: its old version could not be kept`),
+      onKeepFailed: (path, op) => this._emitEvent("event.keep-failed", { op, path }),
     });
     this.binarySync.setGate(this.gate);
     this.binarySync.setPeerLabel((id) => this._peerLabel(id));
@@ -340,11 +342,12 @@ export class SyncCoordinator {
   /**
    * The user's answer for a held batch: "delete" applies the deletions,
    * "keep" keeps the files (and gives them back to the devices that
-   * deleted them).
+   * deleted them). False when the batch no longer waits (answered already,
+   * here or in another window), and nothing was done.
    */
-  async resolveHeldDeletions(id: string, action: "delete" | "keep"): Promise<void> {
+  async resolveHeldDeletions(id: string, action: "delete" | "keep"): Promise<boolean> {
     const batch = this.breaker.take(id);
-    if (!batch) return;
+    if (!batch) return false;
     const ctxBase = { peer: batch.peer, batch: batch.id };
     this.eventLog.record({
       op: "held",
@@ -386,11 +389,12 @@ export class SyncCoordinator {
     }
     this.onHeldDeletionsCb?.(this.breaker.list());
     this._scheduleTreeSync();
+    return true;
   }
 
   /** Why the last start failed, in words for the user; null if it did not. */
   getStartError(): string | null {
-    return this.startError;
+    return this.startError ? t(this.startError.key, this.startError.vars) : null;
   }
 
   async start(): Promise<void> {
@@ -418,7 +422,7 @@ export class SyncCoordinator {
           this.discovery.addManualPeer(addr, this.vaultId);
         } catch (err) {
           logger.warn(`Skipping invalid manual peer ${addr}:`, err);
-          this._emitEvent(`Skipped invalid peer address: ${addr}`);
+          this._emitEvent("event.invalid-peer", { addr });
         }
       }
 
@@ -437,14 +441,14 @@ export class SyncCoordinator {
       this.persistTimer = setInterval(() => void this.persist(), 60000);
 
       this.stateMachine.transition("watching");
-      this._emitEvent("Sync service started");
+      this._emitEvent("event.started");
     } catch (err) {
       logger.error("Failed to start sync:", err);
       this.startError =
         (err as { code?: string })?.code === "EADDRINUSE"
-          ? `Port ${this.settings.port} is already in use by another program or vault. Choose another port in the LAN Vault Sync settings.`
-          : `Sync could not start: ${err instanceof Error ? err.message : String(err)}`;
-      this._emitEvent(this.startError);
+          ? { key: "event.port-in-use", vars: { port: this.settings.port } }
+          : { key: "event.start-failed", vars: { error: err instanceof Error ? err.message : String(err) } };
+      this._emitEvent(this.startError.key, this.startError.vars);
       this.stateMachine.transition("error");
     }
   }
@@ -486,7 +490,7 @@ export class SyncCoordinator {
     await this.eventLog.flush();
 
     this.stateMachine.transition("idle");
-    this._emitEvent("Sync service stopped");
+    this._emitEvent("event.stopped");
   }
 
   /**
@@ -565,12 +569,12 @@ export class SyncCoordinator {
 
     // Device discovered → connect
     this.discovery.onDeviceFound((device) => {
-      this._emitEvent(`Device found: ${device.deviceName}`);
+      this._emitEvent("event.device-found", { name: device.deviceName });
       this.connectionManager.connectToPeer(device);
     });
 
     this.discovery.onDeviceLost((device) => {
-      this._emitEvent(`Device lost: ${device.deviceName}`);
+      this._emitEvent("event.device-lost", { name: device.deviceName });
       this.connectionManager.forgetDiscoveredPeer(device);
     });
     this.connectionManager.onReachabilityChange(() => this.onStateChangeCb?.(this.stateMachine.getState()));
@@ -578,17 +582,14 @@ export class SyncCoordinator {
     // Peer connected → initial sync
     this.connectionManager.onAuthFailed((failure) => {
       this._emitEvent(
-        failure.reason === "outdated"
-          ? `Refused ${failure.deviceName} (${failure.address}): its plugin version is older, update it there`
-          : failure.reason === "newer"
-            ? `Refused ${failure.deviceName} (${failure.address}): its plugin version is newer, update it here`
-            : `Refused ${failure.deviceName} (${failure.address}): sync key does not match`,
+        failure.reason === "outdated" ? "event.refused-outdated" : failure.reason === "newer" ? "event.refused-newer" : "event.refused-key",
+        { name: failure.deviceName, address: failure.address },
       );
       this.onAuthFailedCb?.(failure);
     });
 
     this.connectionManager.onPeerConnected(async (device) => {
-      this._emitEvent(`Connected to ${device.deviceId}`);
+      this._emitEvent("event.connected", { peer: this._who(device.deviceId) });
       this.eventLog.record({ op: "connect", peer: peerLabel(device.deviceId, device.deviceName) });
       // The peer count shown to the user changes even when the state does not.
       this.onStateChangeCb?.(this.stateMachine.getState());
@@ -605,7 +606,7 @@ export class SyncCoordinator {
       this._forgetHistoryWinners(deviceId);
       this._forgetSent(deviceId);
       this._forgetApartTexts(deviceId);
-      this._emitEvent(`Disconnected: ${deviceId}`);
+      this._emitEvent("event.disconnected", { peer: this._who(deviceId) });
       this.eventLog.record({ op: "disconnect", peer: this._peerLabel(deviceId) });
       this.onStateChangeCb?.(this.stateMachine.getState());
     });
@@ -719,7 +720,7 @@ export class SyncCoordinator {
       if (this.filter.isTextFile(path)) await this._storedTextAsBytes(path, hash, content, fromDeviceId);
     });
 
-    this.binarySync.onRemoteFileDeleted(async (path, movedTo, record) => {
+    this.binarySync.onRemoteFileDeleted(async (path, movedTo, record, by) => {
       // Remember the deletion too, for peers that are offline right now.
       // A peer's record of a deletion made while we were away is kept as it
       // is: when the file was deleted, and where it went if it was moved. A
@@ -728,9 +729,9 @@ export class SyncCoordinator {
       if (record) {
         const hash = record.hash ?? this.knownHashes.get(path);
         this.tombstones.clear(path);
-        this.tombstones.add(path, hash, record.deletedAt, record.movedTo);
+        this.tombstones.add(path, hash, record.deletedAt, record.movedTo, by);
       } else {
-        this.tombstones.add(path, this.knownHashes.get(path), undefined, movedTo);
+        this.tombstones.add(path, this.knownHashes.get(path), undefined, movedTo, by);
       }
       this.knownHashes.delete(path);
       this.remoteWrittenText.delete(path);
@@ -837,7 +838,7 @@ export class SyncCoordinator {
         // connect to describe, and none to wait for.
         if (relation !== "related") this._takeApartTexts(deviceId, resolvedPath);
         if (relation === "local-wins") {
-          await this._sendFullTextState(deviceId, resolvedPath, "Resolving unrelated history");
+          await this._sendFullTextState(deviceId, resolvedPath, "event.resolving-history");
           break;
         }
         if (relation === "remote-wins") {
@@ -1294,14 +1295,12 @@ export class SyncCoordinator {
               logger.error(
                 `Aborting remote text overwrite for ${filePath}: conflict backup unavailable`,
               );
-              this._emitEvent(
-                `Skipped remote overwrite for ${filePath} because backup failed`,
-              );
+              this._emitEvent("event.skip-overwrite", { path: filePath });
               return;
             }
             backupId = backup.hash ?? backup.id;
             logger.warn(`Kept the divergent text of ${filePath} before a remote write`);
-            this._emitEvent(`Conflict backup created for ${filePath}`);
+            this._emitEvent("event.conflict-backup", { path: filePath });
           } else {
             // An ordinary merge write: kept at most every few minutes, but
             // at once when the note is emptied or cut by half (plan 4.2).
@@ -1430,7 +1429,7 @@ export class SyncCoordinator {
 
   private async _initialSyncWith(deviceId: string): Promise<void> {
     this.stateMachine.transition("initial-sync");
-    this._emitEvent(`Starting initial sync with ${deviceId}`);
+    this._emitEvent("event.initial-sync", { peer: this._who(deviceId) });
 
     try {
       // Only exchange file tree metadata — NO CRDT initialization here.
@@ -1444,7 +1443,7 @@ export class SyncCoordinator {
       this.connectionManager.sendTo(deviceId, msg);
 
       this.stateMachine.transition("watching");
-      this._emitEvent(`File tree sent to ${deviceId}, waiting for remote tree`);
+      this._emitEvent("event.tree-sent", { peer: this._who(deviceId) });
     } catch (err) {
       logger.error("Initial sync failed:", err);
       this.stateMachine.transition("error");
@@ -1539,7 +1538,7 @@ export class SyncCoordinator {
           rule: "deleted-while-stopped",
           msg: `${batch.items.size} file(s) missing here since sync last ran; waiting for the user`,
         });
-        this._emitEvent(`Held ${batch.items.size} deletion(s) of files missing since sync last ran; waiting for your decision`);
+        this._emitEvent("event.held-inferred", { count: batch.items.size });
         this.onHeldDeletionsCb?.(this.breaker.list());
       }
     }
@@ -1550,7 +1549,7 @@ export class SyncCoordinator {
       // Just deleted here: the deletion goes to the peer as soon as it is
       // recorded (see pendingLocalDeletes).
       if (this._localDeletePending(file.path)) {
-        this._emitEvent(`Skipping deleted file: ${file.path}`);
+        this._emitEvent("event.skip-deleted", { path: file.path });
         continue;
       }
       // Deleted here while the peer was away: the peer removes its copy
@@ -1558,7 +1557,7 @@ export class SyncCoordinator {
       const ownTombstone = this.tombstones.get(file.path);
       if (ownTombstone && TombstoneStore.covers(ownTombstone, file, agreedBefore.get(file.path))) {
         this._logOnce(`own-tombstone\n${deviceId}\n${file.path}`, { op: "skip", path: file.path, peer: this._peerLabel(deviceId), rule: "own-tombstone-skip", before: { hash: file.hash }, msg: "deleted here; not fetched back" });
-        this._emitEvent(`Skipping deleted file: ${file.path}`);
+        this._emitEvent("event.skip-deleted", { path: file.path });
         continue;
       }
       // Here, unchanged, when sync last ran, but the file is gone now:
@@ -1567,7 +1566,7 @@ export class SyncCoordinator {
       const deleted = this._deletedAfterRename(file, remoteRenamesTo.get(file.path) ?? [], (p) => this.tombstones.get(p));
       if (deleted) {
         this.tombstones.add(file.path, file.hash, deleted.deletedAt);
-        this._emitEvent(`Skipping deleted file: ${file.path}`);
+        this._emitEvent("event.skip-deleted", { path: file.path });
         continue;
       }
       if (!ownTombstone && inferredPaths.has(file.path)) {
@@ -1579,7 +1578,7 @@ export class SyncCoordinator {
           encodeFileDelete({ path: file.path, deletedAt: this.tombstones.get(file.path)?.deletedAt, hash: file.hash, source: "inferred" }),
         );
         this.eventLog.record({ op: "delete", path: file.path, peer: this._peerLabel(deviceId), rule: "deleted-while-stopped", before: { hash: file.hash, size: file.size }, msg: "sent to the peer" });
-        this._emitEvent(`Deleted while sync was off: ${file.path}`);
+        this._emitEvent("event.deleted-offline", { path: file.path });
         continue;
       }
       const sameFile = localByCase?.get(file.path.toLowerCase());
@@ -1595,7 +1594,7 @@ export class SyncCoordinator {
       if (file.isTextFile && file.size === 0) {
         // An empty note has no CRDT content to fetch; fetch the file itself.
         this.binarySync.requestFile(deviceId, file.path, null);
-        this._emitEvent(`Requesting: ${file.path}`);
+        this._emitEvent("event.requesting", { path: file.path });
       } else if (file.isTextFile) {
         // DO NOT removeDoc here — it races with concurrent YJS_UPDATE messages
         // from the peer's localOnly processing, potentially destroying freshly
@@ -1608,10 +1607,10 @@ export class SyncCoordinator {
           emptyState,
         );
         this.connectionManager.sendTo(deviceId, msg);
-        this._emitEvent(`Requesting text state: ${file.path}`);
+        this._emitEvent("event.requesting-text", { path: file.path });
       } else {
         this.binarySync.requestFile(deviceId, file.path, null, file);
-        this._emitEvent(`Requesting: ${file.path}`);
+        this._emitEvent("event.requesting", { path: file.path });
       }
     }
 
@@ -1636,9 +1635,9 @@ export class SyncCoordinator {
       const revived = !!revival && !!peerTombstone && !peerTombstone.movedTo && peerTombstone.deletedAt <= revival.deletedAt;
       if (peerTombstone && !revived && TombstoneStore.covers(peerTombstone, file, agreedBefore.get(file.path))) {
         if (!this._admitDelete(deviceId, file.path, { tree: { record: peerTombstone, expectHash: file.hash } })) continue;
-        const ctx: OpContext = { peer: this._peerLabel(deviceId), rule: "tombstone-covers" };
+        const ctx: OpContext = { peer: this._deletedBy(deviceId, peerTombstone), rule: "tombstone-covers" };
         if (await this.binarySync.applyRemoteDelete(file.path, peerTombstone, file.hash, ctx)) {
-          this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
+          this._emitEvent("event.deleted-remote", { peer: this._who(deviceId), path: file.path });
         }
         continue;
       }
@@ -1648,9 +1647,9 @@ export class SyncCoordinator {
         settled = true;
         const record = { ...deletedLater, path: file.path };
         if (!this._admitDelete(deviceId, file.path, { tree: { record, expectHash: file.hash } })) continue;
-        const ctx: OpContext = { peer: this._peerLabel(deviceId), rule: "deleted-after-rename" };
+        const ctx: OpContext = { peer: this._deletedBy(deviceId, record), rule: "deleted-after-rename" };
         if (await this.binarySync.applyRemoteDelete(file.path, record, file.hash, ctx)) {
-          this._emitEvent(`Deleted (removed on ${deviceId}): ${file.path}`);
+          this._emitEvent("event.deleted-remote", { peer: this._who(deviceId), path: file.path });
         }
         continue;
       }
@@ -1674,11 +1673,11 @@ export class SyncCoordinator {
         await this._sendFullTextState(
           deviceId,
           file.path,
-          "Sending text state",
+          "event.sending-text",
         );
       } else {
         await this.binarySync.sendFileToPeer(deviceId, file.path);
-        this._emitEvent(`Sending: ${file.path}`);
+        this._emitEvent("event.sending", { path: file.path });
       }
     }
 
@@ -1723,7 +1722,7 @@ export class SyncCoordinator {
             encodeSyncStep1Data(stateVector, apart),
           );
           this.connectionManager.sendTo(deviceId, msg);
-          this._emitEvent(`CRDT merge conflict: ${local.path}`);
+          this._emitEvent("event.crdt-conflict", { path: local.path });
         } else {
           this.eventLog.record({
             op: "skip",
@@ -1745,7 +1744,7 @@ export class SyncCoordinator {
               "text-conflict-no-history",
               { localMtime: local.mtime, remoteMtime: remote.mtime },
             );
-            this._emitEvent(`Conflict backup created: ${local.path}`);
+            this._emitEvent("event.conflict-backup", { path: local.path });
             this.syncLogService?.addEntry("conflict-backup", local.path, {
               snapshotId: conflictBackup?.backupId,
               hasSnapshot: !!conflictBackup,
@@ -1760,7 +1759,7 @@ export class SyncCoordinator {
             await this._sendFullTextState(
               deviceId,
               local.path,
-              "Sending conflict winner",
+              "event.sending-winner",
             );
           } else {
             // We are the loser — discard any queued local change and do NOT
@@ -1778,7 +1777,7 @@ export class SyncCoordinator {
                 await this.vault.cachedRead(localFile),
               );
             }
-            this._emitEvent(`Waiting for conflict winner: ${local.path}`);
+            this._emitEvent("event.waiting-winner", { path: local.path });
           }
         }
       } else {
@@ -1802,16 +1801,14 @@ export class SyncCoordinator {
         await this._sendFullTextState(
           deviceId,
           path,
-          "Bootstrapping shared text state",
+          "event.bootstrapping",
         );
       }
 
       this.pendingInitialBootstrapPeers.delete(deviceId);
     }
 
-    this._emitEvent(
-      `Tree sync with ${deviceId}: +${treeDiff.remoteOnly.length} -0 ~${treeDiff.conflicting.length}`,
-    );
+    this._emitEvent("event.tree-sync", { peer: this._who(deviceId), added: treeDiff.remoteOnly.length, conflicts: treeDiff.conflicting.length });
   }
 
   /**
@@ -1891,13 +1888,13 @@ export class SyncCoordinator {
     }
     this.knownHashes.set(filePath, await this._hashText(disk));
     await this.docManager.applyLocalChange(filePath, disk, true);
-    this._emitEvent(`Picked up a change that was not synced: ${filePath}`);
+    this._emitEvent("event.picked-up", { path: filePath });
   }
 
   private async _sendFullTextState(
     deviceId: string,
     filePath: string,
-    eventPrefix: string,
+    eventKey: string,
   ): Promise<void> {
     await this._flushPendingLocalTextChange(filePath);
     await this._ensureCrdtInitialized(filePath);
@@ -1905,7 +1902,7 @@ export class SyncCoordinator {
     const data = encodeFullStateData(update, this._adoptedRecently(filePath));
     const msg = encodeYjsSync(MessageType.YJS_FULL_STATE, filePath, data);
     this.connectionManager.sendTo(deviceId, msg);
-    this._emitEvent(`${eventPrefix}: ${filePath}`);
+    this._emitEvent(eventKey, { path: filePath });
   }
 
   /**
@@ -1967,17 +1964,14 @@ export class SyncCoordinator {
   ): Promise<void> {
     const peers = this.connectionManager.getConnectedPeerIds();
     if (peers.length === 0) {
-      onProgress(100, "No connected peers");
+      onProgress(100, t("progress.no-peers"));
       return;
     }
 
-    onProgress(5, "Building file tree...");
+    onProgress(5, t("progress.building"));
     const tree = await this._buildTree();
     const metaList = Array.from(tree.files.values());
-    onProgress(
-      15,
-      `Found ${metaList.length} files, syncing with ${peers.length} peer(s)...`,
-    );
+    onProgress(15, t("progress.found", { files: metaList.length, peers: peers.length }));
 
     const totalPeers = peers.length;
     for (let i = 0; i < peers.length; i++) {
@@ -1986,7 +1980,7 @@ export class SyncCoordinator {
 
       const msg = this._encodeTree(metaList, peerId);
       this.connectionManager.sendTo(peerId, msg);
-      onProgress(peerPercent, `Sent file tree to peer ${i + 1}/${totalPeers}`);
+      onProgress(peerPercent, t("progress.sent", { i: i + 1, n: totalPeers }));
 
       if (i < peers.length - 1) {
         await new Promise<void>((r) => setTimeout(r, 500));
@@ -1994,7 +1988,7 @@ export class SyncCoordinator {
     }
 
     // Wait for sync events to settle (no new events for 2s, max 30s)
-    onProgress(75, "Waiting for sync responses...");
+    onProgress(75, t("progress.waiting"));
     let lastEventTime = Date.now();
     const origCb = this.onSyncEventCb;
     this.onSyncEventCb = (msg: string) => {
@@ -2013,18 +2007,15 @@ export class SyncCoordinator {
       await new Promise<void>((r) => setTimeout(r, 500));
       const elapsed = Date.now() - startWait;
       const waitPercent = Math.min(95, 78 + (elapsed / maxWait) * 17);
-      onProgress(waitPercent, "Processing sync...");
+      onProgress(waitPercent, t("progress.processing"));
     }
 
     this.onSyncEventCb = origCb;
 
-    onProgress(96, "Persisting state...");
+    onProgress(96, t("progress.persisting"));
     await this.docManager.persistAll();
 
-    onProgress(
-      100,
-      `Sync complete — ${metaList.length} files checked with ${totalPeers} peer(s)`,
-    );
+    onProgress(100, t("progress.complete", { files: metaList.length, peers: totalPeers }));
   }
 
   // ─── Private: Periodic full sync ────────────────────────
@@ -2223,7 +2214,7 @@ export class SyncCoordinator {
       try {
         await this.vault.delete(folder, true);
         this.eventLog.record({ op: "delete", path, rule: "empty-folder", msg: "folder deleted on a peer, empty here" });
-        this._emitEvent(`Deleted folder: ${path}`);
+        this._emitEvent("event.folder-deleted", { path });
       } catch (err) {
         logger.warn(`Could not delete folder ${path}:`, err);
       }
@@ -2387,7 +2378,7 @@ export class SyncCoordinator {
       this.lastRunFiles.delete(oldPath);
       this.tombstones.add(oldPath, hash, undefined, newPath);
       if (this.filter.isTextFile(oldPath)) await this.docManager.renameDoc(oldPath, newPath);
-      this._emitEvent(`Renamed while sync was off: ${oldPath} -> ${newPath}`);
+      this._emitEvent("event.renamed-offline", { from: oldPath, to: newPath });
     }
   }
 
@@ -2501,7 +2492,7 @@ export class SyncCoordinator {
     if (merged.content !== merged.previousContent) {
       await this._writeFileFromRemote(target, merged.content, merged.previousContent);
     }
-    this._emitEvent(`Merged edits for ${oldPath} into ${target}`);
+    this._emitEvent("event.merged-edits", { from: oldPath, to: target });
     return true;
   }
 
@@ -2700,7 +2691,7 @@ export class SyncCoordinator {
     // exact copy is removed; another device's edited copy is kept and moved
     // over by that device.
     this.connectionManager.broadcast(encodeFileDelete({ path: oldPath, hash: oldHash, movedTo: newPath }));
-    this._emitEvent(`Moved edits to renamed note: ${oldPath} -> ${newPath}`);
+    this._emitEvent("event.moved-edits", { from: oldPath, to: newPath });
     return true;
   }
 
@@ -2754,7 +2745,7 @@ export class SyncCoordinator {
     this.reportedUnsyncable.add(path);
     this.eventLog.record({ op: "skip", level: "warn", path, rule, msg: reason });
     logger.warn(`Cannot sync ${path}: ${reason}`);
-    this._emitEvent(`Cannot sync ${path}: ${reason}`);
+    this._emitEvent("event.cannot-sync", { path, reason });
     this.onUnsyncableCb?.(path, reason);
   }
 
@@ -2868,10 +2859,34 @@ export class SyncCoordinator {
     this.onDuplicateDeviceCb?.(name);
   }
 
-  private _emitEvent(msg: string): void {
+  /**
+   * A line for the sync panel, in the user's language (see sync-events.ts);
+   * the log keeps it in English. An `op` is shown as the recovery center
+   * names it.
+   */
+  private _emitEvent(key: string, vars: Record<string, string | number> = {}): void {
+    const say = (lang: Lang) => {
+      const v = { ...vars };
+      if (typeof v.op === "string") {
+        const label = tIn(lang, `recovery.op.${v.op}`);
+        if (label !== `recovery.op.${v.op}`) v.op = label;
+      }
+      return tIn(lang, key, v);
+    };
+    const msg = say("en");
     logger.info(msg);
     this.eventLog.record({ op: "log", msg });
-    this.onSyncEventCb?.(msg);
+    this.onSyncEventCb?.(say(currentLanguage()));
+  }
+
+  /** Who made a peer's deletion: the record's maker, else that peer. */
+  private _deletedBy(deviceId: string, record?: Tombstone): string | undefined {
+    return record?.by ?? this._peerLabel(deviceId);
+  }
+
+  /** A peer as the user knows it: its name when connected, else its ID. */
+  private _who(deviceId: string): string {
+    return peerName(this._peerLabel(deviceId) ?? deviceId);
   }
 
   /**
@@ -2964,12 +2979,14 @@ export class SyncCoordinator {
 
   /** Asks the DeleteBreaker whether a peer's deletion may go ahead now. */
   private _admitDelete(deviceId: string, path: string, item: Omit<HeldItem, "path">): boolean {
-    const peer = this._peerLabel(deviceId);
+    // Named for the device that made the deletion, which may not be the one
+    // that passed it on.
+    const peer = this._deletedBy(deviceId, item.tree?.record);
     const res = this.breaker.admit(deviceId, { path, ...item }, peer);
     if (res.ok) return true;
     this.eventLog.record({ op: "held", level: res.created ? "warn" : "info", path, peer, batch: res.batch.id, rule: "bulk-delete" });
     if (res.created) {
-      this._emitEvent(`Held deletions from ${peer ?? deviceId}: more than half of the vault; waiting for your decision`);
+      this._emitEvent("event.held-incoming", { peer: peerName(peer ?? deviceId) });
     }
     this.onHeldDeletionsCb?.(this.breaker.list());
     return false;
@@ -3233,7 +3250,7 @@ export class SyncCoordinator {
       const sent = this.resolvingSent.get(key);
       if (sent?.pair === pair && Date.now() - sent.at < SyncCoordinator.RESOLVE_RESEND_MS) return;
       this.resolvingSent.set(key, { pair, at: Date.now() });
-      await this._sendFullTextState(deviceId, filePath, "Resolving unrelated history");
+      await this._sendFullTextState(deviceId, filePath, "event.resolving-history");
     } else if (result === "adopted") {
       // The note we had came from another history and is now replaced.
       // Only a different text is a decision to pass on as such: the same
@@ -3254,7 +3271,7 @@ export class SyncCoordinator {
       // Other peers may still hold the history we just dropped.
       for (const peerId of this.connectionManager.getConnectedPeerIds()) {
         if (peerId !== deviceId) {
-          await this._sendFullTextState(peerId, filePath, "Sharing adopted history");
+          await this._sendFullTextState(peerId, filePath, "event.sharing-history");
         }
       }
     }
@@ -3288,14 +3305,14 @@ export class SyncCoordinator {
       if (!hasLineFromNeither(merged, [apart.ours.text, before, apart.theirs.text])) return null;
       if (this._isConflictWinner(apart.ours.mtime, apart.theirs.mtime, deviceId)) {
         this.eventLog.record({ op: "skip", path: filePath, peer: this._peerLabel(deviceId), rule: "apart-edits", msg: "same lines edited apart: ours is later and kept" });
-        this._emitEvent(`Same lines edited apart, keeping this version: ${filePath}`);
+        this._emitEvent("event.same-lines-ours", { path: filePath });
         return null;
       }
       // Ours before the merge holds anything typed since we sent it. Not
       // kept, it must stay in the note.
       if (!(await this._createConflictCopy(filePath, before))) return null;
       this.eventLog.record({ op: "overwrite", path: filePath, peer: this._peerLabel(deviceId), rule: "apart-edits", msg: "same lines edited apart: theirs is later; ours kept as a conflict copy" });
-      this._emitEvent(`Same lines edited apart, keeping ${deviceId}'s version: ${filePath}`);
+      this._emitEvent("event.same-lines-theirs", { peer: this._who(deviceId), path: filePath });
       return apart.theirs.text;
     };
   }
@@ -3351,7 +3368,7 @@ export class SyncCoordinator {
     const rule = decision.keepCopy ? "binary-made-at" : "binary-agreed";
     if (decision.localWins) {
       if (decision.keepCopy) {
-        this._emitEvent(`Keeping ours, the peer keeps its own as a copy: ${local.path}`);
+        this._emitEvent("event.keeping-ours", { path: local.path });
         return;
       }
       await this.binarySync.sendFileToPeer(deviceId, local.path, { base: remote.hash, madeAt: local.madeAt });
@@ -3371,7 +3388,7 @@ export class SyncCoordinator {
     }
     this.binarySync.requestFile(deviceId, remote.path, local.hash, remote);
     this.eventLog.record({ op: "skip", path: local.path, peer: this._peerLabel(deviceId), rule, before: { hash: local.hash }, after: { hash: remote.hash }, msg: decision.keepCopy ? "fetching the later version; ours kept as a copy" : "fetching theirs: changed there only" });
-    this._emitEvent(`Requesting newer binary: ${remote.path}`);
+    this._emitEvent("event.requesting-binary", { path: remote.path });
   }
 
   /** As _createConflictCopy, for bytes. */
@@ -3384,7 +3401,7 @@ export class SyncCoordinator {
     try {
       await this.vault.createBinary(copyPath, toArrayBuffer(bytes));
       this.eventLog.record({ op: "conflict-copy", path: filePath, after: { hash, size: bytes.byteLength }, msg: `kept as ${copyPath}` });
-      this._emitEvent(`Kept the other version as ${copyPath}`);
+      this._emitEvent("event.kept-copy", { path: copyPath });
       return true;
     } catch (err) {
       logger.warn(`Could not create conflict copy for ${filePath}:`, err);
@@ -3403,7 +3420,7 @@ export class SyncCoordinator {
     try {
       await this.vault.create(copyPath, content);
       this.eventLog.record({ op: "conflict-copy", path: filePath, after: { hash, size: content.length }, msg: `kept as ${copyPath}` });
-      this._emitEvent(`Kept the other version as ${copyPath}`);
+      this._emitEvent("event.kept-copy", { path: copyPath });
       return true;
     } catch (err) {
       logger.warn(`Could not create conflict copy for ${filePath}:`, err);

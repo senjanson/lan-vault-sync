@@ -136,6 +136,7 @@ const en = {
   "view.heldMore": "and {count} more",
   "view.heldDelete": "Delete them",
   "view.heldKeep": "Keep them",
+  "view.heldGone": "These deletions were already handled; nothing was changed.",
   "notice.held": "LAN Sync: {count} deletion(s) are on hold until you confirm them. Open the LAN Sync panel to delete or keep the files.",
   "state.idle": "⏸ Idle",
   "state.discovering": "🔍 Discovering...",
@@ -300,6 +301,7 @@ const zh: Record<I18nKey, string> = {
   "view.heldMore": "另有 {count} 个",
   "view.heldDelete": "删除",
   "view.heldKeep": "保留",
+  "view.heldGone": "这批删除已经处理过了，没有做任何改动。",
   "notice.held": "LAN Sync：有 {count} 个删除被暂停，等你确认。打开同步面板选择删除或保留这些文件。",
   "state.idle": "⏸ 空闲",
   "state.discovering": "🔍 正在发现...",
@@ -335,7 +337,7 @@ const zh: Record<I18nKey, string> = {
   "log.diffCurrentLines": "（当前文件共 {lines} 行）",
 };
 
-type Lang = "en" | "zh";
+export type Lang = "en" | "zh";
 const tables: Record<Lang, Record<string, string>> = { en, zh };
 let forced: Lang | null = null;
 
@@ -363,10 +365,35 @@ export function addStrings(lang: Lang, strings: Record<string, string>): void {
 }
 
 export function t(key: I18nKey | string, vars?: Record<string, string | number>): string {
-  const lang = currentLanguage();
+  return tIn(currentLanguage(), key, vars);
+}
+
+/** A string in the given language, whatever the user's: e.g. English for the log. */
+export function tIn(lang: Lang, key: I18nKey | string, vars?: Record<string, string | number>): string {
   const text = tables[lang][key] ?? tables.en[key] ?? key;
   if (!vars) return text;
   return text.replace(/\{(\w+)\}/g, (m, name: string) =>
     name in vars ? String(vars[name]) : m,
   );
+}
+
+/** The locale that dates and times are written in: the UI language's, not the system region's. */
+function locale(): string {
+  return currentLanguage() === "zh" ? "zh-CN" : "en-US";
+}
+
+/** A time of day in the UI language (16:28:29, or 4:28:29 PM). */
+export function formatTime(ts: number, opts: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit", second: "2-digit" }): string {
+  return new Date(ts).toLocaleTimeString(locale(), opts);
+}
+
+/** A date in the UI language (2026/11/18, or 11/18/2026). */
+export function formatDate(ts: number): string {
+  const pad = currentLanguage() === "zh" ? "2-digit" : "numeric";
+  return new Date(ts).toLocaleDateString(locale(), { year: "numeric", month: pad, day: pad });
+}
+
+/** A date and time in the UI language. */
+export function formatDateTime(ts: number): string {
+  return `${formatDate(ts)} ${formatTime(ts)}`;
 }

@@ -242,7 +242,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     await (coordinator as any)._handleRemoteFileTree('peer-1', remoteTree);
 
-    expect(sendFullTextState).toHaveBeenCalledWith('peer-1', 'note.md', 'Sending text state');
+    expect(sendFullTextState).toHaveBeenCalledWith('peer-1', 'note.md', 'event.sending-text');
     expect(sendTo).not.toHaveBeenCalled();
     buildSpy.mockRestore();
   });
@@ -274,7 +274,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     await (coordinator as any)._handleRemoteFileTree('peer-z', remoteTree);
 
-    expect(sendFullTextState).toHaveBeenCalledWith('peer-z', 'note.md', 'Bootstrapping shared text state');
+    expect(sendFullTextState).toHaveBeenCalledWith('peer-z', 'note.md', 'event.bootstrapping');
     expect((coordinator as any).pendingInitialBootstrapPeers.has('peer-z')).toBe(false);
 
     buildSpy.mockRestore();
@@ -519,5 +519,65 @@ describe('SyncCoordinator open editor writes', () => {
     expect(modify).not.toHaveBeenCalled();
     expect(editor.getValue()).toBe('L1 C\nL2 B\n');
     expect(await docManager.getContent('note.md')).toBe('L1 C\nL2 B\n');
+  });
+});
+
+describe('SyncCoordinator events', () => {
+  it('shows sync events in the user\'s language and keeps the log in English', async () => {
+    const { setLanguage } = await import('../../src/i18n');
+    const vault = new FakeVault();
+    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] });
+    const shown: string[] = [];
+    coordinator.onSyncEvent((m) => shown.push(m));
+    (coordinator as any).connectionManager = {
+      sendTo: vi.fn(),
+      getConnectedPeers: () => [{ deviceId: 'peer-1', deviceName: '手机' }],
+      getClockOffset: () => undefined,
+    };
+    const progress: string[] = [];
+    try {
+      setLanguage('zh');
+      await (coordinator as any)._handleRemoteFileTree('peer-1', { files: [] });
+      (coordinator as any).connectionManager.getConnectedPeerIds = () => [];
+      await coordinator.manualFullSync((_p, m) => progress.push(m));
+    } finally {
+      setLanguage(null);
+    }
+    expect(shown.length).toBeGreaterThan(0);
+    for (const m of [...shown, ...progress]) expect(m).not.toMatch(/[A-Za-z]{3,}/);
+    expect(shown.join(' ')).toContain('手机');
+    const logged = (coordinator as any).eventLog.recentRecords?.() ?? [];
+    for (const r of logged.filter((r: any) => r.op === 'log')) expect(r.msg.replace('手机', '')).not.toMatch(/[\u4e00-\u9fff]/);
+  });
+});
+
+describe('SyncCoordinator held deletions', () => {
+  it('tells whether a held group was still waiting', async () => {
+    const coordinator = new SyncCoordinator(new FakeVault() as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] });
+    expect(await coordinator.resolveHeldDeletions('held-9', 'keep')).toBe(false);
+  });
+});
+
+describe('SyncCoordinator held deletions from a relaying device', () => {
+  it('names the device that deleted the files, not the one that passed the deletions on', () => {
+    const vault = new FakeVault();
+    for (let i = 0; i < 4; i++) vault.setText(`f${i}.md`, 'x');
+    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] },
+      { deleteLimits: { incomingMin: 1, incomingShare: 0.1 } } as any);
+    (coordinator as any).connectionManager = { getConnectedPeers: () => [{ deviceId: 'relay-1', deviceName: 'Mac' }] };
+    for (let i = 0; i < 4; i++) {
+      const record = { path: `f${i}.md`, deletedAt: 1, hash: 'h', by: 'phone-1 (Phone)' };
+      (coordinator as any)._admitDelete('relay-1', `f${i}.md`, { tree: { record, expectHash: 'h' } });
+    }
+    const held = coordinator.getHeldDeletions();
+    expect(held).toHaveLength(1);
+    expect(held[0].peer).toBe('phone-1 (Phone)');
+  });
+
+  it('keeps who deleted a file in its deletion record, for devices it passes the record on to', async () => {
+    const { TombstoneStore } = await import('../../src/sync/tombstones');
+    const store = new TombstoneStore(null as any);
+    store.add('a.md', 'h', 5, undefined, 'phone-1 (Phone)');
+    expect(store.get('a.md')?.by).toBe('phone-1 (Phone)');
   });
 });

@@ -360,7 +360,7 @@ describe('separate histories that both devices keep', { timeout: 20000 }, () => 
     b.historyWinners.set('aaaa\nn.md', { localWins: true, keepCopy: false });
     await b.docManager.removeDoc('n.md');
     const before = count(A, 'Resolving unrelated history') + count(B, 'Resolving unrelated history');
-    await b._sendFullTextState('aaaa', 'n.md', 'Sending text state');
+    await b._sendFullTextState('aaaa', 'n.md', 'event.sending-text');
     await sleep(2000);
     const sent = count(A, 'Resolving unrelated history') + count(B, 'Resolving unrelated history') - before;
     expect(sent).toBeGreaterThan(0);

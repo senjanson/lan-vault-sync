@@ -92,7 +92,7 @@ export class BinaryFileSyncService {
     | ((path: string, kind?: "write" | "delete" | "rename", content?: Uint8Array) => void)
     | null = null;
   private onRemoteFileDeletedCb:
-    | ((path: string, movedTo?: string, record?: Tombstone) => Promise<void> | void)
+    | ((path: string, movedTo?: string, record?: Tombstone, by?: string) => Promise<void> | void)
     | null = null;
   private onRemoteFileRenamedCb:
     | ((oldPath: string, newPath: string) => Promise<void> | void)
@@ -195,7 +195,8 @@ export class BinaryFileSyncService {
     this.onRemoteFolderMadeCb = cb;
   }
 
-  onRemoteFileDeleted(cb: (path: string, movedTo?: string, record?: Tombstone) => Promise<void> | void): void {
+  /** `by`: the device that made the deletion, as "deviceId (name)". */
+  onRemoteFileDeleted(cb: (path: string, movedTo?: string, record?: Tombstone, by?: string) => Promise<void> | void): void {
     this.onRemoteFileDeletedCb = cb;
   }
 
@@ -937,7 +938,7 @@ export class BinaryFileSyncService {
       this.onRemoteFileWrittenCb?.(path, "delete");
       await this.gate.remove(file);
       this.gate.applied(movedTo ? "rename" : "delete", path, ctx, before, undefined, version, movedTo ? `moved to ${movedTo}` : undefined);
-      await this.onRemoteFileDeletedCb?.(path, movedTo, record);
+      await this.onRemoteFileDeletedCb?.(path, movedTo, record, ctx.peer);
       logger.debug(`Deleted file: ${path}`);
       return true;
     } catch (err) {

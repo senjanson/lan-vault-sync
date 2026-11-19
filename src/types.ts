@@ -204,6 +204,12 @@ export interface Tombstone {
   hash?: string;
   /** Set when the file was renamed or moved: its new path. */
   movedTo?: string;
+  /**
+   * The device that made the deletion, as "deviceId (name)", when it was
+   * not the device that holds this record: kept as the record is passed on,
+   * so that a held deletion names who deleted the files.
+   */
+  by?: string;
 }
 
 /** A file put back after it was deleted; see TombstoneStore.revive. */

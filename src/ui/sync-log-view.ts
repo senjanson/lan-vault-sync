@@ -3,7 +3,7 @@ import { SYNC_LOG_VIEW_TYPE } from "../constants";
 import { SyncLogEntry, SyncLogEntryType } from "../types";
 import { SyncLogService } from "../sync-log/sync-log-service";
 import { SyncLogModal } from "./sync-log-modal";
-import { t } from "../i18n";
+import { t, formatDate, formatTime } from "../i18n";
 
 export class SyncLogView extends ItemView {
   private filterType: SyncLogEntryType | "all" = "all";
@@ -120,7 +120,7 @@ export class SyncLogView extends ItemView {
   private _groupByDate(entries: SyncLogEntry[]): [string, SyncLogEntry[]][] {
     const groups = new Map<string, SyncLogEntry[]>();
     for (const entry of entries) {
-      const date = new Date(entry.timestamp).toLocaleDateString();
+      const date = formatDate(entry.timestamp);
       if (!groups.has(date)) groups.set(date, []);
       groups.get(date)!.push(entry);
     }
@@ -148,7 +148,7 @@ export class SyncLogView extends ItemView {
       meta.createSpan({ text: ` · ${entry.deviceName}` });
     }
     meta.createSpan({
-      text: ` · ${new Date(entry.timestamp).toLocaleTimeString()}`,
+      text: ` · ${formatTime(entry.timestamp)}`,
     });
 
     // Actions

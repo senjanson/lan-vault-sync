@@ -5,7 +5,7 @@
  * the sync log, so it works even when the log was pruned or never written.
  */
 import { App, ItemView, Modal, Notice, Plugin, WorkspaceLeaf } from "obsidian";
-import { addStrings, t } from "../i18n";
+import { addStrings, t, formatDateTime } from "../i18n";
 import type { HistoryVault, VersionEntry, VersionGroup, VersionStore } from "./version-store";
 import { peerName } from "../diagnostics/health";
 
@@ -98,7 +98,7 @@ export function formatBytes(n: number): string {
 }
 
 function formatTime(ts: number): string {
-  return new Date(ts).toLocaleString();
+  return formatDateTime(ts);
 }
 
 /** The store may come later than the view (the workspace restores views at startup). */
@@ -237,12 +237,13 @@ export class RecoveryView extends ItemView {
       text: ` · ${formatTime(e.ts)} · ${formatBytes(e.size)} · ${opLabel(e.op)}`,
       cls: "lan-sync-muted",
     });
-    const view = li.createEl("button", { text: t("recovery.view") });
+    const actions = li.createDiv({ cls: "lan-sync-recovery-actions" });
+    const view = actions.createEl("button", { text: t("recovery.view") });
     view.onclick = () => {
       const store = this.store;
       if (store) new VersionModal(this.app, store, e).open();
     };
-    const restore = li.createEl("button", { text: t("recovery.restore") });
+    const restore = actions.createEl("button", { text: t("recovery.restore") });
     restore.onclick = () => void this.restoreOne(e, restore);
   }
 

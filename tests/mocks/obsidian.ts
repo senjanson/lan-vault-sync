@@ -48,6 +48,11 @@ export class Modal {
   close() {}
 }
 export class Notice {
-  constructor(_message: string, _timeout?: number) {}
+  /** Every message shown, for tests. */
+  static shown: string[] = [];
+  constructor(message: string, _timeout?: number) {
+    Notice.shown.push(message);
+  }
+  hide() {}
 }
 export function setIcon(_el: any, _icon: string) {}
