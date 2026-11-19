@@ -109,4 +109,61 @@ describe('SyncView', () => {
     expect(text).toContain('macb: disconnected');
     expect(text).not.toContain('not yet in sync');
   });
+
+  it('says when a connection is limited to one folder, and when a device that is away was last in sync', async () => {
+    const { setLanguage } = await import('../../src/i18n');
+    const peer = (id: string, extra: object) => ({
+      id, name: `${id} (${id})`, connected: true, lastExchange: Date.now(), differing: 0, unsynced: [], waiting: 0,
+      tooLargeHere: [], tooLargeThere: [], ...extra,
+    });
+    const synced = new Date(2025, 2, 4, 9, 5).getTime();
+    const status = (): SyncViewStatus => ({
+      state: 'watching',
+      devices: [device('work')],
+      unreachable: [],
+      health: [
+        // Read back after a restart: never compared since.
+        peer('home', { connected: false, lastExchange: undefined, lastConsistent: synced }),
+        peer('work', { only: 'Work' }),
+        peer('tablet', { connected: false, lastExchange: undefined }),
+      ],
+    });
+    try {
+      setLanguage('en');
+      const { view, content } = openView(status);
+      await view.onOpen();
+      const text = content.allText();
+      expect(text).toMatch(/work: all files match \(checked \d+:\d\d [AP]M\) · syncs only Work/);
+      expect(text).toContain('home: disconnected · last in sync Mar 4, 2025, 9:05 AM');
+      expect(text).toContain('tablet: disconnected · not fully in sync yet');
+      // Connected devices first.
+      expect(text.indexOf('work: all files match')).toBeLessThan(text.indexOf('home: disconnected'));
+      setLanguage('zh');
+      view.refresh();
+      const zh = content.allText();
+      expect(zh).toContain('· 仅同步 Work');
+      expect(zh).toContain('home：已断开 · 上次同步 2025-03-04 09:05');
+      expect(zh).toContain('tablet：已断开 · 还没有完整同步过');
+    } finally {
+      setLanguage(null);
+    }
+  });
+
+  it('dates an alert from another day', async () => {
+    const { setLanguage } = await import('../../src/i18n');
+    const last = new Date(2025, 0, 2, 13, 4).getTime();
+    try {
+      setLanguage('zh');
+      const { view, content } = openView(() => ({
+        state: 'watching',
+        devices: [],
+        unreachable: [],
+        alerts: [{ key: 'write-failed\na.md', kind: 'write-failed', msg: 'EIO', first: last, last, count: 1 }],
+      }));
+      await view.onOpen();
+      expect(content.allText()).toContain('2025-01-02 13:04 LAN Vault Sync 没能写入文件：EIO');
+    } finally {
+      setLanguage(null);
+    }
+  });
 });

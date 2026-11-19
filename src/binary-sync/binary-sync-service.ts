@@ -270,6 +270,7 @@ export class BinaryFileSyncService {
     if (content.byteLength > CHUNKED_FILE_THRESHOLD) {
       // One copy of the content is shared by the transfers to every peer.
       for (const deviceId of this.connectionManager.getConnectedPeerIds()) {
+        if (!this._peerTakes(deviceId, path)) continue;
         if (this._overPeerLimit(deviceId, content.byteLength)) continue;
         this._queueTransfer(deviceId, path, async () => out);
       }
@@ -333,6 +334,8 @@ export class BinaryFileSyncService {
     const file = this.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
 
+    // Outside the folder the peer (or this device) syncs: not read, not sent.
+    if (!this._peerTakes(deviceId, path)) return;
     // The peer said it would refuse a file this large: it is not sent.
     if (this._overPeerLimit(deviceId, file.stat.size)) return;
     if (file.stat.size > CHUNKED_FILE_THRESHOLD) {
@@ -349,6 +352,15 @@ export class BinaryFileSyncService {
       return;
     }
     this._sendMessage(deviceId, path, encodeFileData({ path, content: out.content, mtime: out.mtime, ...out.info }));
+  }
+
+  /**
+   * Whether a path lies in what the connection with this peer carries (see
+   * ConnectionManager.peerAccepts). The connection drops anything else as
+   * well; checking here first spares reading a file that would not go.
+   */
+  private _peerTakes(deviceId: string, path: string): boolean {
+    return this.connectionManager.peerAccepts?.(deviceId, path) ?? true;
   }
 
   /** Whether a peer said it takes no file of this size (see maxReceiveMB). */

@@ -260,3 +260,53 @@ describe('large files: sending', () => {
     expect(cm.sendToPaced).not.toHaveBeenCalled();
   });
 });
+
+describe('sending only what a peer syncs', () => {
+  it('does not read or send a file outside the folder the peer syncs', async () => {
+    const { vault, service, cm, log } = setup();
+    vault.setBinary('Home/s.bin', bytes(1000, 21));
+    vault.setBinary('Home/big.bin', bytes(9 * MB, 22));
+    (cm as any).peerAccepts = vi.fn((_id: string, path: string) => path.startsWith('Work/'));
+    const read = vi.spyOn(vault, 'readBinary');
+    await service.sendFileToPeer('peer', 'Home/s.bin');
+    await service.sendFileToPeer('peer', 'Home/big.bin');
+    await service.outgoingIdle();
+    expect(read).not.toHaveBeenCalled();
+    expect(cm.sendTo).not.toHaveBeenCalled();
+    expect(cm.sendToPaced).not.toHaveBeenCalled();
+    // Not a refusal: nothing for the user to see.
+    expect(log.recentRecords().some((r) => r.rule === 'too-large')).toBe(false);
+  });
+
+  it('sends a file in the folder as before', async () => {
+    const { vault, service, cm } = setup();
+    vault.setBinary('Work/s.bin', bytes(1000, 23));
+    (cm as any).peerAccepts = vi.fn((_id: string, path: string) => path.startsWith('Work/'));
+    await service.sendFileToPeer('peer', 'Work/s.bin');
+    expect(cm.sendTo).toHaveBeenCalledTimes(1);
+  });
+
+  it('broadcasts a large change only to the peers that sync its folder', async () => {
+    const { vault, service, cm } = setup();
+    vault.setBinary('Home/big.bin', bytes(9 * MB, 24));
+    (cm as any).getConnectedPeerIds = () => ['whole', 'work'];
+    (cm as any).peerAccepts = vi.fn((id: string, path: string) => id === 'whole' || path.startsWith('Work/'));
+    const hash = await service.broadcastFileChange('Home/big.bin');
+    await service.outgoingIdle();
+    expect(hash).toBeTruthy();
+    expect(cm.sendToPaced).toHaveBeenCalledTimes(1);
+    expect(cm.sendToPaced).toHaveBeenCalledWith('whole', expect.anything());
+  });
+
+  it('reads no file for a large broadcast that no peer takes, beyond its own hash', async () => {
+    const { vault, service, cm } = setup();
+    vault.setBinary('Home/big.bin', bytes(9 * MB, 25));
+    (cm as any).peerAccepts = () => false;
+    const read = vi.spyOn(vault, 'readBinary');
+    await service.broadcastFileChange('Home/big.bin');
+    await service.outgoingIdle();
+    // Read once for the hash the caller keeps; no transfer reads it again.
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(cm.sendToPaced).not.toHaveBeenCalled();
+  });
+});

@@ -34,6 +34,7 @@ Most sync solutions route your notes through a third-party server. LAN Vault Syn
 | **Offline-friendly** | Edit while offline; changes are merged automatically on reconnect |
 | **P2P architecture** | Every device is equal — no central server or hub required |
 | **Version history** | Every version replaced or deleted by sync is kept for 30 days in `.lan-vault-sync/history`; restore it from the recovery center |
+| **Sync one folder** | A device can sync only one folder of the vault (a work computer only `Work`, say); the other devices keep to it on their own |
 | **Delete protection** | Many deletions at once, or deletions found after sync was off, wait for your confirmation |
 | **Sync health** | The status bar and sync panel show, per device, whether everything is in sync, and raise an alert when something needs you |
 | **Diagnostics export** | One command writes a diagnostics file to share when something goes wrong, with the sync key masked |
@@ -125,9 +126,21 @@ Auto-discovery uses UDP broadcast, which is blocked on some managed Wi-Fi networ
 2. On **Device B**: go to **Settings → LAN Vault Sync → Devices by address** → enter `192.168.x.x:53712`.
 3. Alternatively, use the command palette: **LAN Vault Sync: Add device by address**.
 
+### Sync Only One Folder
+
+A device can be limited to one folder of the vault. Say the whole vault syncs between your home computer and your phone, and your work computer should get only the `Work` folder, without even the names of your other notes. On the work computer, open **Settings → LAN Vault Sync → What to sync → Sync only this folder**, click **Choose folder** and pick `Work`. Nothing has to be set on the other devices: each device says its folder when it connects, and the other side keeps to it. The work computer syncs only `Work` with your phone, and the phone, which has the whole vault, passes changes on to your home computer.
+
+- **Same name everywhere.** The folder is matched by its path, so it must have exactly the same name on every device, case included (`Work` and `work` are two different folders). The settings and the sync panel warn when the folder is missing on a device.
+- **Moving out is deleting.** Moving a file out of the folder deletes it on the devices that sync only that folder, and moving one in adds it. Deleted versions go to the version history and can be restored from the recovery center.
+- **Choose the folder before pairing.** Set it before the device first syncs, so that the rest of the vault never reaches it.
+- **Not with older versions.** A device with a folder set does not sync with devices that run a plugin version without this setting; update the plugin on every device.
+- **The folder name is sent in the clear** when two devices connect, before the encrypted connection is set up.
+
+The sync panel marks a connection limited to one folder with *syncs only Work*. Only one folder can be chosen, and ignored paths still apply inside it.
+
 ### Status Bar
 
-The status bar says whether this device is in sync with the others, for example *LAN Sync: in sync with 3 · 14:02*, or how many files are still different, or that something needs you. Click it to open the sync panel, which shows each device, any alerts, and buttons to dismiss them or export diagnostics.
+The status bar says whether this device is in sync with the others, for example *LAN Sync: in sync with 3 · 14:02*, or how many files are still different, or that something needs you. Click it to open the sync panel, which shows each device, any alerts, and buttons to dismiss them or export diagnostics. A device that is away stays listed, also after a restart, with when its files last all matched; it is dropped after 30 days without being seen.
 
 ### Commands
 
@@ -151,6 +164,7 @@ Version 0.4 renamed these commands, so hotkeys set for them before must be set a
 | Enable Sync | On | Master on/off switch |
 | Device Name | Auto-generated | Friendly name shown to other peers |
 | Port | `53712` | WebSocket listening port |
+| Sync only this folder | Whole vault | The one folder this device syncs; other devices keep to it (see [Sync Only One Folder](#sync-only-one-folder)) |
 | Ignored Paths | `.obsidian/`, `.trash/` | Glob patterns excluded from sync |
 | Sync Check Interval | `30s` | Period between full file-tree verification passes |
 | Debug Logging | Off | Write verbose logs to the developer console |
@@ -191,6 +205,7 @@ Version 0.4 renamed these commands, so hotkeys set for them before must be set a
 
 - All traffic is **LAN-only**. No data is sent to any external server.
 - Only devices that know the sync key can connect; the key itself is never sent over the network.
+- A device set to sync only one folder sends that folder's name unencrypted when it connects.
 - Since version 0.4, synced data is encrypted (AES-256-GCM) with keys derived from the sync key, fresh for each connection. Others on the network cannot read or change it.
 - No analytics, telemetry, or account required.
 
@@ -233,7 +248,8 @@ See [doc/debug-and-testing.md](doc/debug-and-testing.md) for a full multi-device
 - [x] QR code pairing — scan to add a peer instantly (mobile-friendly)
 - [ ] End-to-end encryption (TLS / WireGuard)
 - [ ] Sync progress indicator per file
-- [ ] Selective sync (include/exclude folders per peer)
+- [x] Sync only one folder on a device, which its peers keep to
+- [ ] Selective sync with several folders, or different folders per peer
 - [ ] Conflict resolution UI for binary files
 - [ ] mDNS / Bonjour discovery as alternative to UDP broadcast
 

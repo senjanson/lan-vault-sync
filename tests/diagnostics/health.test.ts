@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HealthMonitor, alertText, vaultDigest, type Alert } from '../../src/diagnostics/health';
 import { EventLog } from '../../src/diagnostics/event-log';
 import { buildDiagnostics, maskSettings } from '../../src/diagnostics/export';
 import { DEFAULT_SETTINGS } from '../../src/types';
+import { MemoryAdapter } from './memory-adapter';
 
 const MIN = 60 * 1000;
 
@@ -199,21 +200,28 @@ describe('emptied note alert', () => {
 });
 
 describe('devices that are gone', () => {
-  it('shows a disconnected device as disconnected for a while, then drops it', () => {
+  it('shows a disconnected device as disconnected, drops what was compared after a while, and forgets it after 30 days', () => {
     let now = 0;
-    const h = new HealthMonitor({ now: () => now, forgetPeerAfterMs: 30 * MIN });
+    const h = new HealthMonitor({ now: () => now, stuckMs: 0 });
     const log = new EventLog(null, { now: () => now });
     h.watch(log);
     log.record({ op: 'connect', peer: 'macb (macB)' });
-    h.noteExchange('macb', { name: 'macb (macB)', differing: ['a.md'] });
-    h.noteExchange('macb', { name: 'macb (macB)', differing: ['a.md'] });
-    expect(h.peers()[0]).toMatchObject({ id: 'macb', connected: true, unsynced: ['a.md'] });
+    h.noteExchange('macb', { name: 'macb (macB)', differing: [] });
+    now += MIN;
+    for (let i = 0; i < 3; i++) h.noteExchange('macb', { name: 'macb (macB)', differing: ['a.md'], clockOffsetMs: 60_000 });
+    expect(h.peers()[0]).toMatchObject({ id: 'macb', connected: true, unsynced: ['a.md'], lastConsistent: 0 });
+    expect(h.alerts().map((a) => a.kind).sort()).toEqual(['clock-skew', 'file-mismatch']);
     log.record({ op: 'disconnect', peer: 'macb' });
     now += 10 * MIN;
     expect(h.peers()[0]).toMatchObject({ id: 'macb', connected: false });
     // Not counted while away.
     expect(h.summary(['other'])).toMatchObject({ unsynced: 0 });
     now += 25 * MIN;
+    // Still listed, with when its files last all matched, but what was
+    // compared with it, and the alerts about it, are gone.
+    expect(h.peers()).toMatchObject([{ id: 'macb', connected: false, lastConsistent: 0, unsynced: [], differing: 0 }]);
+    expect(h.alerts()).toEqual([]);
+    now += 30 * 24 * 60 * MIN;
     expect(h.peers()).toEqual([]);
   });
 
@@ -275,5 +283,187 @@ describe('files too large for one side', () => {
     expect(h.peers()[0]).toMatchObject({ differing: 0, unsynced: [], tooLargeHere: ['big.bin'], tooLargeThere: ['out.bin'] });
     expect(h.summary(['pixel'])).toMatchObject({ consistent: 1, unsynced: 0 });
     expect(h.alerts()).toEqual([]);
+  });
+});
+
+describe('the folder a connection is limited to', () => {
+  it('lists the folder with the device, and raises and clears alerts for folders that do not overlap or are missing', async () => {
+    const { setLanguage } = await import('../../src/i18n');
+    const h = new HealthMonitor();
+    const notices: Alert[] = [];
+    h.onAlert((a) => notices.push(a));
+    h.notePeerConnected('mac', 'Work Mac');
+    h.notePeerScope('mac', { only: 'Work' });
+    expect(h.peers()[0].only).toBe('Work');
+    expect(h.alerts()).toEqual([]);
+
+    h.notePeerScope('mac', { disjoint: { here: 'Home', there: 'Work' } });
+    expect(h.peers()[0].only).toBeUndefined();
+    // Said again on the next connection: one alert, one notice.
+    h.notePeerScope('mac', { disjoint: { here: 'Home', there: 'Work' } });
+    expect(h.alerts().map((a) => a.kind)).toEqual(['scope-disjoint']);
+    expect(notices).toHaveLength(1);
+    try {
+      setLanguage('en');
+      expect(alertText(h.alerts()[0])).toContain('This device syncs the folder “Home” and Work Mac syncs the folder “Work”');
+      h.notePeerScope('mac', { disjoint: { here: '', there: '../bad' } });
+      expect(alertText(h.alerts()[0])).toContain('This device syncs the whole vault and Work Mac syncs the folder “../bad”');
+      setLanguage('zh');
+      expect(alertText(h.alerts()[0])).toContain('本设备同步整个库，Work Mac 同步“../bad”文件夹');
+    } finally {
+      setLanguage(null);
+    }
+
+    h.notePeerScope('mac', { only: 'Work', missingHere: 'Work' });
+    expect(h.alerts().map((a) => a.kind)).toEqual(['scope-missing']);
+    try {
+      setLanguage('zh');
+      expect(alertText(h.alerts()[0])).toContain('Work Mac 只同步“Work”文件夹，但本库里没有这个名字的文件夹');
+    } finally {
+      setLanguage(null);
+    }
+    // State alerts: they stay until the state goes, not for a day.
+    h.notePeerScope('mac', { only: 'Work' });
+    expect(h.alerts()).toEqual([]);
+
+    h.notePeerScope('mac', { disjoint: { here: 'A', there: 'B' }, missingHere: 'B' });
+    expect(h.alerts()).toHaveLength(2);
+    h.forgetPeer('mac');
+    expect(h.alerts()).toEqual([]);
+  });
+});
+
+describe('devices kept across restarts', () => {
+  afterEach(() => vi.useRealTimers());
+  const DAY = 24 * 60 * MIN;
+
+  it('saves each device and reads it back as disconnected, with when its files last all matched', async () => {
+    const adapter = new MemoryAdapter();
+    let now = 1_000_000;
+    const h = new HealthMonitor({ now: () => now });
+    await h.attachPeerStore(adapter);
+    h.notePeerConnected('pixel', 'Pixel');
+    h.noteExchange('pixel', { name: 'pixel (Pixel)', differing: [] });
+    const synced = now;
+    now += MIN;
+    h.noteExchange('pixel', { name: 'pixel (Pixel)', differing: ['a.md'] });
+    await h.flushPeers();
+    expect(adapter.folders.has('.lan-vault-sync')).toBe(true);
+    const saved = JSON.parse(adapter.files.get('.lan-vault-sync/peers.json') as string);
+    expect(saved).toEqual({ version: 1, peers: { pixel: { name: 'pixel (Pixel)', lastConsistent: synced, lastSeen: now } } });
+
+    // Restarted a day later.
+    now += DAY;
+    const h2 = new HealthMonitor({ now: () => now });
+    await h2.attachPeerStore(adapter);
+    expect(h2.peers()).toMatchObject([{ id: 'pixel', name: 'pixel (Pixel)', connected: false, lastConsistent: synced, differing: 0, unsynced: [] }]);
+    expect(h2.summary(['pixel'])).toMatchObject({ consistent: 0, unsynced: 0 });
+    expect(h2.alerts()).toEqual([]);
+    // Forgotten 30 days after it was last seen, and so in the file too.
+    now += 30 * DAY;
+    expect(h2.peers()).toEqual([]);
+    await h2.flushPeers();
+    expect(JSON.parse(adapter.files.get('.lan-vault-sync/peers.json') as string).peers).toEqual({});
+  });
+
+  it('keeps what is newer here when a device connected while the file was read', async () => {
+    const adapter = new MemoryAdapter();
+    adapter.files.set('.lan-vault-sync/peers.json', JSON.stringify({
+      version: 1,
+      peers: {
+        pixel: { name: 'pixel (Pixel)', lastConsistent: 500, lastSeen: 600 },
+        old: { name: 'old (Mac)', lastConsistent: 100, lastSeen: 200 },
+      },
+    }));
+    const now = 1000;
+    const h = new HealthMonitor({ now: () => now });
+    h.notePeerConnected('pixel', 'Pixel');
+    // The same Mac under a new ID: the old one will not come back.
+    h.notePeerConnected('new', 'Mac');
+    h.noteExchange('pixel', { name: 'pixel (Pixel)', differing: ['x.md'] });
+    await h.attachPeerStore(adapter);
+    const peers = h.peers();
+    expect(peers.map((p) => p.id).sort()).toEqual(['new', 'pixel']);
+    expect(peers.find((p) => p.id === 'pixel')).toMatchObject({ connected: true, lastConsistent: 500, lastSeen: 1000, differing: 1 });
+    await h.flushPeers();
+    const saved = JSON.parse(adapter.files.get('.lan-vault-sync/peers.json') as string);
+    expect(Object.keys(saved.peers).sort()).toEqual(['new', 'pixel']);
+  });
+
+  it('forgets a saved device at once when the same device connects under a new ID', async () => {
+    const adapter = new MemoryAdapter();
+    adapter.files.set('.lan-vault-sync/peers.json', JSON.stringify({ version: 1, peers: { old: { name: 'old (Mac)', lastSeen: 900 } } }));
+    const h = new HealthMonitor({ now: () => 1000 });
+    await h.attachPeerStore(adapter);
+    expect(h.peers()).toMatchObject([{ id: 'old', connected: false }]);
+    expect(h.peers()[0].lastConsistent).toBeUndefined();
+    h.notePeerConnected('new', 'Mac');
+    expect(h.peers().map((p) => p.id)).toEqual(['new']);
+  });
+
+  it('ignores a damaged file, an adapter that cannot read or write, and none at all', async () => {
+    const adapter = new MemoryAdapter();
+    adapter.files.set('.lan-vault-sync/peers.json', '{not json');
+    const h = new HealthMonitor();
+    await expect(h.attachPeerStore(adapter)).resolves.toBeUndefined();
+    expect(h.peers()).toEqual([]);
+    adapter.files.set('.lan-vault-sync/peers.json', JSON.stringify({ version: 1, peers: { a: 'x', b: { lastSeen: 'soon' }, '': {} } }));
+    const h2 = new HealthMonitor();
+    await h2.attachPeerStore(adapter);
+    expect(h2.peers()).toEqual([]);
+    for (const bad of [null, undefined, {}, { exists: async () => false }]) {
+      const h3 = new HealthMonitor();
+      await expect(h3.attachPeerStore(bad)).resolves.toBeUndefined();
+      h3.notePeerConnected('a', 'A');
+      await expect(h3.flushPeers()).resolves.toBeUndefined();
+    }
+    // A failed save is tried again with the next one.
+    const failing = new MemoryAdapter();
+    const h4 = new HealthMonitor();
+    await h4.attachPeerStore(failing);
+    failing.failWrites = true;
+    h4.notePeerConnected('a', 'A');
+    await expect(h4.flushPeers()).resolves.toBeUndefined();
+    failing.failWrites = false;
+    await h4.flushPeers();
+    expect(failing.files.has('.lan-vault-sync/peers.json')).toBe(true);
+  });
+
+  it('saves a few seconds after a device comes or goes, and times moved by exchanges at most once a minute', async () => {
+    vi.useFakeTimers();
+    const adapter = new MemoryAdapter();
+    const writes: string[] = [];
+    const write = adapter.write.bind(adapter);
+    adapter.write = async (p: string, d: string) => {
+      if (p.startsWith('.lan-vault-sync/peers.json')) writes.push(d);
+      return write(p, d);
+    };
+    const h = new HealthMonitor();
+    await h.attachPeerStore(adapter);
+    h.notePeerConnected('pixel', 'Pixel');
+    h.noteExchange('pixel', { name: 'pixel (Pixel)', differing: [] });
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(writes).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(writes).toHaveLength(1);
+    // An exchange every 10 s moves the times: saved once a minute, not each time.
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(10_000);
+      h.noteExchange('pixel', { name: 'pixel (Pixel)', differing: [] });
+    }
+    expect(writes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(writes).toHaveLength(2);
+    // Leaving is saved soon, and flushPeers saves at once.
+    h.notePeerDisconnected('pixel');
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(writes).toHaveLength(3);
+    // Nothing that is kept changed: nothing written.
+    h.noteWaiting('pixel', 3);
+    await h.flushPeers();
+    expect(writes).toHaveLength(3);
+    h.notePeerConnected('pixel', 'Pixel');
+    await h.flushPeers();
+    expect(writes).toHaveLength(4);
   });
 });

@@ -8,7 +8,24 @@
  */
 
 import { addStrings, t } from "../i18n";
-import type { EventLog, LogRecord } from "./event-log";
+import { readJsonWithBackup, writeAtomic, type AtomicAdapter } from "../utils/atomic-write";
+import { ensureParentDirectory } from "../utils/path-utils";
+import { logger } from "../logger";
+import { DATA_DIR, type EventLog, type LogRecord } from "./event-log";
+
+/**
+ * Each device this one has synced with: its name, when it was last seen
+ * and when its files last all matched, so that a device that is away is
+ * still listed after a restart (see attachPeerStore). Starts with a dot, so
+ * it is not synced.
+ */
+export const PEERS_FILE = `${DATA_DIR}/peers.json`;
+
+/** PEERS_FILE as saved. */
+interface SavedPeers {
+  version: 1;
+  peers: Record<string, { name?: string; lastConsistent?: number; lastSeen?: number }>;
+}
 
 export type AlertKind =
   | "keep-failed"
@@ -19,10 +36,15 @@ export type AlertKind =
   | "file-mismatch"
   | "history-near-cap"
   | "content-shrank"
-  | "too-large";
+  | "too-large"
+  | "scope-disjoint"
+  | "scope-missing";
 
 /** Kinds that describe a state: they go away when the state does. */
-const STATE_KINDS = new Set<AlertKind>(["clock-skew", "file-mismatch", "history-near-cap"]);
+const STATE_KINDS = new Set<AlertKind>(["clock-skew", "file-mismatch", "history-near-cap", "scope-disjoint", "scope-missing"]);
+
+/** State alerts about one peer (keyed by its ID), which go when it is forgotten. */
+const PEER_KINDS: AlertKind[] = ["file-mismatch", "clock-skew", "scope-disjoint", "scope-missing"];
 
 /**
  * Alerts about one file's step that failed (keyed by its path). They go
@@ -63,7 +85,13 @@ export function peerName(label: string | undefined): string {
 
 /** An alert's text in the user's language. */
 export function alertText(a: Pick<Alert, "kind" | "msg" | "params">): string {
-  const p = a.params ?? {};
+  let p = a.params ?? {};
+  if (a.kind === "scope-disjoint") {
+    // A side's folder, or "" for the whole vault, said in the user's language.
+    const side = (v: string | number | undefined) =>
+      v === undefined || v === "" ? t("scope.wholeVault") : t("scope.folder", { folder: String(v) });
+    p = { ...p, here: side(p.here), there: side(p.there) };
+  }
   const key =
     a.kind === "clock-skew" && p.ahead === 0
       ? "alert.clock-skew-behind"
@@ -76,8 +104,13 @@ export function alertText(a: Pick<Alert, "kind" | "msg" | "params">): string {
 export interface PeerHealth {
   id: string;
   name?: string;
-  /** False once it disconnected (it is listed for a while; see forgetPeerAfterMs). */
+  /**
+   * False once it disconnected. A device that is away stays listed, also
+   * after a restart, until it has not been seen for forgetPeerAfterMs.
+   */
   connected: boolean;
+  /** When it was last connected (now, while it is). */
+  lastSeen?: number;
   /** Last file list exchange. */
   lastExchange?: number;
   /** Last exchange at which every file matched. */
@@ -95,6 +128,8 @@ export interface PeerHealth {
   tooLargeHere: string[];
   /** Files of ours that the peer does not take, for their size (its maxReceiveMB). */
   tooLargeThere: string[];
+  /** The folder this connection is limited to, when it is (see notePeerScope). */
+  only?: string;
 }
 
 export interface HealthSummary {
@@ -120,8 +155,24 @@ export interface HealthOptions {
   clockSkewMs?: number;
   /** Event alerts drop out of the panel after this long. */
   keepEventsMs?: number;
-  /** A disconnected device is listed for this long, then forgotten. */
+  /**
+   * A device not seen for this long is forgotten (30 days). Until then it is
+   * listed as disconnected, with when its files last all matched.
+   */
   forgetPeerAfterMs?: number;
+  /**
+   * What was compared with a device (files not in sync, its clock, its
+   * folder) and the alerts about it are dropped once it has been away for
+   * this long (30 minutes): they say nothing of a device that is not there.
+   */
+  dropPeerStateAfterMs?: number;
+  /** PEERS_FILE is saved this long after a change... */
+  saveDelayMs?: number;
+  /**
+   * ...and, when only times moved (each file list exchange moves them), at
+   * most this often. flushPeers saves at once.
+   */
+  saveEveryMs?: number;
 }
 
 interface PeerState {
@@ -137,6 +188,12 @@ interface PeerState {
   tooLargeThere: string[];
   /** When it disconnected; unset while connected. */
   disconnectedAt?: number;
+  /** When it was last connected; see PeerHealth.lastSeen. */
+  lastSeen?: number;
+  /** See notePeerScope. */
+  only?: string;
+  /** Its comparison was dropped while it was away (see dropPeerStateAfterMs). */
+  dropped?: boolean;
 }
 
 /**
@@ -161,6 +218,19 @@ export class HealthMonitor {
   private readonly clockSkewMs: number;
   private readonly keepEventsMs: number;
   private readonly forgetPeerAfterMs: number;
+  private readonly dropPeerStateAfterMs: number;
+  private readonly saveDelayMs: number;
+  private readonly saveEveryMs: number;
+  /** Where PEERS_FILE is kept; null until attachPeerStore. */
+  private store: AtomicAdapter | null = null;
+  /** Reading PEERS_FILE; a save waits for it, so that it never writes over what was there unread. */
+  private loading: Promise<void> | null = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveDue = 0;
+  private dirty = false;
+  private lastSaved = "";
+  private lastSavedAt = -Infinity;
+  private saving: Promise<void> = Promise.resolve();
 
   constructor(options: HealthOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -169,7 +239,10 @@ export class HealthMonitor {
     this.stuckMs = options.stuckMs ?? 5 * 60 * 1000;
     this.clockSkewMs = options.clockSkewMs ?? 30 * 1000;
     this.keepEventsMs = options.keepEventsMs ?? 24 * 60 * 60 * 1000;
-    this.forgetPeerAfterMs = options.forgetPeerAfterMs ?? 30 * 60 * 1000;
+    this.forgetPeerAfterMs = options.forgetPeerAfterMs ?? 30 * 24 * 60 * 60 * 1000;
+    this.dropPeerStateAfterMs = options.dropPeerStateAfterMs ?? 30 * 60 * 1000;
+    this.saveDelayMs = options.saveDelayMs ?? 5 * 1000;
+    this.saveEveryMs = options.saveEveryMs ?? 60 * 1000;
   }
 
   /** Called when an alert should be shown as a notice (at most once per kind per 10 minutes). */
@@ -328,7 +401,11 @@ export class HealthMonitor {
   ): void {
     const now = this.now();
     const p = this.peer(peerId);
-    if (info.name) p.name = info.name;
+    if (info.name && p.name !== info.name) {
+      p.name = info.name;
+      this.markDirty(true);
+    }
+    p.dropped = false;
     // Apart on purpose (see tooLargeToSync): listed on their own, not as
     // files that are not yet in sync.
     p.tooLargeHere = [...(info.tooLarge?.here ?? [])].sort();
@@ -344,6 +421,9 @@ export class HealthMonitor {
     p.differing = next.size;
     p.lastExchange = now;
     if (next.size === 0) p.lastConsistent = now;
+    // An exchange is over a connection.
+    if (p.disconnectedAt === undefined) p.lastSeen = now;
+    this.markDirty(false);
     p.digestMatch = info.digestMatch;
     if (info.clockOffsetMs !== undefined) p.clockOffsetMs = info.clockOffsetMs;
 
@@ -413,9 +493,46 @@ export class HealthMonitor {
 
   forgetPeer(peerId: string): void {
     if (!this.peerStates.delete(peerId)) return;
-    this.clear("file-mismatch", peerId);
-    this.clear("clock-skew", peerId);
+    for (const kind of PEER_KINDS) this.clear(kind, peerId);
+    this.markDirty(true);
     this.changed();
+  }
+
+  /**
+   * The folders a connection with a peer is limited to; each call replaces
+   * what was said before. `only`: the folder both sides sync, when the
+   * connection is limited to one (listed with the device). `disjoint`: the
+   * two sides' folders ("" for the whole vault) do not overlap, so nothing
+   * syncs. `missingHere`: the peer's folder is not in this vault.
+   */
+  notePeerScope(
+    peerId: string,
+    info: { only?: string; disjoint?: { here: string; there: string }; missingHere?: string },
+  ): void {
+    const p = this.peer(peerId);
+    p.only = info.only || undefined;
+    const label = p.name ?? peerId;
+    const name = peerName(label);
+    if (info.disjoint) {
+      const params = { peer: name, here: info.disjoint.here, there: info.disjoint.there };
+      this.stateAlert("scope-disjoint", peerId, `Nothing syncs with ${label}: this device syncs "${params.here}", it syncs "${params.there}"`, label, params);
+    } else {
+      this.clear("scope-disjoint", peerId);
+    }
+    if (info.missingHere !== undefined) {
+      const params = { peer: name, folder: info.missingHere };
+      this.stateAlert("scope-missing", peerId, `${label} syncs only "${info.missingHere}", which is not in this vault`, label, params);
+    } else {
+      this.clear("scope-missing", peerId);
+    }
+    this.changed();
+  }
+
+  /** A state alert, raised again only when what it says changed. */
+  private stateAlert(kind: AlertKind, peerId: string, msg: string, peer: string, params: Record<string, string>): void {
+    const old = this.active.get(`${kind}\n${peerId}`);
+    if (old && JSON.stringify(old.params) === JSON.stringify(params)) return;
+    this.alert(kind, msg, { peer, key: peerId, params });
   }
 
   /*
@@ -431,10 +548,16 @@ export class HealthMonitor {
    */
 
   notePeerConnected(peerId: string, name?: string): void {
+    const known = this.peerStates.has(peerId);
     const p = this.peer(peerId);
     p.disconnectedAt = undefined;
+    p.lastSeen = this.now();
+    this.markDirty(!known);
     if (name) {
-      if (!p.name || peerName(p.name) !== name) p.name = `${peerId} (${name})`;
+      if (!p.name || peerName(p.name) !== name) {
+        p.name = `${peerId} (${name})`;
+        this.markDirty(true);
+      }
       for (const [id, other] of [...this.peerStates]) {
         if (id !== peerId && other.disconnectedAt !== undefined && other.name && peerName(other.name) === name) {
           this.forgetPeer(id);
@@ -448,14 +571,34 @@ export class HealthMonitor {
     const p = this.peerStates.get(peerId);
     if (!p || p.disconnectedAt !== undefined) return;
     p.disconnectedAt = this.now();
+    p.lastSeen = p.disconnectedAt;
+    p.dropped = false;
+    this.markDirty(true);
     this.changed();
   }
 
-  /** Forgets the devices disconnected for longer than forgetPeerAfterMs. */
+  /**
+   * Forgets the devices not seen for forgetPeerAfterMs, and drops what was
+   * compared with those away for dropPeerStateAfterMs.
+   */
   private _forgetGone(): void {
     const now = this.now();
     for (const [id, p] of [...this.peerStates]) {
-      if (p.disconnectedAt !== undefined && now - p.disconnectedAt >= this.forgetPeerAfterMs) this.forgetPeer(id);
+      if (p.disconnectedAt === undefined) continue;
+      if (now - p.disconnectedAt >= this.forgetPeerAfterMs) {
+        this.forgetPeer(id);
+      } else if (!p.dropped && now - p.disconnectedAt >= this.dropPeerStateAfterMs) {
+        p.dropped = true;
+        p.rounds = new Map();
+        p.differing = 0;
+        p.digestMatch = undefined;
+        p.waiting = 0;
+        p.clockOffsetMs = undefined;
+        p.tooLargeHere = [];
+        p.tooLargeThere = [];
+        p.only = undefined;
+        for (const kind of PEER_KINDS) this.clear(kind, id);
+      }
     }
   }
 
@@ -465,6 +608,7 @@ export class HealthMonitor {
       id,
       name: p.name,
       connected: p.disconnectedAt === undefined,
+      lastSeen: p.lastSeen,
       lastExchange: p.lastExchange,
       lastConsistent: p.lastConsistent,
       differing: p.differing,
@@ -474,6 +618,7 @@ export class HealthMonitor {
       clockOffsetMs: p.clockOffsetMs,
       tooLargeHere: p.tooLargeHere,
       tooLargeThere: p.tooLargeThere,
+      only: p.only,
     }));
   }
 
@@ -500,8 +645,145 @@ export class HealthMonitor {
     if (!p) {
       p = { rounds: new Map(), differing: 0, waiting: 0, tooLargeHere: [], tooLargeThere: [] };
       this.peerStates.set(id, p);
+      this.markDirty(true);
     }
     return p;
+  }
+
+  /*
+   * Keeping the devices across restarts (PEERS_FILE): each one's name, when
+   * it was last seen and when its files last all matched. A device read
+   * back is listed as disconnected since it was last seen.
+   */
+
+  /**
+   * Reads PEERS_FILE through the vault's adapter and saves it there from
+   * now on. What is already known here (a device that connected while it
+   * was read) is newer and is kept. Does nothing without an adapter that
+   * can read and write; a file that cannot be read is ignored.
+   */
+  attachPeerStore(adapter: unknown): Promise<void> {
+    const a = adapter as Partial<AtomicAdapter> | null | undefined;
+    if (!a || typeof a.exists !== "function" || typeof a.read !== "function" || typeof a.write !== "function") {
+      return Promise.resolve();
+    }
+    this.store = a as AtomicAdapter;
+    const loading = this.loadPeers(this.store);
+    this.loading = loading;
+    return loading;
+  }
+
+  private async loadPeers(adapter: AtomicAdapter): Promise<void> {
+    let saved: Partial<SavedPeers> | null = null;
+    try {
+      saved = await readJsonWithBackup<Partial<SavedPeers>>(adapter, PEERS_FILE);
+    } catch (err) {
+      logger.warn(`Could not read ${PEERS_FILE}:`, err);
+    }
+    const peers = saved && typeof saved === "object" && saved.peers && typeof saved.peers === "object" ? saved.peers : {};
+    const now = this.now();
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+    let any = false;
+    for (const [id, entry] of Object.entries(peers)) {
+      if (!id || !entry || typeof entry !== "object") continue;
+      const name = typeof entry.name === "string" && entry.name ? entry.name : undefined;
+      const lastConsistent = num(entry.lastConsistent);
+      const lastSeen = num(entry.lastSeen) ?? lastConsistent;
+      if (lastSeen === undefined || now - lastSeen >= this.forgetPeerAfterMs) continue;
+      const p = this.peerStates.get(id);
+      if (p) {
+        // Connected while the file was read: what is known now wins.
+        if (!p.name && name) p.name = name;
+        if (lastConsistent !== undefined && (p.lastConsistent === undefined || lastConsistent > p.lastConsistent)) {
+          p.lastConsistent = lastConsistent;
+        }
+        if (p.lastSeen === undefined || lastSeen > p.lastSeen) p.lastSeen = lastSeen;
+        any = true;
+        continue;
+      }
+      // The same device under a new ID connected meanwhile: the old ID will
+      // not come back (see notePeerConnected).
+      if (name && [...this.peerStates.values()].some((o) => o.name && peerName(o.name) === peerName(name))) continue;
+      this.peerStates.set(id, {
+        name,
+        rounds: new Map(),
+        differing: 0,
+        waiting: 0,
+        tooLargeHere: [],
+        tooLargeThere: [],
+        lastConsistent,
+        lastSeen,
+        disconnectedAt: lastSeen,
+        dropped: true,
+      });
+      any = true;
+    }
+    // Saved before the file was read (a device connected meanwhile): save now.
+    if (this.dirty) this.markDirty(true);
+    if (any) this.changed();
+  }
+
+  /** Saves PEERS_FILE now, when something in it changed. */
+  async flushPeers(): Promise<void> {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    await this.savePeers();
+  }
+
+  /**
+   * Something PEERS_FILE holds changed. `soon`: a device came, went or was
+   * renamed; otherwise only times moved, which is saved at most every
+   * saveEveryMs.
+   */
+  private markDirty(soon: boolean): void {
+    this.dirty = true;
+    if (!this.store) return;
+    const now = this.now();
+    const due = Math.max(now + this.saveDelayMs, soon ? 0 : this.lastSavedAt + this.saveEveryMs);
+    if (this.saveTimer && this.saveDue <= due) return;
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveDue = due;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      void this.savePeers();
+    }, due - now);
+  }
+
+  private serializePeers(): string {
+    const peers: SavedPeers["peers"] = {};
+    for (const [id, p] of [...this.peerStates].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      // Known only from a file request, say: nothing to keep.
+      if (p.lastSeen === undefined && p.lastConsistent === undefined && p.disconnectedAt === undefined) continue;
+      peers[id] = { name: p.name, lastConsistent: p.lastConsistent, lastSeen: p.lastSeen ?? p.disconnectedAt };
+    }
+    return JSON.stringify({ version: 1, peers } satisfies SavedPeers);
+  }
+
+  private savePeers(): Promise<void> {
+    const run = this.saving.then(async () => {
+      const adapter = this.store;
+      if (!adapter || !this.dirty) return;
+      if (this.loading) await this.loading;
+      this.dirty = false;
+      const text = this.serializePeers();
+      if (text === this.lastSaved) return;
+      try {
+        const withDirs = adapter as AtomicAdapter & { mkdir?(path: string): Promise<void> };
+        if (typeof withDirs.mkdir === "function") {
+          await ensureParentDirectory(withDirs as AtomicAdapter & { mkdir(path: string): Promise<void> }, PEERS_FILE);
+        }
+        await writeAtomic(adapter, PEERS_FILE, text);
+        this.lastSaved = text;
+        this.lastSavedAt = this.now();
+      } catch (err) {
+        this.dirty = true;
+        logger.warn(`Could not save ${PEERS_FILE}:`, err);
+      }
+    });
+    this.saving = run.catch(() => undefined);
+    return run;
   }
 
   private changed(): void {
@@ -552,7 +834,13 @@ addStrings("en", {
   "health.pending": "{name}: being compared (checked {time})",
   "health.waiting": "waiting for {count} file(s)",
   "health.clock": "clock off by {secs} s",
-  "health.disconnected": "{name}: disconnected (last checked {time})",
+  "alert.scope-disjoint": "LAN Vault Sync: nothing is synced with {peer}. This device syncs {here} and {peer} syncs {there}, which do not overlap. Change “Sync only this folder” on one of them.",
+  "alert.scope-missing": "LAN Vault Sync: {peer} syncs only the folder “{folder}”, and this vault has no folder of that name. If yours is named differently (case matters), rename it to match.",
+  "scope.wholeVault": "the whole vault",
+  "scope.folder": "the folder “{folder}”",
+  "health.disconnected": "{name}: disconnected · last in sync {time}",
+  "health.disconnectedNever": "{name}: disconnected · not fully in sync yet",
+  "health.only": "syncs only {folder}",
   "health.tooLargeHere": "{count} file(s) not received: larger than this device's limit",
   "health.tooLargeThere": "{count} file(s) not sent: larger than {name}'s limit",
   "health.dismiss": "Dismiss",
@@ -584,7 +872,13 @@ addStrings("zh", {
   "health.pending": "{name}：正在比对（{time} 检查）",
   "health.waiting": "等待 {count} 个文件",
   "health.clock": "时钟相差 {secs} 秒",
-  "health.disconnected": "{name}：已断开（{time} 最后检查）",
+  "alert.scope-disjoint": "LAN Vault Sync：和 {peer} 之间没有任何内容可同步：本设备同步{here}，{peer} 同步{there}，两者不重叠。请在其中一台设备上修改“仅同步此文件夹”。",
+  "alert.scope-missing": "LAN Vault Sync：{peer} 只同步“{folder}”文件夹，但本库里没有这个名字的文件夹。如果你的文件夹名字不同（区分大小写），请改成完全一样的名字。",
+  "scope.wholeVault": "整个库",
+  "scope.folder": "“{folder}”文件夹",
+  "health.disconnected": "{name}：已断开 · 上次同步 {time}",
+  "health.disconnectedNever": "{name}：已断开 · 还没有完整同步过",
+  "health.only": "仅同步 {folder}",
   "health.tooLargeHere": "{count} 个文件未接收：超过本设备的接收大小上限",
   "health.tooLargeThere": "{count} 个文件未发送：超过 {name} 的接收大小上限",
   "health.dismiss": "知道了",

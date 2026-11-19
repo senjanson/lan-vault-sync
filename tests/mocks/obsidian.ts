@@ -56,3 +56,18 @@ export class Notice {
   hide() {}
 }
 export function setIcon(_el: any, _icon: string) {}
+export class SuggestModal<T> extends Modal {
+  placeholder = '';
+  setPlaceholder(text: string) { this.placeholder = text; }
+  getSuggestions(_query: string): T[] { return []; }
+}
+export class FuzzySuggestModal<T> extends SuggestModal<T> {
+  getItems(): T[] { return []; }
+  getItemText(_item: T): string { return ''; }
+  onChooseItem(_item: T, _evt?: unknown): void {}
+  /** Plain substring match, for tests (Obsidian's is fuzzy). */
+  getSuggestions(query: string): T[] {
+    const q = query.toLowerCase();
+    return this.getItems().filter((i) => this.getItemText(i).toLowerCase().includes(q));
+  }
+}

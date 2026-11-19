@@ -294,7 +294,7 @@
 
 .sync-log-info {
   flex: 1;
-  min-width: 0;
+  flex-shrink: 0;
   overflow: hidden;
 }
 
@@ -470,7 +470,7 @@
 
 .lan-sync-recovery-bar input {
   flex: 1;
-  min-width: 0;
+  flex-shrink: 0;
 }
 
 .lan-sync-recovery-group-head {
@@ -491,4 +491,14 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 4px;
+}
+
+/* Settings: the folder sync is limited to, beside its button. */
+.lan-sync-sync-folder {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(220px, 40vw);
+  flex-shrink: 0;
 }

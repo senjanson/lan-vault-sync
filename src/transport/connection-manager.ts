@@ -39,6 +39,16 @@ import { PROTOCOL_VERSION, SEND_BUFFER_LIMIT, SEND_PACE_POLL_MS, WS_PING_INTERVA
 import { SecureChannel } from './secure-channel';
 import { logger } from '../logger';
 import { supportsIncomingConnections } from '../utils/runtime';
+import {
+  checkScope,
+  intersectScopes,
+  isLimited,
+  inScope,
+  messagePaths,
+  messagePathsOf,
+  normalizeSyncFolder,
+  type SyncScope,
+} from '../sync/sync-scope';
 
 interface PeerConnection {
   deviceId: string;
@@ -64,6 +74,13 @@ interface PeerConnection {
   sealingBytes?: number;
   /** Per-peer message queue to serialize async message handling */
   messageQueue: Promise<void>;
+  /** The folder the peer said it syncs (trimmed); none from an older version. */
+  syncFolder?: string;
+  /**
+   * What this connection carries (see intersectScopes): "" for everything,
+   * when neither side is limited, and then no message is looked into.
+   */
+  scope: SyncScope;
 }
 
 type DecodedMessage = ReturnType<typeof decodeMessage>;
@@ -133,6 +150,7 @@ export class ConnectionManager {
   private onPeerConnectedCb: ((device: DeviceInfo) => void) | null = null;
   private onPeerDisconnectedCb: ((deviceId: string) => void) | null = null;
   private onAuthFailedCb: ((failure: AuthFailure) => void) | null = null;
+  private onScopeSplitCb: ((deviceId: string, paths: string[]) => void) | null = null;
   private readonly acceptsIncomingConnections: boolean;
 
   constructor(private settings: LANSyncSettings, private vaultId: string) {
@@ -178,6 +196,42 @@ export class ConnectionManager {
 
   onAuthFailed(cb: (failure: AuthFailure) => void): void {
     this.onAuthFailedCb = cb;
+  }
+
+  /**
+   * Called when a message about paths both in and out of a connection's
+   * folder (a rename or move across its edge) was dropped, going out or
+   * coming in. The file list exchange settles such a file on both sides.
+   */
+  onScopeSplit(cb: (deviceId: string, paths: string[]) => void): void {
+    this.onScopeSplitCb = cb;
+  }
+
+  /** The folder this device syncs, from the settings (see normalizeSyncFolder). */
+  localScope(): SyncScope {
+    return normalizeSyncFolder(this.settings.syncFolder ?? '');
+  }
+
+  /**
+   * The folder a connected peer said in its handshake that it syncs, as it
+   * gave it (trimmed); undefined when not connected or for an older version.
+   */
+  peerSyncFolder(deviceId: string): string | undefined {
+    return this.peers.get(deviceId)?.syncFolder;
+  }
+
+  /**
+   * What the connection with a peer carries: what both sides sync. For a
+   * device that is not connected, what this device syncs.
+   */
+  connectionScope(deviceId: string): SyncScope {
+    const peer = this.peers.get(deviceId);
+    return peer ? peer.scope : this.localScope();
+  }
+
+  /** Whether a path may go to (or come from) a peer. */
+  peerAccepts(deviceId: string, path: string): boolean {
+    return inScope(path, this.connectionScope(deviceId));
   }
 
   /** Called when the list of getUnreachablePeers changes. */
@@ -256,6 +310,7 @@ export class ConnectionManager {
           return null;
         }
         if (!this._checkVersion(payload, address)) return null;
+        if (!this._checkScopeSupport(payload, address)) return null;
 
         // The listening side must prove it knows the sync key before we
         // send it anything.
@@ -287,11 +342,12 @@ export class ConnectionManager {
             lastSeen: Date.now(),
             acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
             maxReceiveBytes: typeof payload.maxReceiveBytes === 'number' && payload.maxReceiveBytes > 0 ? payload.maxReceiveBytes : undefined,
+            syncFolder: this._peerFolder(payload),
           },
           channel: await SecureChannel.derive(key, nonce, payload.nonce, true),
         };
       }, client);
-      ws.send(encodeHandshake({ ...this.localInfo, nonce, protocolVersion: PROTOCOL_VERSION, maxReceiveBytes: this.receiveLimitBytes() }));
+      ws.send(encodeHandshake({ ...this._hello(), nonce, protocolVersion: PROTOCOL_VERSION, maxReceiveBytes: this.receiveLimitBytes() }));
     });
 
     client.connect();
@@ -341,12 +397,58 @@ export class ConnectionManager {
   /** Send raw bytes to a specific peer */
   sendTo(deviceId: string, data: Uint8Array): void {
     const peer = this.peers.get(deviceId);
-    if (peer) this._send(peer, data);
+    if (peer && this._mayGo(peer, data)) this._send(peer, data);
   }
 
   /** Broadcast raw bytes to all connected peers */
   broadcast(data: Uint8Array): void {
-    for (const peer of this.peers.values()) this._send(peer, data);
+    // The message is read at most once, and only for a limited connection.
+    let paths: string[] | null | undefined;
+    for (const peer of this.peers.values()) {
+      if (peer.scope !== '') {
+        if (paths === undefined) paths = messagePaths(data);
+        if (!this._passes(peer, paths, 'outgoing')) continue;
+      }
+      this._send(peer, data);
+    }
+  }
+
+  /**
+   * Whether a message may go to a peer: on a connection limited to a
+   * folder, only messages about paths in it go. A connection that carries
+   * everything does not look into the message at all.
+   */
+  private _mayGo(peer: PeerConnection, data: Uint8Array): boolean {
+    if (peer.scope === '') return true;
+    return this._passes(peer, messagePaths(data), 'outgoing');
+  }
+
+  /**
+   * Whether a message about these paths may cross a limited connection.
+   * One that may not is dropped; one about paths both in and out of the
+   * folder is reported (see onScopeSplit). Only the message type is logged:
+   * names outside the folder are not to be kept on a device limited to it.
+   */
+  private _passes(peer: PeerConnection, paths: string[] | null, way: 'outgoing' | 'incoming', type?: MessageType): boolean {
+    const verdict = checkScope(paths, peer.scope);
+    if (verdict === 'pass') return true;
+    logger.debug(`Dropped an ${way} ${type === undefined ? 'message' : `${MessageType[type] ?? type} message`} outside the folder shared with ${peer.deviceId} (${verdict})`);
+    if (verdict === 'split' && paths) {
+      if (way === 'outgoing') this._reportSplit(peer.deviceId, paths);
+      else {
+        const all = paths;
+        peer.messageQueue = peer.messageQueue.then(() => this._reportSplit(peer.deviceId, all));
+      }
+    }
+    return false;
+  }
+
+  private _reportSplit(deviceId: string, paths: string[]): void {
+    try {
+      this.onScopeSplitCb?.(deviceId, paths);
+    } catch (err) {
+      logger.error(`Error handling a message dropped at the folder's edge (${deviceId}):`, err);
+    }
   }
 
   /** Encrypt and send, keeping the order in which messages were given. */
@@ -385,7 +487,8 @@ export class ConnectionManager {
    * (plain and encrypted) while a slow device takes them. Frames are taken
    * from `frames` only when they can go, so they can be built as needed.
    * Resolves false when the peer disconnects (or its connection is replaced)
-   * before everything was sent; the rest is not taken.
+   * before everything was sent; the rest is not taken. Frames outside the
+   * connection's folder are skipped (see sendTo); that is not a failure.
    */
   async sendToPaced(
     deviceId: string,
@@ -397,6 +500,10 @@ export class ConnectionManager {
     const live = () => !this.stopped && this.peers.get(deviceId) === peer && peer.ws.readyState === SOCKET_OPEN;
     const pause = () => new Promise((resolve) => setTimeout(resolve, SEND_PACE_POLL_MS));
     for await (const frame of frames) {
+      if (!this._mayGo(peer, frame)) {
+        if (!live()) return false;
+        continue;
+      }
       // A frame that would go over the limit waits until there is room; one
       // larger than the limit still goes once nothing else waits.
       while (live() && this._waiting(peer) > 0 && this._waiting(peer) + frame.byteLength > limit) await pause();
@@ -437,6 +544,7 @@ export class ConnectionManager {
       port: p.port,
       vaultId: p.vaultId,
       lastSeen: Date.now(),
+      syncFolder: p.syncFolder,
     }));
   }
 
@@ -510,12 +618,13 @@ export class ConnectionManager {
           return null;
         }
         if (!this._checkVersion(payload, ip)) return null;
+        if (!this._checkScopeSupport(payload, ip)) return null;
         if (!key) return null;
 
         // Prove we know the key, then wait for the peer to do the same.
         const serverNonce = randomNonce();
         const proof = await authProof(key, ackMessage(payload.nonce, serverNonce, this.settings.deviceId));
-        ws.send(encodeHandshakeAck({ ...this.localInfo, nonce: serverNonce, proof, protocolVersion: PROTOCOL_VERSION, maxReceiveBytes: this.receiveLimitBytes() }));
+        ws.send(encodeHandshakeAck({ ...this._hello(), nonce: serverNonce, proof, protocolVersion: PROTOCOL_VERSION, maxReceiveBytes: this.receiveLimitBytes() }));
         pending = {
           clientNonce: payload.nonce,
           serverNonce,
@@ -528,6 +637,7 @@ export class ConnectionManager {
             lastSeen: Date.now(),
             acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
             maxReceiveBytes: typeof payload.maxReceiveBytes === 'number' && payload.maxReceiveBytes > 0 ? payload.maxReceiveBytes : undefined,
+            syncFolder: this._peerFolder(payload),
           },
         };
         return 'continue';
@@ -558,6 +668,38 @@ export class ConnectionManager {
     const version = typeof payload.protocolVersion === 'number' ? payload.protocolVersion : 1;
     if (version === PROTOCOL_VERSION) return true;
     this._authFailed(payload.deviceName, address, version < PROTOCOL_VERSION ? 'outdated' : 'newer', payload.deviceId);
+    return false;
+  }
+
+  /**
+   * This device's handshake: who it is and the folder it syncs. The folder
+   * is sent as set (the other side checks it, see normalizeSyncFolder); the
+   * field also tells the other side this version keeps to folders.
+   */
+  private _hello(): HandshakePayload {
+    return { ...this.localInfo, syncFolder: this.settings.syncFolder ?? '' };
+  }
+
+  /** The folder a peer gave in its handshake, trimmed; undefined if it gave none. */
+  private _peerFolder(payload: HandshakePayload): string | undefined {
+    return typeof payload.syncFolder === 'string' ? payload.syncFolder.trim() : undefined;
+  }
+
+  /**
+   * A device that syncs one folder pairs only with versions that keep to
+   * it: an older one does not say a folder in its handshake, and would be
+   * sent (and send) everything. Reported as outdated, so the user updates
+   * it. A device that syncs the whole vault pairs with older ones as before.
+   */
+  private _checkScopeSupport(payload: HandshakePayload, address: string): boolean {
+    if (typeof payload.syncFolder === 'string' || !isLimited(this.localScope())) return true;
+    this._authFailed(
+      payload.deviceName,
+      address,
+      'outdated',
+      payload.deviceId,
+      'its version cannot sync only one folder, which this device is set to',
+    );
     return false;
   }
 
@@ -723,6 +865,11 @@ export class ConnectionManager {
       channel,
       sendChain: Promise.resolve(),
       messageQueue: Promise.resolve(),
+      syncFolder: device.syncFolder,
+      // Worked out once: every message on a limited connection is checked
+      // against it. A folder the peer gave that is not valid gives null:
+      // nothing goes either way (the coordinator tells the user).
+      scope: intersectScopes(this.localScope(), normalizeSyncFolder(device.syncFolder ?? '')),
     };
 
     // Ping keepalive; a peer that stops answering is dropped.
@@ -777,6 +924,7 @@ export class ConnectionManager {
       return;
     }
     if (msg.type === MessageType.HANDSHAKE_ACK) return;
+    if (p.scope !== '' && !this._passes(p, messagePathsOf(msg.type, msg.payload), 'incoming', msg.type)) return;
 
     // Serialize message handling per peer to prevent race conditions.
     // Each message waits for the previous one to finish before starting.

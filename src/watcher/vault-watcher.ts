@@ -33,8 +33,10 @@ export class VaultWatcher {
     private vault: Vault,
     ignoredPaths: string[],
     private workspace?: Workspace,
+    /** Sync only this folder (settings.syncFolder); "" for the whole vault. */
+    syncFolder: string = "",
   ) {
-    this.filter = new FileFilter(ignoredPaths);
+    this.filter = new FileFilter(ignoredPaths, syncFolder);
   }
 
   updateIgnoredPaths(paths: string[]): void {
@@ -140,10 +142,28 @@ export class VaultWatcher {
     file: TAbstractFile,
     oldPath?: string,
   ): void {
+    // A rename across the edge of what is synced (an ignored path, or the
+    // folder this device syncs) is a deletion or a creation to peers: a
+    // file moved out is gone for them, one moved in is new.
+    if (type === "rename" && oldPath) {
+      const newIgnored = this.filter.shouldIgnore(file.path);
+      const oldIgnored = this.filter.shouldIgnore(oldPath);
+      if (newIgnored && oldIgnored) return;
+      if (newIgnored || oldIgnored) {
+        // A rename this plugin made for a peer is not sent back out.
+        if (this._isRemoteWrite(file.path, "rename")) return;
+        if (newIgnored) {
+          this._onMovedOut(file, oldPath);
+        } else {
+          this._onMovedIn(file);
+        }
+        return;
+      }
+    }
+
     if (file instanceof TFolder) {
       if (type === "modify" || file.isRoot()) return;
       if (this.filter.shouldIgnore(file.path)) return;
-      if (oldPath && this.filter.shouldIgnore(oldPath)) return;
       if (this._isRemoteWrite(file.path, type)) return;
       this.folderCb?.({ type, path: file.path, oldPath });
       return;
@@ -153,7 +173,6 @@ export class VaultWatcher {
     const path = file.path;
 
     if (this.filter.shouldIgnore(path)) return;
-    if (oldPath && this.filter.shouldIgnore(oldPath)) return;
 
     // Skip events caused by our own remote writes. Text modifications are
     // let through: the coordinator recognises its own writes by content, so
@@ -183,6 +202,31 @@ export class VaultWatcher {
     } else {
       this._emit(type, path, oldPath);
     }
+  }
+
+  /** A file or folder moved from a synced path to one that is not: deleted at its old path. */
+  private _onMovedOut(file: TAbstractFile, oldPath: string): void {
+    if (file instanceof TFolder) {
+      if (!file.isRoot()) this.folderCb?.({ type: "delete", path: oldPath });
+      return;
+    }
+    if (!(file instanceof TFile)) return;
+    // An edit still waiting under the old name went out of sync with it.
+    this.takePendingModify(oldPath);
+    this.remoteWritePaths.delete(`write\0${oldPath}`);
+    logger.debug(`Moved out of sync: ${oldPath} -> ${file.path}`);
+    this._emit("delete", oldPath);
+  }
+
+  /** A file or folder moved from a path that is not synced to one that is: new at its path. */
+  private _onMovedIn(file: TAbstractFile): void {
+    if (file instanceof TFolder) {
+      if (!file.isRoot()) this.folderCb?.({ type: "create", path: file.path });
+      return;
+    }
+    if (!(file instanceof TFile)) return;
+    logger.debug(`Moved into sync: ${file.path}`);
+    this._emit("create", file.path);
   }
 
   private _movePendingModify(oldPath: string, newPath: string): void {

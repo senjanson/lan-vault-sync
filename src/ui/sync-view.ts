@@ -2,7 +2,7 @@ import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import { SYNC_VIEW_TYPE } from '../constants';
 import { SyncState, DeviceInfo } from '../types';
 import { canUseNodeRuntime } from '../utils/runtime';
-import { t, formatTime } from '../i18n';
+import { t, formatTime, formatWhen } from '../i18n';
 import type { HeldDeletion } from '../sync/delete-breaker';
 import type { Alert, HealthSummary, PeerHealth } from '../diagnostics/health';
 import { alertText, peerName } from '../diagnostics/health';
@@ -144,20 +144,27 @@ export class SyncView extends ItemView {
     const section = container.createDiv({ cls: 'lan-sync-section' });
     section.createEl('h4', { text: t('health.title') });
     const connected = new Set(devices.map((d) => d.deviceId));
-    // A device that left is listed as disconnected for a while (see
-    // HealthMonitor.forgetPeerAfterMs), without its old comparison.
-    const shown = health.filter((p) => p.lastExchange !== undefined);
+    // A device that is away stays listed as disconnected, with when its
+    // files last all matched (see HealthMonitor.forgetPeerAfterMs), without
+    // its old comparison. Connected devices first.
+    const away = (p: PeerHealth) => !connected.has(p.id) || p.connected === false;
+    const shown = health
+      .filter((p) => p.lastExchange !== undefined || p.connected === false)
+      .sort((a, b) => Number(away(a)) - Number(away(b)));
     if (shown.length === 0) {
       section.createEl('p', { text: t('health.noPeers'), cls: 'lan-sync-muted' });
     } else {
       const list = section.createEl('ul', { cls: 'lan-sync-device-list' });
       for (const p of shown) {
         const name = devices.find((d) => d.deviceId === p.id)?.deviceName || peerName(p.name ?? p.id);
-        const time = formatTime(p.lastExchange!);
-        if (!connected.has(p.id) || p.connected === false) {
-          list.createEl('li', { text: t('health.disconnected', { name, time }), cls: 'lan-sync-muted' });
+        if (away(p)) {
+          const text = p.lastConsistent !== undefined
+            ? t('health.disconnected', { name, time: formatWhen(p.lastConsistent) })
+            : t('health.disconnectedNever', { name });
+          list.createEl('li', { text, cls: 'lan-sync-muted' });
           continue;
         }
+        const time = formatWhen(p.lastExchange!);
         const parts = [
           p.unsynced.length > 0
             ? t('health.differing', { name, count: p.unsynced.length, time })
@@ -165,6 +172,8 @@ export class SyncView extends ItemView {
               ? t('health.pending', { name, time })
               : t('health.consistent', { name, time }),
         ];
+        // The connection is limited to one folder (this side's or the peer's).
+        if (p.only) parts.push(t('health.only', { folder: p.only }));
         // Apart by design: one side does not take files that large.
         const here = p.tooLargeHere ?? [];
         const there = p.tooLargeThere ?? [];
@@ -190,7 +199,7 @@ export class SyncView extends ItemView {
       section.createEl('h5', { text: t('health.alerts') });
       for (const a of alerts) {
         const row = section.createDiv({ cls: 'lan-sync-alert' });
-        const time = formatTime(a.last);
+        const time = formatWhen(a.last);
         row.createSpan({
           text: `${time} ${alertText(a)}${a.count > 1 ? ` (×${a.count})` : ''}`,
           cls: 'lan-sync-state-error',

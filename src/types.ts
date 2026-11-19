@@ -11,6 +11,12 @@ export interface LANSyncSettings {
   autoSync: boolean;
   syncIntervalMs: number;
   ignoredPaths: string[];
+  /**
+   * Sync only this folder of the vault (its path, as in the vault); empty
+   * to sync the whole vault. Peers keep to it too: they learn it from the
+   * handshake and send nothing outside it. See sync/sync-scope.
+   */
+  syncFolder: string;
   manualPeers: string[]; // "ip:port" list
   /** Shared pairing key; only devices with the same key can connect. */
   syncKey: string;
@@ -38,6 +44,7 @@ export const DEFAULT_SETTINGS: LANSyncSettings = {
   autoSync: true,
   syncIntervalMs: 30000,
   ignoredPaths: [".obsidian/", ".trash/"],
+  syncFolder: "",
   manualPeers: [],
   syncKey: "",
   vaultId: "",
@@ -64,6 +71,11 @@ export interface DeviceInfo {
   instance?: string;
   /** Largest file the device takes, in bytes; 0 or none for no limit. */
   maxReceiveBytes?: number;
+  /**
+   * The only folder the device syncs, as it said in its handshake; "" for
+   * its whole vault. None for a version that does not limit sync to a folder.
+   */
+  syncFolder?: string;
 }
 
 // ─── File events ─────────────────────────────────────────
@@ -185,6 +197,13 @@ export interface HandshakePayload {
   instance?: string;
   /** See DeviceInfo.maxReceiveBytes; so that a peer does not send what we would refuse. */
   maxReceiveBytes?: number;
+  /**
+   * The only folder the sender syncs; "" for its whole vault. Always sent
+   * by versions that can limit sync to a folder, so its presence also says
+   * the sender keeps to the other side's folder. Untrusted input: see
+   * normalizeSyncFolder.
+   */
+  syncFolder?: string;
 }
 
 export interface AuthPayload {

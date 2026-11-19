@@ -1,6 +1,6 @@
 import { Plugin } from 'obsidian';
 import { SyncState } from '../types';
-import { t, formatTime } from '../i18n';
+import { t, formatWhen } from '../i18n';
 import type { HealthSummary } from '../diagnostics/health';
 
 export class StatusBar {
@@ -44,7 +44,7 @@ export class StatusBar {
           icon.setText('⚠️');
           text.setText(t('status.unsynced', { count: health.unsynced }));
         } else if (health && health.consistent > 0 && health.consistent === peerCount && health.since) {
-          const time = formatTime(health.since, { hour: 'numeric', minute: '2-digit' });
+          const time = formatWhen(health.since);
           text.setText(t('status.consistent', { count: health.consistent, time }));
         }
         break;

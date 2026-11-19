@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TFile } from "obsidian";
+import { TFile, TFolder } from "obsidian";
 
 import { DEBOUNCE_MS } from "../../src/constants";
 import { VaultWatcher } from "../../src/watcher/vault-watcher";
-import type { FileChangeEvent } from "../../src/types";
+import type { FileChangeEvent, FolderChangeEvent } from "../../src/types";
 
 type EventCallback = (...args: any[]) => void;
 
@@ -34,6 +34,10 @@ class FakeWorkspace extends FakeEventSource {}
 
 function createFile(path: string): TFile {
   return Object.assign(new TFile(), { path });
+}
+
+function createFolder(path: string): TFolder {
+  return Object.assign(new TFolder(), { path });
 }
 
 describe("VaultWatcher", () => {
@@ -154,6 +158,116 @@ describe("VaultWatcher", () => {
     vault.trigger("delete", createFile("image.png"));
 
     expect(events.map((e) => [e.type, e.path])).toEqual([["delete", "note.md"]]);
+  });
+});
+
+describe("VaultWatcher sync edge", () => {
+  let vault: FakeVault;
+  let events: FileChangeEvent[];
+  let folders: FolderChangeEvent[];
+  let watcher: VaultWatcher;
+
+  function start(ignored: string[], syncFolder = ""): void {
+    vault = new FakeVault();
+    watcher = new VaultWatcher(vault as any, ignored, undefined, syncFolder);
+    events = [];
+    folders = [];
+    watcher.onFileChanged((event) => events.push(event));
+    watcher.onFolderChanged((event) => folders.push(event));
+    watcher.start();
+  }
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    watcher.stop();
+    vi.useRealTimers();
+  });
+
+  it("ignores files outside the synced folder", () => {
+    start([], "Work");
+    vault.trigger("create", createFile("Personal/a.md"));
+    vault.trigger("modify", createFile("Workshop/b.md"));
+    vault.trigger("create", createFolder("Personal"));
+    vault.trigger("create", createFile("Work/c.md"));
+    vi.advanceTimersByTime(DEBOUNCE_MS);
+
+    expect(events.map((e) => [e.type, e.path])).toEqual([["create", "Work/c.md"]]);
+    expect(folders).toEqual([]);
+  });
+
+  it("takes a file moved out of the synced folder as deleted", () => {
+    start([], "Work");
+    const file = createFile("Work/a.md");
+    vault.trigger("modify", file);
+    file.path = "Personal/a.md";
+    vault.trigger("rename", file, "Work/a.md");
+    vi.advanceTimersByTime(DEBOUNCE_MS * 2);
+
+    // The edit waiting under the old name went out with the file.
+    expect(events.map((e) => [e.type, e.path])).toEqual([["delete", "Work/a.md"]]);
+    expect(events[0].isTextFile).toBe(true);
+  });
+
+  it("takes a file moved into the synced folder as new", () => {
+    start([], "Work");
+    const file = createFile("Work/img.png");
+    vault.trigger("rename", file, "Personal/img.png");
+
+    expect(events.map((e) => [e.type, e.path, e.oldPath])).toEqual([["create", "Work/img.png", undefined]]);
+  });
+
+  it("takes folders moved across the edge as deleted or new", () => {
+    start([], "Work");
+    const out = createFolder("Archive/Old");
+    vault.trigger("rename", out, "Work/Old");
+    const into = createFolder("Work/New");
+    vault.trigger("rename", into, "Inbox/New");
+    const outside = createFolder("Inbox/Moved");
+    vault.trigger("rename", outside, "Inbox/Before");
+
+    expect(folders).toEqual([
+      { type: "delete", path: "Work/Old" },
+      { type: "create", path: "Work/New" },
+    ]);
+  });
+
+  it("applies the same to ignored paths", () => {
+    start(["Private/"]);
+    const a = createFile("Private/a.md");
+    vault.trigger("rename", a, "Notes/a.md");
+    const b = createFile("Notes/b.md");
+    vault.trigger("rename", b, "Private/b.md");
+    const c = createFile("Private/c.md");
+    vault.trigger("rename", c, "Private/old-c.md");
+
+    expect(events.map((e) => [e.type, e.path])).toEqual([
+      ["delete", "Notes/a.md"],
+      ["create", "Notes/b.md"],
+    ]);
+  });
+
+  it("does not send back a rename across the edge made for a peer", () => {
+    start(["Private/"]);
+    watcher.markRemoteWrite("Private/a.md", "rename");
+    vault.trigger("rename", createFile("Private/a.md"), "Notes/a.md");
+
+    expect(events).toEqual([]);
+  });
+
+  it("syncs nothing for an invalid folder", () => {
+    start([], "../x");
+    vault.trigger("create", createFile("a.md"));
+    vault.trigger("create", createFile("../x/a.md"));
+
+    expect(events).toEqual([]);
+  });
+
+  it("keeps renames within the synced folder", () => {
+    start([], "Work");
+    const file = createFile("Work/b.md");
+    vault.trigger("rename", file, "Work/a.md");
+
+    expect(events.map((e) => [e.type, e.path, e.oldPath])).toEqual([["rename", "Work/b.md", "Work/a.md"]]);
   });
 });
 

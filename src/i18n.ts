@@ -78,6 +78,14 @@ const en = {
   "set.peersHeading": "Devices by address",
   "set.peersIntro": "Add peers manually if auto-discovery doesn't work. Format: ip:port",
   "set.addDevice": "Add device",
+  "set.scopeHeading": "What to sync",
+  "set.syncFolder": "Sync only this folder",
+  "set.syncFolderDesc": "Only this folder is synced with other devices, and they keep to it on their own. The folder must have exactly the same name on every device (case matters). Moving a file out of the folder deletes it on the other devices (it can be restored from the recovery center). Choose the folder before pairing. With a folder set, this device does not sync with older versions of the plugin.",
+  "set.syncFolderWhole": "Whole vault",
+  "set.syncFolderNoLimit": "Whole vault (no limit)",
+  "set.syncFolderChoose": "Choose folder",
+  "set.syncFolderFind": "Type to find a folder",
+  "set.syncFolderMissing": "(folder not found)",
   "set.ignoredHeading": "Ignored paths",
   "set.ignoredDesc": "Paths to exclude from sync (one per line). Paths ending with / match directories.",
   "set.manualHeading": "Manual sync",
@@ -246,6 +254,14 @@ const zh: Record<I18nKey, string> = {
   "set.peersHeading": "按地址添加的设备",
   "set.peersIntro": "自动发现不起作用时可以手动添加设备。格式：ip:端口",
   "set.addDevice": "添加设备",
+  "set.scopeHeading": "同步范围",
+  "set.syncFolder": "仅同步此文件夹",
+  "set.syncFolderDesc": "只和其他设备同步这个文件夹，其他设备会自动遵守。每台设备上的文件夹名必须完全相同（区分大小写）。把文件移出这个文件夹，等于在其他设备上删除它（可以在恢复中心找回）。建议先选好文件夹再配对。设了文件夹后，这台设备不能和旧版本的插件同步。",
+  "set.syncFolderWhole": "整个库",
+  "set.syncFolderNoLimit": "整个库（不限制）",
+  "set.syncFolderChoose": "选择文件夹",
+  "set.syncFolderFind": "输入以查找文件夹",
+  "set.syncFolderMissing": "（文件夹不存在）",
   "set.ignoredHeading": "忽略的路径",
   "set.ignoredDesc": "不参与同步的路径（每行一个）。以 / 结尾的路径匹配文件夹。",
   "set.manualHeading": "手动同步",
@@ -398,4 +414,28 @@ export function formatDate(ts: number): string {
 /** A date and time in the UI language. */
 export function formatDateTime(ts: number): string {
   return `${formatDate(ts)} ${formatTime(ts)}`;
+}
+
+/**
+ * When something happened, as short as it can be said: the time of day
+ * (hours and minutes) for today; the date before it for another day
+ * (11-18 14:02, or Nov 18, 2:02 PM); the year too for another year
+ * (2025-11-18 14:02, or Nov 18, 2025, 2:02 PM). "Today" is the day of `now`
+ * on this device's clock.
+ */
+export function formatWhen(ts: number, now: number = Date.now()): string {
+  const d = new Date(ts);
+  const today = new Date(now);
+  const zh = currentLanguage() === "zh";
+  // 09:05 in Chinese, 9:05 AM in English.
+  const time = formatTime(ts, { hour: zh ? "2-digit" : "numeric", minute: "2-digit" });
+  const sameYear = d.getFullYear() === today.getFullYear();
+  if (sameYear && d.getMonth() === today.getMonth() && d.getDate() === today.getDate()) return time;
+  if (zh) {
+    const p = (n: number) => String(n).padStart(2, "0");
+    const day = `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    return `${sameYear ? day : `${d.getFullYear()}-${day}`} ${time}`;
+  }
+  const day = d.toLocaleDateString("en-US", sameYear ? { month: "short", day: "numeric" } : { year: "numeric", month: "short", day: "numeric" });
+  return `${day}, ${time}`;
 }

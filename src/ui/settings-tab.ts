@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, TFolder } from "obsidian";
 import type LANSyncPlugin from "../main";
 import { getLocalIPv4Addresses } from "../utils/network";
 import { supportsIncomingConnections } from "../utils/runtime";
@@ -7,6 +7,8 @@ import { generateSyncKey } from "../transport/auth";
 import { randomVaultId } from "../utils/vault-id";
 import { confirmDialog } from "./confirm-modal";
 import { addStrings, t } from "../i18n";
+import { FolderSuggestModal } from "./folder-suggest-modal";
+import { normalizeSyncFolder } from "../sync/sync-scope";
 
 addStrings("en", {
   "set.maxReceiveMB": "Largest file to receive (MB)",
@@ -270,8 +272,10 @@ export class LANSyncSettingTab extends PluginSettingTab {
         }),
       );
 
-    // ─── Ignored Paths ──────────────────────────────────
-    new Setting(containerEl).setName(t("set.ignoredHeading")).setHeading();
+    // ─── What to sync: one folder, ignored paths ────────
+    new Setting(containerEl).setName(t("set.scopeHeading")).setHeading();
+
+    this._renderSyncFolder(containerEl);
 
     new Setting(containerEl)
       .setName(t("set.ignoredHeading"))
@@ -489,6 +493,40 @@ export class LANSyncSettingTab extends PluginSettingTab {
             new Notice(t("set.logCleared"));
           }),
       );
+  }
+
+  /**
+   * Sync only one folder (settings.syncFolder). The folder is picked from
+   * the vault's own folders, the same on a computer and a phone; one set
+   * before that no longer exists is marked.
+   */
+  private _renderSyncFolder(containerEl: HTMLElement): void {
+    const raw = this.plugin.settings.syncFolder ?? "";
+    const folder = normalizeSyncFolder(raw);
+    const setting = new Setting(containerEl).setName(t("set.syncFolder")).setDesc(t("set.syncFolderDesc"));
+    const current = setting.controlEl.createSpan({
+      text: folder === "" ? t("set.syncFolderWhole") : raw.trim(),
+      cls: "lan-sync-sync-folder",
+    });
+    current.setAttribute("title", folder === "" ? t("set.syncFolderWhole") : raw.trim());
+    if (folder !== "" && !(folder !== null && this.app.vault.getAbstractFileByPath(folder) instanceof TFolder)) {
+      setting.controlEl.createSpan({ text: t("set.syncFolderMissing"), cls: "lan-sync-state-error" });
+    }
+    setting.addButton((button) =>
+      button.setButtonText(t("set.syncFolderChoose")).onClick(() => {
+        new FolderSuggestModal(this.app, (path) => {
+          void this._setSyncFolder(path);
+        }).open();
+      }),
+    );
+  }
+
+  private async _setSyncFolder(path: string): Promise<void> {
+    if (path === (this.plugin.settings.syncFolder ?? "")) return;
+    this.plugin.settings.syncFolder = path;
+    await this.plugin.saveSettings();
+    this.plugin.restartSyncSoon();
+    this.display();
   }
 
   private _renderPeerList(container: HTMLElement): void {

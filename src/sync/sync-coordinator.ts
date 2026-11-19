@@ -59,6 +59,7 @@ import { isPlainUtf8, utf8Length } from "../utils/utf8";
 import { readJsonWithBackup, writeAtomic } from "../utils/atomic-write";
 import { AgreedVersions, isTime } from "./agreed-versions";
 import { decideConflict, localIsWinner } from "./conflict-rules";
+import { inScope, isLimited, normalizeSyncFolder, type SyncScope } from "./sync-scope";
 
 /** Hash recorded in deletion records of folders. */
 const FOLDER_HASH = "folder";
@@ -231,6 +232,8 @@ export class SyncCoordinator {
       options?.eventLog ?? new EventLog((vault as any).adapter ?? null);
     this.health = new HealthMonitor(options?.health);
     this.health.watch(this.eventLog);
+    // Each device's name and when it last matched, kept across restarts.
+    void this.health.attachPeerStore?.((vault as any).adapter ?? null)?.catch(() => undefined);
     const adapter = (vault as any).adapter;
     this.versionStore =
       options?.versionStore !== undefined
@@ -241,7 +244,7 @@ export class SyncCoordinator {
     // Generate a vault ID from the vault name
     this.vaultId = effectiveVaultId(settings, vault.getName());
 
-    this.filter = new FileFilter(settings.ignoredPaths);
+    this.filter = new FileFilter(settings.ignoredPaths, settings.syncFolder ?? "");
     this.stateMachine = new SyncStateMachine();
     this.connectionManager = new ConnectionManager(settings, this.vaultId);
     this.connectionManager.setInstance(this.instance);
@@ -281,6 +284,7 @@ export class SyncCoordinator {
       vault,
       settings.ignoredPaths,
       options?.workspace,
+      settings.syncFolder ?? "",
     );
 
     const localDevice: DeviceInfo = {
@@ -497,6 +501,11 @@ export class SyncCoordinator {
     await this._saveFileIndex();
     await this.agreed.save();
     await this.eventLog.flush();
+    try {
+      await this.health.flushPeers?.();
+    } catch {
+      // Only what the panel shows; sync itself is not affected.
+    }
 
     this.stateMachine.transition("idle");
     this._emitEvent("event.stopped");
@@ -587,6 +596,9 @@ export class SyncCoordinator {
       this.connectionManager.forgetDiscoveredPeer(device);
     });
     this.connectionManager.onReachabilityChange(() => this.onStateChangeCb?.(this.stateMachine.getState()));
+    // A message about paths on both sides of a connection's folder (a move
+    // across its edge) was dropped: the file lists settle it on both sides.
+    this.connectionManager.onScopeSplit?.(() => this._scheduleTreeSync());
 
     // Peer connected → initial sync
     this.connectionManager.onAuthFailed((failure) => {
@@ -609,6 +621,7 @@ export class SyncCoordinator {
       // The peer count shown to the user changes even when the state does not.
       this.onStateChangeCb?.(this.stateMachine.getState());
       this.pendingInitialBootstrapPeers.add(device.deviceId);
+      this._notePeerScope(device.deviceId, true);
       await this._initialSyncWith(device.deviceId);
     });
 
@@ -1482,8 +1495,14 @@ export class SyncCoordinator {
     await this.primed;
     const localTree = await this._buildTree();
     const isInitialBootstrap = this.pendingInitialBootstrapPeers.has(deviceId);
+    // What this connection carries (see sync-scope). Both lists are taken
+    // down to it: our files outside it are not ones the peer lacks, and
+    // anything the peer lists outside it is left alone here.
+    const scope = this._connectionScope(deviceId);
+    const localFiles = filesInScope(localTree.files, scope);
     const remoteFiles = new Map<string, (typeof meta.files)[number]>();
     for (const f of meta.files) {
+      if (isLimited(scope) && !(typeof f?.path === "string" && inScope(f.path, scope))) continue;
       // Never pull files this device ignores (or cannot safely write).
       if (!this._isAllowedPath(f.path, true)) continue;
       remoteFiles.set(f.path, f);
@@ -1499,11 +1518,13 @@ export class SyncCoordinator {
       if (!this.tombstones.get(f.path)) this.tombstones.noteRevival(f.path, f.revives.deletedAt, f.revives.hash);
     }
 
-    const treeDiff = diffFileTrees(localTree.files, remoteFiles);
-    this._noteHealth(deviceId, meta, localTree.files, treeDiff);
+    const treeDiff = diffFileTrees(localFiles, remoteFiles);
+    this._noteHealth(deviceId, meta, localFiles, treeDiff);
     // As shared before this exchange: a deleted file's record goes below,
     // and a deletion record without a hash is weighed against it.
     const agreedBefore = this.agreed.snapshot(deviceId);
+    // All our files, not only this connection's: noteLists forgets, for
+    // every peer, the versions of files it does not find here.
     this.agreed.noteLists(deviceId, localTree.files, remoteFiles, (local) => {
       if (!local.isTextFile) this.syncedHashes.set(local.path, local.hash);
     });
@@ -1512,7 +1533,7 @@ export class SyncCoordinator {
     for (const f of remoteFiles.values()) {
       if (typeof f.agreed === "string") this.peerAgreedHashes.set(this._peerPathKey(deviceId, f.path), f.agreed);
     }
-    const remoteDeleted = new Map((meta.deleted ?? []).map((t) => [t.path, t]));
+    const remoteDeleted = new Map(deletionsInScope(meta.deleted ?? [], scope).map((t) => [t.path, t]));
     // The peer's records of renames, by the name the file went to, so each
     // file is checked against its own renames instead of against them all.
     const remoteRenamesTo = new Map<string, Tombstone[]>();
@@ -1533,6 +1554,7 @@ export class SyncCoordinator {
 
     // Where names that differ only in case are one file, a peer's file
     // whose name is another case of one of ours cannot be stored next to it.
+    // All our files: one outside this connection's folder takes the name too.
     const localByCase = treeDiff.remoteOnly.length > 0 && (await this._isCaseInsensitiveFs())
       ? new Map([...localTree.files.keys()].map((p) => [p.toLowerCase(), p]))
       : null;
@@ -1810,11 +1832,13 @@ export class SyncCoordinator {
     // Before the peer's folders are made here: one removed here while sync
     // was off may be one to remove on the peer instead.
     this._inferFolderDeletions(remoteDeleted);
-    if (meta.folders) await this._syncFolders(meta.folders, remoteDeleted);
+    if (meta.folders) await this._syncFolders(meta.folders, remoteDeleted, scope);
     if (settled) this._scheduleTreeSync();
+    // After the folders: one the peer syncs may have been made just now.
+    this._notePeerScope(deviceId);
 
     if (isInitialBootstrap) {
-      for (const [path, local] of localTree.files) {
+      for (const [path, local] of localFiles) {
         const remote = remoteFiles.get(path);
         if (!remote || !local.isTextFile) continue;
         if (local.hash !== remote.hash) continue;
@@ -2132,8 +2156,12 @@ export class SyncCoordinator {
   private async _syncFolders(
     remoteFolders: string[],
     remoteDeleted: Map<string, { hash?: string }>,
+    scope: SyncScope = "",
   ): Promise<void> {
-    const remote = new Set(remoteFolders.filter((p) => this._isAllowedPath(p)));
+    // Only the folders of this connection (see sync-scope), on either side.
+    const remote = new Set(
+      remoteFolders.filter((p) => (!isLimited(scope) || (typeof p === "string" && inScope(p, scope))) && this._isAllowedPath(p)),
+    );
     for (const path of remote) {
       if (this.vault.getAbstractFileByPath(path)) continue;
       if (this._folderDeleted(path, (p) => (this.vault.getAbstractFileByPath(p) ? undefined : this.tombstones.get(p)))) continue;
@@ -2144,7 +2172,7 @@ export class SyncCoordinator {
       await this._createFolderFromRemote(path);
     }
     for (const path of this._listFolders()) {
-      if (remote.has(path)) continue;
+      if (remote.has(path) || !inScope(path, scope)) continue;
       if (this._folderDeleted(path, (p) => (remote.has(p) ? undefined : remoteDeleted.get(p)))) this._scheduleFolderDelete(path);
     }
   }
@@ -2415,6 +2443,43 @@ export class SyncCoordinator {
     this.health.noteWaiting(deviceId, this.binarySync.waitingFrom(deviceId));
   }
 
+  /**
+   * What the connection with a peer carries (see sync-scope): what both
+   * sides sync. A ConnectionManager without it (tests) carries what this
+   * device syncs.
+   */
+  private _connectionScope(deviceId: string): SyncScope {
+    // Not `??`: null (nothing in common) must not become our own folder.
+    const cm = this.connectionManager;
+    return typeof cm.connectionScope === "function" ? cm.connectionScope(deviceId) : this.filter.getScope();
+  }
+
+  /**
+   * Tells the panel what the connection with a peer carries (see
+   * HealthMonitor.notePeerScope): only one folder, nothing at all (the two
+   * sides sync folders that do not overlap; `announce` also says so in the
+   * sync events, once per connection), or a folder the peer syncs that this
+   * vault does not have, such as "Work" where this vault has "work". Our own
+   * folder is checked by the settings.
+   */
+  private _notePeerScope(deviceId: string, announce = false): void {
+    const scope = this._connectionScope(deviceId);
+    const theirs = this.connectionManager.peerSyncFolder?.(deviceId);
+    if (scope === null) {
+      const here = shownFolder(this.settings.syncFolder);
+      const there = shownFolder(theirs);
+      this.health.notePeerScope?.(deviceId, { disjoint: { here, there } });
+      // Logged too, in English (see _emitEvent).
+      if (announce) this._emitEvent("event.scope-disjoint", { peer: this._who(deviceId), here, there });
+      return;
+    }
+    const info: { only?: string; missingHere?: string } = {};
+    if (isLimited(scope)) info.only = scope;
+    const folder = normalizeSyncFolder(theirs ?? "");
+    if (folder && !(this.vault.getAbstractFileByPath(folder) instanceof TFolder)) info.missingHere = folder;
+    this.health.notePeerScope?.(deviceId, info);
+  }
+
   private async _primeKnownHashes(): Promise<void> {
     try {
       const tree = await buildFileTree(this.vault, this.filter, this.hashCache);
@@ -2446,8 +2511,14 @@ export class SyncCoordinator {
       for (const [path, hash] of entries) out.set(hash, [...(out.get(hash) ?? []), path]);
       return out;
     };
+    // Only names in the folder this device syncs (settings.syncFolder): one
+    // outside it, synced before the setting was made, is not followed now,
+    // and a file moved from there into the folder is new to the peers.
+    const scope = this.filter.getScope();
     const gone = byHash(
-      [...this.lastRunFiles].filter(([path]) => !files.has(path) && !this.vault.getAbstractFileByPath(path) && !this.tombstones.get(path)),
+      [...this.lastRunFiles].filter(
+        ([path]) => inScope(path, scope) && !files.has(path) && !this.vault.getAbstractFileByPath(path) && !this.tombstones.get(path),
+      ),
     );
     if (gone.size === 0) return;
     const added = byHash(
@@ -2475,6 +2546,10 @@ export class SyncCoordinator {
    * each peer it goes to.
    */
   private _encodeTree(fileList: FileMeta[], deviceId: string, isResponse?: boolean): Uint8Array {
+    // Only what this connection carries (see sync-scope): the peer learns
+    // nothing of our files outside it, not even their names.
+    const scope = this._connectionScope(deviceId);
+    if (isLimited(scope)) fileList = fileList.filter((f) => inScope(f.path, scope));
     const agreed = this.agreed.forPeer(deviceId);
     const files = agreed?.size
       ? fileList.map((f) => {
@@ -2495,10 +2570,12 @@ export class SyncCoordinator {
       }
     }
     const digest = vaultDigest(fileList);
+    const folders = this._listFolders().filter((p) => inScope(p, scope));
+    const shared = deletionsInScope(deleted, scope);
     return encodeFileMetaSync(
       isResponse
-        ? { files, folders: this._listFolders(), deleted, digest, isResponse: true }
-        : { files, folders: this._listFolders(), deleted, digest },
+        ? { files, folders, deleted: shared, digest, isResponse: true }
+        : { files, folders, deleted: shared, digest },
     );
   }
 
@@ -2974,6 +3051,8 @@ export class SyncCoordinator {
         const label = tIn(lang, `recovery.op.${v.op}`);
         if (label !== `recovery.op.${v.op}`) v.op = label;
       }
+      // The folders two devices sync (event.scope-disjoint): none is the whole vault.
+      for (const k of ["here", "there"]) if (v[k] === "") v[k] = tIn(lang, "event.scope-whole-vault");
       return tIn(lang, key, v);
     };
     const msg = say("en");
@@ -3719,6 +3798,42 @@ export class SyncCoordinator {
   private _isConflictWinner(localMtime: number, remoteMtime: number, remoteDeviceId: string): boolean {
     return localIsWinner(localMtime, remoteMtime, this.settings.deviceId, remoteDeviceId);
   }
+}
+
+/**
+ * A folder setting (ours, or one a peer gave) as the user would write it:
+ * "" for the whole vault, an invalid one as given.
+ */
+function shownFolder(raw: string | undefined): string {
+  return normalizeSyncFolder(raw ?? "") ?? String(raw ?? "").trim();
+}
+
+/** The files of a list that lie in a connection's scope (see sync-scope). */
+function filesInScope(files: Map<string, FileMeta>, scope: SyncScope): Map<string, FileMeta> {
+  if (!isLimited(scope)) return files;
+  const out = new Map<string, FileMeta>();
+  for (const [path, meta] of files) if (inScope(path, scope)) out.set(path, meta);
+  return out;
+}
+
+/**
+ * Deletion records as a connection limited to `scope` carries them: only
+ * those of paths in it. A file moved out of it reads as deleted (the record
+ * goes without where it went), as the move does on the connection itself.
+ */
+function deletionsInScope(deleted: Tombstone[], scope: SyncScope): Tombstone[] {
+  if (!isLimited(scope)) return deleted;
+  const out: Tombstone[] = [];
+  for (const t of deleted) {
+    if (typeof t?.path !== "string" || !inScope(t.path, scope)) continue;
+    if (t.movedTo !== undefined && !(typeof t.movedTo === "string" && inScope(t.movedTo, scope))) {
+      const { movedTo: _gone, ...rest } = t;
+      out.push(rest);
+    } else {
+      out.push(t);
+    }
+  }
+  return out;
 }
 
 /** A state vector as a string, to compare. */
