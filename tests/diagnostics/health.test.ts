@@ -284,6 +284,23 @@ describe('files too large for one side', () => {
     expect(h.summary(['pixel'])).toMatchObject({ consistent: 1, unsynced: 0 });
     expect(h.alerts()).toEqual([]);
   });
+
+  it('takes the too-large alert down once the device that has the file no longer lists it', () => {
+    const log = new EventLog(null);
+    const h = new HealthMonitor({ stuckMs: 0 });
+    h.watch(log);
+    log.record({ op: 'skip', level: 'warn', path: 'big/b.bin', peer: 'pixel (Pixel)', rule: 'too-large', msg: 'too large' });
+    expect(h.alerts().map((a) => [a.kind, a.path])).toEqual([['too-large', 'big/b.bin']]);
+    // Still on the sender, still too large: the alert stays.
+    h.noteExchange('pixel', { name: 'pixel (Pixel)', differing: ['big/b.bin'], tooLarge: { here: ['big/b.bin'] } });
+    expect(h.alerts().map((a) => a.kind)).toEqual(['too-large']);
+    // Another device that does not have the file says nothing about it.
+    h.noteExchange('mac', { name: 'mac (Mac)', differing: [] });
+    expect(h.alerts().map((a) => a.kind)).toEqual(['too-large']);
+    // The sender deleted it: nothing is left to receive.
+    h.noteExchange('pixel', { name: 'pixel (Pixel)', differing: [] });
+    expect(h.alerts()).toEqual([]);
+  });
 });
 
 describe('the folder a connection is limited to', () => {

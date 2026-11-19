@@ -347,7 +347,22 @@ describe('SyncCoordinator taking a file list over a connection limited to one fo
     const { c, notePeerScope } = setup(vault, '', { scope: 'Work', peerFolder: 'Work' });
     c._notePeerScope('peer-1');
     expect(notePeerScope).toHaveBeenLastCalledWith('peer-1', { only: 'Work', missingHere: 'Work' });
-    // Made since (or fetched from the peer): the next exchange clears it.
+    // Not made empty from the peer's folder list next to "work": that would
+    // hide the mismatch, and the files in "work" would never reach the peer.
+    await c._handleRemoteFileTree('peer-1', { files: [], folders: ['Work'], deleted: [] });
+    expect(vault.getAbstractFileByPath('Work')).toBeNull();
+    expect(notePeerScope).toHaveBeenLastCalledWith('peer-1', { only: 'Work', missingHere: 'Work' });
+    // Made since (a file of it arrived, or the user made it): the next exchange clears it.
+    vault.put('Work/b.png', 'b');
+    await c._handleRemoteFileTree('peer-1', { files: [], folders: ['Work'], deleted: [] });
+    expect(vault.getAbstractFileByPath('Work')).toBeInstanceOf(TFolder);
+    expect(notePeerScope).toHaveBeenLastCalledWith('peer-1', { only: 'Work' });
+  });
+
+  it('makes the folder from the peer when this device chose it too, though a folder named in another case is here', async () => {
+    const vault = new FakeVault();
+    vault.put('work/a.png', 'a');
+    const { c, notePeerScope } = setup(vault, 'Work', { scope: 'Work', peerFolder: 'Work' });
     await c._handleRemoteFileTree('peer-1', { files: [], folders: ['Work'], deleted: [] });
     expect(vault.getAbstractFileByPath('Work')).toBeInstanceOf(TFolder);
     expect(notePeerScope).toHaveBeenLastCalledWith('peer-1', { only: 'Work' });

@@ -410,6 +410,15 @@ export class HealthMonitor {
     // files that are not yet in sync.
     p.tooLargeHere = [...(info.tooLarge?.here ?? [])].sort();
     p.tooLargeThere = [...(info.tooLarge?.there ?? [])].sort();
+    // A file this device did not take from this peer, which the peer no
+    // longer lists as too large here (deleted there, or made smaller):
+    // nothing is left to receive, so its alert goes.
+    const stillHere = new Set(p.tooLargeHere);
+    for (const a of [...this.active.values()]) {
+      if (a.kind === "too-large" && a.path && p.name && a.peer === p.name && !stillHere.has(a.path)) {
+        this.clear("too-large", a.path);
+      }
+    }
     const apart = new Set([...p.tooLargeHere, ...p.tooLargeThere]);
     const next = new Map<string, { n: number; since: number }>();
     for (const path of info.differing) {

@@ -972,6 +972,7 @@ export class SyncCoordinator {
         if (!this._isAllowedPath(path)) break;
         this.tombstones.clear(path);
         this.pendingFolderDeletes.delete(path);
+        if (this._isMisnamedScopeFolder(path, this._connectionScope(deviceId))) break;
         await this._createFolderFromRemote(path);
         break;
       }
@@ -2169,12 +2170,32 @@ export class SyncCoordinator {
       // settled yet (see _inferFolderDeletions): not brought back empty. A
       // file of it that is kept or fetched makes it again.
       if (this._folderGoneSinceLastRun(path)) continue;
+      if (this._isMisnamedScopeFolder(path, scope)) continue;
       await this._createFolderFromRemote(path);
     }
     for (const path of this._listFolders()) {
       if (remote.has(path) || !inScope(path, scope)) continue;
       if (this._folderDeleted(path, (p) => (remote.has(p) ? undefined : remoteDeleted.get(p)))) this._scheduleFolderDelete(path);
     }
+  }
+
+  /**
+   * Whether `path` is the folder a connection is limited to, missing here,
+   * while a folder whose name differs only in case is here: the peer's
+   * "work" where this vault has "Work". Made empty from the peer's folder
+   * list, it would hide the mismatch (on a disk where names differ by case,
+   * as on Linux, it is a second folder), and the files in "Work" would never
+   * reach the peer. Left out, the panel says the folder is missing (see
+   * _notePeerScope). A file of the folder that arrives still makes it.
+   * When this device's own setting names the folder, the user chose it
+   * here too, and it is made as usual.
+   */
+  private _isMisnamedScopeFolder(path: string, scope: SyncScope): boolean {
+    if (!scope || path !== scope || this.vault.getAbstractFileByPath(path)) return false;
+    if (this.filter.getScope() === path) return false;
+    const lower = path.toLowerCase();
+    const all = (this.vault as { getAllLoadedFiles?(): TAbstractFile[] }).getAllLoadedFiles?.() ?? [];
+    return all.some((f) => f instanceof TFolder && f.path !== path && f.path.toLowerCase() === lower);
   }
 
   /** A folder that was here when sync last ran and is gone, with no record of that. */
