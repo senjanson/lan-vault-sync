@@ -82,6 +82,12 @@ describe('RecoveryView', () => {
     expect(content.allText()).toContain('No kept version matches "nothing"');
   });
 
+  it('gives a group made within one second one time, not a range', async () => {
+    const { view, content } = openView([{ ...group, from: 1000, to: 1900 }]);
+    await view.onOpen();
+    expect(content.allText()).not.toContain(' – ');
+  });
+
   it('restores one entry', async () => {
     const { view, content, store, vault } = openView([group]);
     await view.onOpen();

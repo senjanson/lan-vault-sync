@@ -213,7 +213,7 @@ export class RecoveryView extends ItemView {
     head.createEl("strong", {
       text: t("recovery.groupHeading", {
         peer: g.peer ? peerName(g.peer) : t("recovery.thisDevice"),
-        time: g.from === g.to ? formatTime(g.to) : `${formatTime(g.from)} – ${formatTime(g.to)}`,
+        time: formatTime(g.from) === formatTime(g.to) ? formatTime(g.to) : `${formatTime(g.from)} – ${formatTime(g.to)}`,
         count: g.entries.length,
         ops: g.ops.map(opLabel).join(", "),
       }),
