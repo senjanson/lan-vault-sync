@@ -7,8 +7,9 @@
  *
  * Content is stored by its hash, so a file kept many times (or 600 copies of
  * one template) takes the space of one. The index has one JSON line per kept
- * version; lines are buffered briefly and appended together, like the sync
- * log, because a bulk delete keeps a version of every file.
+ * version. A keep returns once its line is on disk, since the change it
+ * guards comes next; lines kept at the same time share one append, because
+ * a bulk delete keeps a version of every file.
  *
  * The folder starts with a dot, so the sync code never sends it to peers.
  */
@@ -143,6 +144,8 @@ export class VersionStore implements VersionKeeper {
   private timer: ReturnType<typeof setTimeout> | null = null;
   /** Index writes and rewrites run one after another, so prune loses no line. */
   private writing: Promise<void> = Promise.resolve();
+  /** The index write waiting to start, which a flush joins; see flush. */
+  private nextWrite: Promise<void> | null = null;
   /** Blob writes and blob removal run one after another; see prune. */
   private blobLock: Promise<unknown> = Promise.resolve();
   private madeDirs = new Set<string>();
@@ -154,6 +157,8 @@ export class VersionStore implements VersionKeeper {
   private bytesCache: number | null = null;
   private readonly flushMs: number;
   private readonly now: () => number;
+  /** Told just before a restore writes a file; see setRestoreHook. */
+  private restoreHook: ((path: string, exists: boolean) => void) | null = null;
   lastWriteError: string | null = null;
 
   constructor(
@@ -193,7 +198,21 @@ export class VersionStore implements VersionKeeper {
       for (const key of Object.keys(entry) as Array<keyof VersionEntry>) {
         if (entry[key] === undefined) delete entry[key];
       }
+      // The caller deletes or replaces the file once this returns, so the
+      // line must be on disk first: a line still waiting in memory is lost
+      // when the index cannot be written or the app quits, and then the
+      // version cannot be found, though the change was made. Keeps that
+      // come together share one append (see flush), so a peer deleting
+      // hundreds of files does not cost an append per file.
       this.enqueue(entry);
+      await this.flush();
+      const waiting = this.buffer.indexOf(entry);
+      if (waiting >= 0) {
+        // Not written. Nothing will be changed for it, so it is not listed.
+        this.buffer.splice(waiting, 1);
+        logger.debug(`Keeping a version of ${path} failed: ${this.lastWriteError ?? "index not written"}`);
+        return null;
+      }
       return { id: hash, hash };
     } catch (err) {
       logger.debug(`Keeping a version of ${path} failed:`, err);
@@ -266,13 +285,25 @@ export class VersionStore implements VersionKeeper {
     }
   }
 
-  /** Writes the buffered index lines. Safe to call often. */
+  /**
+   * Writes the buffered index lines. Safe to call often: calls made while a
+   * write is under way share the one write that follows it, which takes
+   * every line buffered by the time it starts. A write per call instead
+   * settled, with deletions applied a few at a time, into one append per
+   * kept file.
+   */
   flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    return this.serial(() => this.writeIndex());
+    if (this.nextWrite) return this.nextWrite;
+    const run = this.serial(async () => {
+      this.nextWrite = null;
+      await this.writeIndex();
+    });
+    this.nextWrite = run;
+    return run;
   }
 
   private serial(fn: () => Promise<void>): Promise<void> {
@@ -400,6 +431,26 @@ export class VersionStore implements VersionKeeper {
   // -------------------------------------------------------------- restoring
 
   /**
+   * Called with a path just before a restore writes it (`exists`: a file is
+   * there now). The sync code uses it to take the file as put back at once:
+   * waiting for the vault's create event left a moment, seconds on a phone
+   * restoring hundreds of files, in which a file list exchange took the
+   * restored file for the copy a peer's deletion record describes and
+   * deleted it again.
+   */
+  setRestoreHook(hook: ((path: string, exists: boolean) => void) | null): void {
+    this.restoreHook = hook;
+  }
+
+  private beforeRestoreWrite(path: string, exists: boolean): void {
+    try {
+      this.restoreHook?.(path, exists);
+    } catch (err) {
+      logger.debug(`Noting the restore of ${path} failed:`, err);
+    }
+  }
+
+  /**
    * Puts a version back at its path. The file there now is kept first
    * ("before-restore"), so a restore can itself be undone; when that fails,
    * nothing is written and false is returned.
@@ -414,15 +465,22 @@ export class VersionStore implements VersionKeeper {
       if (existing) {
         const file = existing as TFile;
         const current = new Uint8Array(await vault.readBinary(file));
-        if ((await computeFileHash(toArrayBuffer(current))) === entry.hash) return true;
+        if ((await computeFileHash(toArrayBuffer(current))) === entry.hash) {
+          // Already back (restored twice, or by hand): a deletion of it
+          // may still stand here until its create event is handled.
+          this.beforeRestoreWrite(entry.path, true);
+          return true;
+        }
         const kept = await this.keep(entry.path, current, "before-restore", { rule: "restore" });
         if (!kept) return false;
+        this.beforeRestoreWrite(entry.path, true);
         await vault.modifyBinary(file, toArrayBuffer(data));
       } else {
         await ensureVaultParentFolder(
           { adapter: this.adapter, getAbstractFileByPath: (p) => vault.getAbstractFileByPath(p) },
           entry.path,
         );
+        this.beforeRestoreWrite(entry.path, false);
         await vault.createBinary(entry.path, toArrayBuffer(data));
       }
       return true;

@@ -113,6 +113,8 @@ export class RecoveryView extends ItemView {
     leaf: WorkspaceLeaf,
     private source: StoreSource,
     private vault?: HistoryVault,
+    /** Open views, told when the store comes or goes (see registerRecoveryCenter). */
+    private openViews?: Set<RecoveryView>,
   ) {
     super(leaf);
   }
@@ -134,7 +136,12 @@ export class RecoveryView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.openViews?.add(this);
     await this.reload();
+  }
+
+  async onClose(): Promise<void> {
+    this.openViews?.delete(this);
   }
 
   /** Reads the groups again from the store and redraws. */
@@ -327,15 +334,28 @@ export function decodeUtf8(data: Uint8Array): string | null {
 /**
  * Registers the view and the "Open recovery center" command. The store is
  * looked up when used, since it is made after the plugin loads.
+ *
+ * Call storeChanged() when sync starts or stops: a view the workspace
+ * opened at startup, before sync started, then shows the store without a
+ * click on Refresh.
  */
-export function registerRecoveryCenter(plugin: Plugin, getStore: () => VersionStore | null): void {
+export function registerRecoveryCenter(
+  plugin: Plugin,
+  getStore: () => VersionStore | null,
+): { storeChanged(): void } {
   const vault = plugin.app.vault;
-  plugin.registerView(RECOVERY_VIEW_TYPE, (leaf: WorkspaceLeaf) => new RecoveryView(leaf, getStore, vault));
+  const open = new Set<RecoveryView>();
+  plugin.registerView(RECOVERY_VIEW_TYPE, (leaf: WorkspaceLeaf) => new RecoveryView(leaf, getStore, vault, open));
   plugin.addCommand({
     id: "open-recovery-center",
     name: t("recovery.cmdOpen"),
     callback: () => void openRecoveryCenter(plugin),
   });
+  return {
+    storeChanged: () => {
+      for (const view of open) void view.reload();
+    },
+  };
 }
 
 /** Opens the recovery center in a main tab, or shows the one already open. */

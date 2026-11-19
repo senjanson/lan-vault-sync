@@ -11,7 +11,7 @@ export const LOG_RULES: Record<string, string> = {
   "full-state-kept-local": "A peer's unrelated note history lost to ours; ours was sent back.",
   "apart-edits": "The same lines were edited on two devices while apart: the later edit wins, the other is a conflict copy.",
   "binary-agreed": "Attachment changed on one side only (by the version both last shared): that side's is taken.",
-  "binary-made-at": "Attachment changed on both sides: the later version wins, the other is a conflict copy.",
+  "binary-made-at": "Attachment changed on both sides: the later version wins; the other is kept as a conflict copy if no other device has it.",
   "binary-newer": "Attachment fetched because the peer's version was chosen.",
   "remote-only": "File only the peer has: fetched.",
   "live-write": "A peer's change sent while both were connected.",

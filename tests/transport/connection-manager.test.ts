@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { WS_PING_INTERVAL_MS } from '../../src/constants';
-import { encodePing, encodePong } from '../../src/transport/protocol';
+import { PROTOCOL_VERSION, WS_PING_INTERVAL_MS } from '../../src/constants';
+import { decodeJSON, decodeMessage, encodeHandshake, encodeHandshakeAck, encodePing, encodePong } from '../../src/transport/protocol';
 
-import { ConnectionManager } from '../../src/transport/connection-manager';
+import { ConnectionManager, type AuthFailure } from '../../src/transport/connection-manager';
 import { WSClient } from '../../src/transport/ws-client';
-import { DEFAULT_SETTINGS, type DeviceInfo, type HandshakePayload } from '../../src/types';
+import { DEFAULT_SETTINGS, MessageType, type DeviceInfo, type HandshakePayload } from '../../src/types';
 
 function createManager(): ConnectionManager {
   return new ConnectionManager(
@@ -181,6 +181,74 @@ describe('ConnectionManager liveness', () => {
       manager.connectToPeer(peer);
       expect(manager.clients.has(url)).toBe(true);
       expect(connect).toHaveBeenCalledTimes(1);
+      manager.stop();
+    } finally {
+      connect.mockRestore();
+    }
+  });
+});
+
+describe('ConnectionManager vault check', () => {
+  function fakeSocket() {
+    const listeners = new Map<string, Array<(...args: any[]) => void>>();
+    return {
+      readyState: 1,
+      sent: [] as Uint8Array[],
+      closed: false,
+      send(data: Uint8Array) { this.sent.push(data); },
+      close() { this.closed = true; },
+      on(event: string, l: (...args: any[]) => void) {
+        listeners.set(event, [...(listeners.get(event) ?? []), l]);
+      },
+      removeListener() {},
+      emit(event: string, ...args: any[]) { for (const l of listeners.get(event) ?? []) l(...args); },
+    };
+  }
+  const otherVault: HandshakePayload = {
+    deviceId: 'device-c',
+    deviceName: 'Pixel',
+    vaultId: 'vault-2',
+    port: 50000,
+    nonce: 'n'.repeat(32),
+    protocolVersion: PROTOCOL_VERSION,
+  };
+
+  it('reports a device that syncs another vault, and tells it why before closing', async () => {
+    const manager = createManager() as any;
+    const failures: AuthFailure[] = [];
+    manager.onAuthFailed((f: AuthFailure) => failures.push(f));
+    const ws = fakeSocket();
+    manager._handleInbound(ws, '10.0.0.3');
+    ws.emit('message', encodeHandshake(otherVault));
+    await vi.waitFor(() => expect(ws.closed).toBe(true));
+
+    expect(failures).toEqual([{ deviceId: 'device-c', deviceName: 'Pixel', address: '10.0.0.3', reason: 'vault-mismatch' }]);
+    // An ack with this vault's ID and no proof, so the other side can say why.
+    const ack = decodeMessage(ws.sent[0]);
+    expect(ack.type).toBe(MessageType.HANDSHAKE_ACK);
+    const body = decodeJSON<HandshakePayload>(ack.payload);
+    expect(body).toMatchObject({ deviceId: 'device-b', vaultId: 'vault-1' });
+    expect(body.proof).toBeUndefined();
+    manager.stop();
+  });
+
+  it('reports the vault mismatch on the calling side from that ack', async () => {
+    const connect = vi.spyOn(WSClient.prototype, 'connect').mockImplementation(() => {});
+    try {
+      const manager = createManager() as any;
+      const failures: AuthFailure[] = [];
+      manager.onAuthFailed((f: AuthFailure) => failures.push(f));
+      const device: DeviceInfo = {
+        deviceId: 'manual-10.0.0.3:50000', deviceName: '10.0.0.3:50000', ip: '10.0.0.3', port: 50000,
+        vaultId: 'vault-1', lastSeen: 0, acceptsIncomingConnections: true,
+      };
+      manager.connectToPeer(device);
+      const client = manager.clients.get('ws://10.0.0.3:50000');
+      const ws = fakeSocket();
+      client.onOpenCb(ws);
+      ws.emit('message', encodeHandshakeAck({ ...otherVault, nonce: undefined }));
+      await vi.waitFor(() => expect(ws.closed).toBe(true));
+      expect(failures).toEqual([{ deviceId: 'device-c', deviceName: 'Pixel', address: '10.0.0.3:50000', reason: 'vault-mismatch' }]);
       manager.stop();
     } finally {
       connect.mockRestore();

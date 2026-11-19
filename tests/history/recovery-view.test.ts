@@ -103,6 +103,34 @@ describe('RecoveryView', () => {
     expect(content.allText()).toContain('not ready');
   });
 
+  it('shows the store once it becomes ready, without a click on Refresh', async () => {
+    let store: any = null;
+    let makeView: (leaf: unknown) => any = () => null;
+    const plugin = {
+      app: { vault: {} },
+      registerView: (_type: string, make: (leaf: unknown) => any) => { makeView = make; },
+      addCommand: vi.fn(),
+    };
+    const center = registerRecoveryCenter(plugin as any, () => store);
+    // Opened by the workspace at startup, before sync has started.
+    const view = makeView({});
+    const content = new FakeEl();
+    view.containerEl = { children: [new FakeEl(), content] };
+    await view.onOpen();
+    expect(content.allText()).toContain('not ready');
+
+    store = { groups: vi.fn(async () => [{ key: 'g', from: 1, to: 1, peer: 'pixel', ops: ['delete'], entries: [entry('a.md', 1)] }]) };
+    center.storeChanged();
+    await vi.waitFor(() => expect(content.allText()).toContain('a.md'));
+    expect(content.allText()).not.toContain('not ready');
+
+    // A closed view is not drawn again.
+    await view.onClose();
+    store.groups.mockClear();
+    center.storeChanged();
+    expect(store.groups).not.toHaveBeenCalled();
+  });
+
   it('registers the view and the command', () => {
     const plugin = { app: { vault: {} }, registerView: vi.fn(), addCommand: vi.fn() };
     registerRecoveryCenter(plugin as any, () => null);

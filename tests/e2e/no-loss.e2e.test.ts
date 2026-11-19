@@ -132,6 +132,78 @@ describe('no-loss stage 1', { timeout: 40000 }, () => {
     expect(fs.readdirSync(ra).filter((n) => n.endsWith('.md')).sort()).toEqual(['f25.md', 'f26.md', 'f27.md', 'f28.md', 'f29.md']);
   });
 
+  it('T3d: a folder removed with its files while sync was off goes on the peer once the deletions are confirmed', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 25; i++) files[`inf/f${i}.md`] = `note ${i}`;
+    for (let i = 0; i < 25; i++) files[`g${i}.md`] = `other ${i}`;
+    seed(ra, files);
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => fs.existsSync(path.join(rb, 'inf')) && fs.readdirSync(path.join(rb, 'inf')).length === 25, 15000);
+    await sleep(1000);
+    await B.coord.stop();
+    nodes = nodes.filter((x) => x !== B);
+    fs.rmSync(path.join(rb, 'inf'), { recursive: true });
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.coord.getHeldDeletions().length > 0, 10000);
+    // Waiting for the user: the folder is not brought back meanwhile.
+    await sleep(1000);
+    expect(fs.existsSync(path.join(rb, 'inf'))).toBe(false);
+    expect(fs.readdirSync(path.join(ra, 'inf'))).toHaveLength(25);
+    await B.coord.resolveHeldDeletions(B.coord.getHeldDeletions()[0].id, 'delete');
+    await until(() => !fs.existsSync(path.join(ra, 'inf')), 15000);
+    for (let i = 0; i < 3; i++) {
+      await (A.coord as any)._periodicFullSync();
+      await (B.coord as any)._periodicFullSync();
+      await sleep(400);
+    }
+    // Was: the files went, and the folder, empty on A, came back to B.
+    expect(fs.existsSync(path.join(ra, 'inf'))).toBe(false);
+    expect(fs.existsSync(path.join(rb, 'inf'))).toBe(false);
+    expect(fs.readdirSync(ra).filter((n) => n.endsWith('.md'))).toHaveLength(25);
+  });
+
+  it('T3e: a small folder removed while sync was off goes on the peer; one whose files are kept comes back with them', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 3; i++) files[`small/f${i}.md`] = `note ${i}`;
+    for (let i = 0; i < 25; i++) files[`many/m${i}.md`] = `many ${i}`;
+    for (let i = 0; i < 30; i++) files[`g${i}.md`] = `other ${i}`;
+    seed(ra, files);
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => fs.existsSync(path.join(rb, 'many')) && fs.readdirSync(path.join(rb, 'many')).length === 25 && fs.existsSync(path.join(rb, 'small')) && fs.readdirSync(path.join(rb, 'small')).length === 3, 15000);
+    await sleep(1000);
+    await B.coord.stop();
+    nodes = nodes.filter((x) => x !== B);
+    fs.rmSync(path.join(rb, 'small'), { recursive: true });
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    // Three files are under the limit: deleted on A at once, and the folder with them.
+    await until(() => !fs.existsSync(path.join(ra, 'small')), 15000);
+    for (let i = 0; i < 3; i++) {
+      await (A.coord as any)._periodicFullSync();
+      await (B.coord as any)._periodicFullSync();
+      await sleep(400);
+    }
+    expect(fs.existsSync(path.join(ra, 'small'))).toBe(false);
+    expect(fs.existsSync(path.join(rb, 'small'))).toBe(false);
+
+    // Now 25 files with their folder, and the user says they were not deleted.
+    await B.coord.stop();
+    nodes = nodes.filter((x) => x !== B);
+    fs.rmSync(path.join(rb, 'many'), { recursive: true });
+    B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.coord.getHeldDeletions().length > 0, 10000);
+    await B.coord.resolveHeldDeletions(B.coord.getHeldDeletions()[0].id, 'keep');
+    await until(() => fs.existsSync(path.join(rb, 'many')) && fs.readdirSync(path.join(rb, 'many')).length === 25, 15000);
+    await sleep(1500);
+    expect(fs.readdirSync(path.join(rb, 'many'))).toHaveLength(25);
+    expect(fs.readdirSync(path.join(ra, 'many'))).toHaveLength(25);
+  });
+
   it('T3c: asks before applying a peer deleting more than half of the vault', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
     const files: Record<string, string> = {};
@@ -357,6 +429,33 @@ describe('no-loss stage 2: version history', { timeout: 40000 }, () => {
   });
 });
 
+describe('no-loss stage 2: note versions name the peer', { timeout: 40000 }, () => {
+  it('versions kept for a peer\'s note writes, and the shrink alert, name that peer', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    const long = 'line one of a long note\n'.repeat(20);
+    seed(ra, { 'n.md': long, 'm.md': 'first\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('n.md') === long && B.vault.text('m.md') === 'first\n');
+    await sleep(800);
+    await A.vault.write('m.md', 'first\nsecond\n');
+    await A.vault.write('n.md', '');
+    await until(() => B.vault.text('n.md') === '' && B.vault.text('m.md') === 'first\nsecond\n', 10000);
+    await sleep(1500);
+    const entries = await B.coord.versionStore!.list();
+    const shrink = entries.find((e) => e.path === 'n.md' && e.op === 'shrink');
+    const merge = entries.find((e) => e.path === 'm.md' && e.op === 'merge-write');
+    // Was: no peer on either, so the recovery center could not say who.
+    expect(shrink?.peer).toContain('aaaa');
+    expect(merge?.peer).toContain('aaaa');
+    const alert = B.coord.eventLog.recentRecords().find((r) => r.op === 'alert' && r.rule === 'content-shrank' && r.path === 'n.md');
+    expect(alert?.peer).toContain('aaaa');
+    const write = B.coord.eventLog.recentRecords().find((r) => r.op === 'overwrite' && r.path === 'm.md');
+    expect(write?.peer).toContain('aaaa');
+  });
+});
+
 describe('no-loss stage 2: suspicious reads', { timeout: 40000 }, () => {
   it('does not send a note cut short while the app was closed, and writes it back whole', async () => {
     const ra = tmpRoot('a'), rb = tmpRoot('b');
@@ -456,6 +555,36 @@ describe('no-loss stage 3: monitoring', { timeout: 40000 }, () => {
     expect(B.vault.text('a.md')).toBe('keep me\n');
     expect(notices).toContain('keep-failed');
     expect(B.coord.eventLog.recentRecords().some((r) => r.op === 'error' && r.path === 'a.md' && /could not keep/.test(r.msg ?? ''))).toBe(true);
+  });
+});
+
+describe('no-loss stage 3: version index not writable', { timeout: 30000 }, () => {
+  it('leaves a file alone when its version\'s content is stored already but the index line cannot be written', async () => {
+    const ra = tmpRoot('a'), rb = tmpRoot('b');
+    seed(ra, { 'a.md': 'same text\n', 'b.md': 'same text\n' });
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    await until(() => B.vault.text('a.md') === 'same text\n' && B.vault.text('b.md') === 'same text\n');
+    await sleep(500);
+    await A.vault.rm('a.md');
+    await until(() => !B.vault.exists('a.md'), 8000);
+    await sleep(300);
+    // The content of b.md is in B's history already (a.md's version); now
+    // the index stops taking lines.
+    const adapter = (B.vault as any).adapter;
+    const append = adapter.append;
+    adapter.append = async (p: string, d: string) => {
+      if (p.includes('/history/index/')) throw new Error('EACCES');
+      return append(p, d);
+    };
+    await A.vault.rm('b.md');
+    await until(() => B.coord.eventLog.recentRecords().some((r) => r.op === 'error' && r.path === 'b.md'), 8000);
+    await sleep(500);
+    // Was: the blob was found, the line only queued, and b.md deleted.
+    expect(B.vault.text('b.md')).toBe('same text\n');
+    expect(B.coord.eventLog.recentRecords().some((r) => r.op === 'error' && r.path === 'b.md' && /could not keep/.test(r.msg ?? ''))).toBe(true);
+    adapter.append = append;
   });
 });
 

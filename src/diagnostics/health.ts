@@ -24,6 +24,22 @@ export type AlertKind =
 /** Kinds that describe a state: they go away when the state does. */
 const STATE_KINDS = new Set<AlertKind>(["clock-skew", "file-mismatch", "history-near-cap"]);
 
+/**
+ * Alerts about one file's step that failed (keyed by its path). They go
+ * when a later step on that path succeeds, or the file is gone.
+ */
+const PATH_KINDS: AlertKind[] = ["keep-failed", "write-failed"];
+
+/** Log ops that report a step on a file that was carried out. */
+const DONE_OPS = new Set<LogRecord["op"]>(["overwrite", "delete", "rename", "restore"]);
+
+/** A file as the file lists give it, for tooLargeToSync. */
+interface ListedFile {
+  path: string;
+  size: number;
+  isTextFile?: boolean;
+}
+
 export interface Alert {
   /** Identifies the alert, for dismiss(). */
   key: string;
@@ -48,13 +64,20 @@ export function peerName(label: string | undefined): string {
 /** An alert's text in the user's language. */
 export function alertText(a: Pick<Alert, "kind" | "msg" | "params">): string {
   const p = a.params ?? {};
-  const key = a.kind === "clock-skew" && p.ahead === 0 ? "alert.clock-skew-behind" : `alert.${a.kind}`;
+  const key =
+    a.kind === "clock-skew" && p.ahead === 0
+      ? "alert.clock-skew-behind"
+      : a.kind === "content-shrank" && p.who
+        ? "alert.content-shrank-by"
+        : `alert.${a.kind}`;
   return t(key, { msg: a.msg, ...p });
 }
 
 export interface PeerHealth {
   id: string;
   name?: string;
+  /** False once it disconnected (it is listed for a while; see forgetPeerAfterMs). */
+  connected: boolean;
   /** Last file list exchange. */
   lastExchange?: number;
   /** Last exchange at which every file matched. */
@@ -68,6 +91,10 @@ export interface PeerHealth {
   /** Files asked of this peer that have not arrived. */
   waiting: number;
   clockOffsetMs?: number;
+  /** Files of the peer's that this device does not take, for their size (maxReceiveMB). */
+  tooLargeHere: string[];
+  /** Files of ours that the peer does not take, for their size (its maxReceiveMB). */
+  tooLargeThere: string[];
 }
 
 export interface HealthSummary {
@@ -93,6 +120,8 @@ export interface HealthOptions {
   clockSkewMs?: number;
   /** Event alerts drop out of the panel after this long. */
   keepEventsMs?: number;
+  /** A disconnected device is listed for this long, then forgotten. */
+  forgetPeerAfterMs?: number;
 }
 
 interface PeerState {
@@ -104,6 +133,19 @@ interface PeerState {
   digestMatch?: boolean;
   waiting: number;
   clockOffsetMs?: number;
+  tooLargeHere: string[];
+  tooLargeThere: string[];
+  /** When it disconnected; unset while connected. */
+  disconnectedAt?: number;
+}
+
+/**
+ * The ID and the name out of a log record's "deviceId (name)"; no name
+ * when the record gives only the ID.
+ */
+function parsePeer(label: string): { id: string; name?: string } {
+  const m = /^(\S+) \((.+)\)$/.exec(label);
+  return m ? { id: m[1], name: m[2] } : { id: label };
 }
 
 export class HealthMonitor {
@@ -118,6 +160,7 @@ export class HealthMonitor {
   private readonly stuckMs: number;
   private readonly clockSkewMs: number;
   private readonly keepEventsMs: number;
+  private readonly forgetPeerAfterMs: number;
 
   constructor(options: HealthOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -126,6 +169,7 @@ export class HealthMonitor {
     this.stuckMs = options.stuckMs ?? 5 * 60 * 1000;
     this.clockSkewMs = options.clockSkewMs ?? 30 * 1000;
     this.keepEventsMs = options.keepEventsMs ?? 24 * 60 * 60 * 1000;
+    this.forgetPeerAfterMs = options.forgetPeerAfterMs ?? 30 * 60 * 1000;
   }
 
   /** Called when an alert should be shown as a notice (at most once per kind per 10 minutes). */
@@ -149,18 +193,61 @@ export class HealthMonitor {
       const kind = (r.rule ?? "") as AlertKind;
       if (kind === "history-near-cap" || kind === "content-shrank" || kind === "state-backup-used") {
         const file = kind === "state-backup-used" ? (r.msg ?? "").split(":")[0] : r.path ?? "";
-        this.alert(kind, r.msg ?? "", { path: r.path, peer: r.peer, params: { path: file } });
+        // The device whose change emptied a note is named when the record has it.
+        const who = kind === "content-shrank" && r.peer ? peerName(r.peer) : "";
+        this.alert(kind, r.msg ?? "", { path: r.path, peer: r.peer, params: who ? { path: file, who } : { path: file } });
       }
     } else if (r.op === "held" && r.level === "warn") {
-      this.alert("bulk-held", r.msg ?? "", { peer: r.peer });
+      // One per batch, cleared when the batch no longer waits (keepHeld).
+      this.alert("bulk-held", r.msg ?? "", { peer: r.peer, key: r.batch });
     } else if (r.op === "skip" && r.rule === "too-large") {
       // A file that will not reach this device until the limit is raised.
       this.alert("too-large", `${r.path}: ${r.msg ?? ""}`, { path: r.path, peer: r.peer, key: r.path, params: { path: r.path ?? "" } });
     } else if (r.op === "error" && r.path) {
       // A file operation that failed (connection errors have no path).
       const keep = /could not keep the old version/.test(r.msg ?? "");
-      this.alert(keep ? "keep-failed" : "write-failed", r.error ?? r.msg ?? "", { path: r.path, peer: r.peer });
+      this.alert(keep ? "keep-failed" : "write-failed", r.error ?? r.msg ?? "", { path: r.path, peer: r.peer, key: r.path });
+    } else if (r.path && r.level === "info" && DONE_OPS.has(r.op)) {
+      // A later step on the file went through: whatever failed before
+      // (the version store was not writable, say) works again.
+      for (const kind of PATH_KINDS) this.clear(kind, r.path);
+    } else if (r.op === "connect" && r.peer) {
+      const { id, name } = parsePeer(r.peer);
+      this.notePeerConnected(id, name);
+    } else if (r.op === "disconnect" && r.peer) {
+      this.notePeerDisconnected(parsePeer(r.peer).id);
     }
+  }
+
+  /**
+   * The held deletion batches still waiting (by ID); the alerts of the
+   * others go, as nothing of theirs is held any more.
+   */
+  keepHeld(ids: Iterable<string>): void {
+    const keep = new Set([...ids].map((id) => `bulk-held\n${id}`));
+    let any = false;
+    for (const [k, a] of this.active) {
+      if (a.kind === "bulk-held" && !keep.has(k)) {
+        this.active.delete(k);
+        any = true;
+      }
+    }
+    if (any) this.changed();
+  }
+
+  /** The file is no longer at this path (deleted, or renamed away). */
+  notePathGone(path: string): void {
+    for (const kind of PATH_KINDS) this.clear(kind, path);
+    this.clear("too-large", path);
+  }
+
+  /**
+   * The file at this path was written. A write that failed works now; a
+   * version that could not be kept is still not kept, so that alert stays.
+   */
+  notePathWritten(path: string): void {
+    this.clear("write-failed", path);
+    this.clear("too-large", path);
   }
 
   alert(
@@ -230,13 +317,26 @@ export class HealthMonitor {
    */
   noteExchange(
     peerId: string,
-    info: { name?: string; differing: Iterable<string>; digestMatch?: boolean; clockOffsetMs?: number },
+    info: {
+      name?: string;
+      differing: Iterable<string>;
+      digestMatch?: boolean;
+      clockOffsetMs?: number;
+      /** Files among `differing` that one side does not take for their size. */
+      tooLarge?: { here?: Iterable<string>; there?: Iterable<string> };
+    },
   ): void {
     const now = this.now();
     const p = this.peer(peerId);
     if (info.name) p.name = info.name;
+    // Apart on purpose (see tooLargeToSync): listed on their own, not as
+    // files that are not yet in sync.
+    p.tooLargeHere = [...(info.tooLarge?.here ?? [])].sort();
+    p.tooLargeThere = [...(info.tooLarge?.there ?? [])].sort();
+    const apart = new Set([...p.tooLargeHere, ...p.tooLargeThere]);
     const next = new Map<string, { n: number; since: number }>();
     for (const path of info.differing) {
+      if (apart.has(path)) continue;
       const old = p.rounds.get(path);
       next.set(path, { n: (old?.n ?? 0) + 1, since: old?.since ?? now });
     }
@@ -282,6 +382,35 @@ export class HealthMonitor {
     this.changed();
   }
 
+  /**
+   * Of the files that differ in a file list exchange, those that differ
+   * because one side does not take files that large (maxReceiveMB): the
+   * peer's version over this device's limit (`here`), or ours over the
+   * peer's (`there`, as the peer gave it in its handshake). They stay apart
+   * by design. Notes are synced through their history, not as files, and
+   * have no limit. A limit of 0 is none.
+   */
+  static tooLargeToSync(
+    diff: {
+      localOnly: ListedFile[];
+      remoteOnly: ListedFile[];
+      conflicting: Array<{ local: ListedFile; remote: ListedFile }>;
+    },
+    limitHere: number,
+    limitThere: number,
+  ): { here: string[]; there: string[] } {
+    const over = (f: ListedFile, limit: number) => limit > 0 && !f.isTextFile && f.size > limit;
+    const here: string[] = [];
+    const there: string[] = [];
+    for (const f of diff.remoteOnly) if (over(f, limitHere)) here.push(f.path);
+    for (const f of diff.localOnly) if (over(f, limitThere)) there.push(f.path);
+    for (const c of diff.conflicting) {
+      if (over(c.remote, limitHere)) here.push(c.remote.path);
+      else if (over(c.local, limitThere)) there.push(c.local.path);
+    }
+    return { here, there };
+  }
+
   forgetPeer(peerId: string): void {
     if (!this.peerStates.delete(peerId)) return;
     this.clear("file-mismatch", peerId);
@@ -289,10 +418,53 @@ export class HealthMonitor {
     this.changed();
   }
 
+  /*
+   * Devices that are gone. A device is listed while connected, and for
+   * forgetPeerAfterMs (30 minutes) after it disconnects, shown as
+   * disconnected and not counted in the summary; then it is forgotten. It
+   * is forgotten at once when a device of the same name connects under
+   * another ID: that is the same device with a new ID (its settings were
+   * changed, or it was given a new ID), and the old ID will not come back.
+   * A device of the same name that is still connected is another device
+   * and is kept. Connections are learned from the log's connect and
+   * disconnect records (see watch).
+   */
+
+  notePeerConnected(peerId: string, name?: string): void {
+    const p = this.peer(peerId);
+    p.disconnectedAt = undefined;
+    if (name) {
+      if (!p.name || peerName(p.name) !== name) p.name = `${peerId} (${name})`;
+      for (const [id, other] of [...this.peerStates]) {
+        if (id !== peerId && other.disconnectedAt !== undefined && other.name && peerName(other.name) === name) {
+          this.forgetPeer(id);
+        }
+      }
+    }
+    this.changed();
+  }
+
+  notePeerDisconnected(peerId: string): void {
+    const p = this.peerStates.get(peerId);
+    if (!p || p.disconnectedAt !== undefined) return;
+    p.disconnectedAt = this.now();
+    this.changed();
+  }
+
+  /** Forgets the devices disconnected for longer than forgetPeerAfterMs. */
+  private _forgetGone(): void {
+    const now = this.now();
+    for (const [id, p] of [...this.peerStates]) {
+      if (p.disconnectedAt !== undefined && now - p.disconnectedAt >= this.forgetPeerAfterMs) this.forgetPeer(id);
+    }
+  }
+
   peers(): PeerHealth[] {
+    this._forgetGone();
     return [...this.peerStates].map(([id, p]) => ({
       id,
       name: p.name,
+      connected: p.disconnectedAt === undefined,
       lastExchange: p.lastExchange,
       lastConsistent: p.lastConsistent,
       differing: p.differing,
@@ -300,11 +472,14 @@ export class HealthMonitor {
       digestMatch: p.digestMatch,
       waiting: p.waiting,
       clockOffsetMs: p.clockOffsetMs,
+      tooLargeHere: p.tooLargeHere,
+      tooLargeThere: p.tooLargeThere,
     }));
   }
 
   /** For the status bar, over the peers connected now. */
   summary(connected: string[]): HealthSummary {
+    this._forgetGone();
     const unsynced = new Set<string>();
     let consistent = 0;
     let since: number | undefined;
@@ -323,7 +498,7 @@ export class HealthMonitor {
   private peer(id: string): PeerState {
     let p = this.peerStates.get(id);
     if (!p) {
-      p = { rounds: new Map(), differing: 0, waiting: 0 };
+      p = { rounds: new Map(), differing: 0, waiting: 0, tooLargeHere: [], tooLargeThere: [] };
       this.peerStates.set(id, p);
     }
     return p;
@@ -367,6 +542,7 @@ addStrings("en", {
   "alert.file-mismatch": "LAN Vault Sync: {count} file(s) still differ from {peer}: {files}. Open the sync panel for details.",
   "alert.history-near-cap": "LAN Vault Sync: the version history is near its space limit. The oldest versions will be removed first.",
   "alert.content-shrank": "LAN Vault Sync: a change from another device emptied or cut short {path}. The earlier version is in the recovery center.",
+  "alert.content-shrank-by": "LAN Vault Sync: a change from {who} emptied or cut short {path}. The earlier version is in the recovery center.",
   "alert.too-large": "LAN Vault Sync did not take {path}: it is larger than this device's limit for received files. Raise “Largest file to receive” in settings to sync it.",
   "health.title": "Health",
   "health.alerts": "Alerts",
@@ -376,6 +552,9 @@ addStrings("en", {
   "health.pending": "{name}: being compared (checked {time})",
   "health.waiting": "waiting for {count} file(s)",
   "health.clock": "clock off by {secs} s",
+  "health.disconnected": "{name}: disconnected (last checked {time})",
+  "health.tooLargeHere": "{count} file(s) not received: larger than this device's limit",
+  "health.tooLargeThere": "{count} file(s) not sent: larger than {name}'s limit",
   "health.dismiss": "Dismiss",
   "health.export": "Export diagnostics",
   "cmd.exportDiagnostics": "Export diagnostics (sync key masked)",
@@ -395,6 +574,7 @@ addStrings("zh", {
   "alert.file-mismatch": "LAN Vault Sync：有 {count} 个文件与 {peer} 仍不一致：{files}。详情见同步面板。",
   "alert.history-near-cap": "LAN Vault Sync：版本历史快到空间上限了，会先删除最旧的版本。",
   "alert.content-shrank": "LAN Vault Sync：其他设备的修改清空了 {path}，或删掉了它的大半内容。之前的版本在恢复中心里。",
+  "alert.content-shrank-by": "LAN Vault Sync：{who} 的修改清空了 {path}，或删掉了它的大半内容。之前的版本在恢复中心里。",
   "alert.too-large": "LAN Vault Sync 没有接收 {path}：它超过了本设备的接收大小上限。在设置里调高“接收文件的大小上限”即可同步它。",
   "health.title": "健康状况",
   "health.alerts": "提醒",
@@ -404,6 +584,9 @@ addStrings("zh", {
   "health.pending": "{name}：正在比对（{time} 检查）",
   "health.waiting": "等待 {count} 个文件",
   "health.clock": "时钟相差 {secs} 秒",
+  "health.disconnected": "{name}：已断开（{time} 最后检查）",
+  "health.tooLargeHere": "{count} 个文件未接收：超过本设备的接收大小上限",
+  "health.tooLargeThere": "{count} 个文件未发送：超过 {name} 的接收大小上限",
   "health.dismiss": "知道了",
   "health.export": "导出诊断信息",
   "cmd.exportDiagnostics": "导出诊断信息（同步密钥已遮盖）",

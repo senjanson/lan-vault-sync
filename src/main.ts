@@ -1,4 +1,4 @@
-import { Notice, Platform, Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Platform, Plugin, TAbstractFile, WorkspaceLeaf } from "obsidian";
 import { LANSyncSettings, DEFAULT_SETTINGS } from "./types";
 import {
   PLUGIN_ID,
@@ -58,8 +58,14 @@ export default class LANSyncPlugin extends Plugin {
   private syncLogView: SyncLogView | null = null;
   private backupService: ConflictBackupService | null = null;
   syncLogService: SyncLogService | null = null;
-  /** Last notice time per refused address, so retries don't spam notices. */
+  /**
+   * Last notice time per refused device and reason, so retries don't spam
+   * notices. By device rather than address: the two connections between
+   * two devices (one each way) come from different addresses.
+   */
   private authNoticeAt = new Map<string, number>();
+  /** Tells an open recovery center that the version store came or went. */
+  private recoveryCenter: { storeChanged(): void } | null = null;
   /** Addresses the user was told cannot be reached, until they connect. */
   private unreachableNotified = new Set<string>();
   private startTimer: ReturnType<typeof setTimeout> | null = null;
@@ -119,7 +125,17 @@ export default class LANSyncPlugin extends Plugin {
 
     // Register sync log view
     // Recovery center: old versions kept before sync changed a file.
-    registerRecoveryCenter(this, () => this.coordinator?.versionStore ?? null);
+    this.recoveryCenter = registerRecoveryCenter(this, () => this.coordinator?.versionStore ?? null);
+
+    // Alerts about a file's failed step go once the file is written, or gone
+    // (see HealthMonitor.notePathGone).
+    const vault = this.app.vault;
+    this.registerEvent(vault.on("create", (file: TAbstractFile) => this.coordinator?.health.notePathWritten(file.path)));
+    this.registerEvent(vault.on("modify", (file: TAbstractFile) => this.coordinator?.health.notePathWritten(file.path)));
+    this.registerEvent(vault.on("delete", (file: TAbstractFile) => this.coordinator?.health.notePathGone(file.path)));
+    this.registerEvent(
+      vault.on("rename", (_file: TAbstractFile, oldPath: string) => this.coordinator?.health.notePathGone(oldPath)),
+    );
 
     this.registerView(SYNC_LOG_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
       this.syncLogView = new SyncLogView(leaf, this.syncLogService!);
@@ -355,16 +371,19 @@ export default class LANSyncPlugin extends Plugin {
 
   private notifyAuthFailure(failure: AuthFailure): void {
     const now = Date.now();
-    const last = this.authNoticeAt.get(failure.address) ?? 0;
+    const key = `${failure.reason}\n${failure.deviceId || failure.deviceName || failure.address}`;
+    const last = this.authNoticeAt.get(key) ?? 0;
     if (now - last < 10 * 60_000) return;
-    this.authNoticeAt.set(failure.address, now);
+    this.authNoticeAt.set(key, now);
     const name = failure.deviceName || failure.address;
     new Notice(
       failure.reason === "outdated"
         ? t("notice.peerOutdated", { name })
         : failure.reason === "newer"
           ? t("notice.peerNewer", { name })
-          : t("notice.peerBadKey", { name }),
+          : failure.reason === "vault-mismatch"
+            ? t("notice.peerOtherVault", { name })
+            : t("notice.peerBadKey", { name }),
       10000,
     );
   }
@@ -448,9 +467,12 @@ export default class LANSyncPlugin extends Plugin {
     // The notice stays until those deletions are decided, then goes.
     let heldSeen = new Set<string>();
     const heldNotices: Array<{ ids: string[]; notice: Notice }> = [];
+    const health = this.coordinator.health;
     this.coordinator.onHeldDeletionsChange((held) => {
       const fresh = held.filter((h) => !heldSeen.has(h.id));
       heldSeen = new Set(held.map((h) => h.id));
+      // The panel's alert of a batch goes with the batch.
+      health.keepHeld(heldSeen);
       for (let i = heldNotices.length - 1; i >= 0; i--) {
         if (heldNotices[i].ids.some((id) => heldSeen.has(id))) continue;
         heldNotices[i].notice.hide();
@@ -513,6 +535,8 @@ export default class LANSyncPlugin extends Plugin {
     });
 
     await this.coordinator.start();
+    // A recovery center opened before sync started shows the store now.
+    this.recoveryCenter?.storeChanged();
     const error = this.coordinator.getStartError();
     if (error) new Notice(t("notice.error", { error }), 15000);
   }
@@ -521,6 +545,7 @@ export default class LANSyncPlugin extends Plugin {
     if (this.coordinator) {
       await this.coordinator.stop();
       this.coordinator = null;
+      this.recoveryCenter?.storeChanged();
     }
     this.showStatus();
   }

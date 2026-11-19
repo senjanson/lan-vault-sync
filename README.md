@@ -27,7 +27,7 @@ Most sync solutions route your notes through a third-party server. LAN Vault Syn
 |---|---|
 | **Real-time sync** | File changes pushed to all peers within seconds via WebSocket |
 | **CRDT text merge** | Markdown / text files merged automatically at character level using [Yjs](https://github.com/yjs/yjs) — no conflicts, no data loss |
-| **Binary file sync** | Images, PDFs, and other attachments synced via SHA-256 hash comparison |
+| **Binary file sync** | Images, PDFs, and other attachments synced via SHA-256 hash comparison. Changed on one side, that side wins; changed on both, the later version wins and the other is kept (see [Conflict Resolution](#conflict-resolution)) |
 | **Auto-discovery** | Devices find each other via UDP broadcast — zero configuration needed |
 | **Manual peers** | Add peers by `IP:port` for networks where broadcast is blocked |
 | **QR code pairing** | Generate a QR code on desktop; scan with your phone to add the peer instantly — no typing required |
@@ -82,7 +82,7 @@ Device A (Mac)                        Device B (iPhone / iPad)
 - **Update every device at the same time.** Version 0.5 speaks sync protocol 3 and does not sync with 0.4 or older. A device with an older version is refused with a notice that names it.
 - **New `.lan-vault-sync/` folder in the vault.** It holds the version history (`history/`), the activity log, diagnostics exports and files being received. Obsidian does not show it and it is not synced. Exclude it from other sync or backup tools if you like; deleting it only loses the version history.
 - **Pair again to share the vault ID.** Each vault now has its own ID, sent in the pairing link and QR code, so two vaults with the same folder name are told apart. Devices paired before keep working: until you pair again, the vault's folder name stands in for the ID, as before.
-- **Recovery center.** Run *Open recovery center* to see every version that sync replaced or deleted, and put any back. Conflict copies of attachments are no longer made next to the file; the older version goes to the history.
+- **Recovery center.** Run *Open recovery center* to see every version that sync replaced or deleted, and put any back. An attachment changed on one side only no longer leaves a conflict copy: the changed side wins. Changed on both sides, the later version wins; the losing side keeps a conflict copy beside the file only if its version exists on no other device, and the replaced version also goes to the history.
 - **Large files.** Files are streamed and checked on arrival. Phones take files up to 200 MB by default (setting *Largest file to receive*); a larger file is not sent to them and the sync panel says which.
 - **Same device ID on two devices** (for example after copying a vault with its `.obsidian` folder) is now detected. Use *New device ID* in settings on one of them.
 - The *Conflict strategy* setting is gone: every conflict keeps both versions.
@@ -178,7 +178,7 @@ Version 0.4 renamed these commands, so hotkeys set for them before must be set a
 | File type | Strategy |
 |---|---|
 | Text (`.md`, `.txt`, `.canvas`, …) | Yjs CRDT — automatic, **lossless** merge at character level |
-| Binary (images, PDFs, audio, …) | A side changed alone wins; changed on both, the later version wins and the other is kept in the version history |
+| Binary (images, PDFs, audio, …) | Changed on one side: that side wins, no copy. Changed on both: the later version wins; the losing side keeps a conflict copy (`name (conflict 1a2b3c).ext`) if its version exists only on that device. The replaced version also goes to the version history |
 
 ### Mobile Compatibility
 

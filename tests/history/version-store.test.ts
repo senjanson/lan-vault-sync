@@ -84,6 +84,50 @@ describe('VersionStore', () => {
     expect(await store.read('not-a-hash')).toBeNull();
   });
 
+  it('a version is in the index on disk when keep returns', async () => {
+    const { adapter, store } = setup();
+    const kept = await store.keep('a.md', enc('x'), 'delete', { rule: 'r' });
+    expect(kept).not.toBeNull();
+    const lines = indexFiles(adapter).map((f) => text(adapter, f)!).join('');
+    expect(lines).toContain('"path":"a.md"');
+  });
+
+  it('refuses a keep whose index line cannot be written, though its content is stored already', async () => {
+    const { adapter, store } = setup();
+    expect(await store.keep('a.md', enc('same'), 'delete', { rule: 'r' })).not.toBeNull();
+    // The history folder stops taking writes; the blob for "same" is there.
+    const append = adapter.append.bind(adapter);
+    adapter.append = async () => { throw new Error('EACCES'); };
+    // Was: the blob was found, the line only queued, and the keep reported done.
+    expect(await store.keep('b.md', enc('same'), 'delete', { rule: 'r' })).toBeNull();
+    expect(await store.keepNoteWrite('c.md', 'old text here', '', { rule: 'r' })).toMatchObject({ kept: false });
+    // Nothing was changed for them, so no version is listed for them either.
+    expect((await store.list()).map((e) => e.path)).toEqual(['a.md']);
+    adapter.append = append;
+    expect(await store.keep('b.md', enc('same'), 'delete', { rule: 'r' })).not.toBeNull();
+    expect(indexFiles(adapter).map((f) => text(adapter, f)!).join('')).toContain('"path":"b.md"');
+  });
+
+  it('writes the index lines of keeps made together in few appends', async () => {
+    const { adapter, store } = setup();
+    let appends = 0;
+    const append = adapter.append.bind(adapter);
+    adapter.append = async (p: string, d: string) => {
+      appends++;
+      await new Promise((r) => setTimeout(r, 2));
+      return append(p, d);
+    };
+    // Four at a time, as a peer's bulk deletion is applied.
+    const paths = Array.from({ length: 400 }, (_, i) => `n${i}.md`);
+    const work = [...paths];
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      for (let p = work.shift(); p; p = work.shift()) expect(await store.keep(p, enc('same'), 'delete', { rule: 'r' })).not.toBeNull();
+    }));
+    expect(await store.list()).toHaveLength(400);
+    // About one append per two files; one per file without the sharing.
+    expect(appends).toBeLessThanOrEqual(220);
+  });
+
   it('keeps a merged note at most every 5 minutes, but a shrink at once', async () => {
     const { clock, store } = setup();
     const ctx = { rule: 'merge' };

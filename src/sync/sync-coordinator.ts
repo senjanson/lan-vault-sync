@@ -166,6 +166,12 @@ export class SyncCoordinator {
   private knownHashes = new Map<string, string>();
   /** Files and hashes saved when sync last ran; see _deletedWhileStopped. */
   private lastRunFiles = new Map<string, string>();
+  /**
+   * Folders there when sync last ran, with the files then in each (at any
+   * depth); see _inferFolderDeletions. Saved in the same list as the files,
+   * with FOLDER_HASH for a hash.
+   */
+  private lastRunFolders = new Map<string, string[]>();
   /** The versions this device last had in common with each peer; see AgreedVersions. */
   private agreed: AgreedVersions;
   /**
@@ -265,6 +271,8 @@ export class SyncCoordinator {
       onKeepFailed: (path, op) => this._emitEvent("event.keep-failed", { op, path }),
     });
     this.binarySync.setGate(this.gate);
+    // A restore from the recovery center undoes the deletion at once.
+    this.versionStore?.setRestoreHook?.((path, exists) => this._noteRestored(path, exists));
     this.binarySync.setPeerLabel((id) => this._peerLabel(id));
     this.breaker = new DeleteBreaker(() => this._vaultFileCount(), Date.now, options?.deleteLimits);
     this.workspace = options?.workspace ?? null;
@@ -372,6 +380,7 @@ export class SyncCoordinator {
           if (file.isTextFile) await this.docManager.removeDoc(file.path);
         }
       }
+      if (action === "delete") this._inferFolderDeletions();
     } else {
       for (const item of batch.items.values()) {
         if (action === "delete") {
@@ -582,7 +591,13 @@ export class SyncCoordinator {
     // Peer connected → initial sync
     this.connectionManager.onAuthFailed((failure) => {
       this._emitEvent(
-        failure.reason === "outdated" ? "event.refused-outdated" : failure.reason === "newer" ? "event.refused-newer" : "event.refused-key",
+        failure.reason === "outdated"
+          ? "event.refused-outdated"
+          : failure.reason === "newer"
+            ? "event.refused-newer"
+            : (failure.reason as string) === "vault-mismatch"
+              ? "event.refused-vault"
+              : "event.refused-key",
         { name: failure.deviceName, address: failure.address },
       );
       this.onAuthFailedCb?.(failure);
@@ -655,8 +670,13 @@ export class SyncCoordinator {
 
     // Yjs doc manager → remote content changed, write to file
     this.docManager.onRemoteContent(
-      async (filePath, content, previousContent) => {
-        await this._writeFileFromRemote(filePath, content, previousContent);
+      async (filePath, content, previousContent, fromDeviceId) => {
+        // The version kept and the log name the peer whose change this is.
+        const cause: OpContext = {
+          peer: fromDeviceId ? this._peerLabel(fromDeviceId) : undefined,
+          rule: previousContent === undefined ? "full-state-adopted" : "text-merge",
+        };
+        await this._writeFileFromRemote(filePath, content, previousContent, cause);
       },
     );
 
@@ -1202,9 +1222,10 @@ export class SyncCoordinator {
     filePath: string,
     content: string,
     previousContent: string | undefined,
+    cause: OpContext = { rule: "text-merge" },
   ): Promise<void> {
     const run = (this.remoteWriteQueues.get(filePath) ?? Promise.resolve()).then(() =>
-      this._writeFileFromRemoteNow(filePath, content, previousContent),
+      this._writeFileFromRemoteNow(filePath, content, previousContent, cause),
     );
     this.remoteWriteQueues.set(filePath, run);
     void run.then(() => {
@@ -1217,6 +1238,7 @@ export class SyncCoordinator {
     filePath: string,
     content: string,
     previousContent: string | undefined,
+    cause: OpContext,
   ): Promise<void> {
     try {
       if (!this._isAllowedPath(filePath)) {
@@ -1260,7 +1282,7 @@ export class SyncCoordinator {
       // then saves. Writing the file underneath a dirty editor made Obsidian
       // merge the disk change into the editor a second time, duplicating the
       // text that was just typed there (and sending the copy back out).
-      if (isExistingFile && (await this._writeToOpenEditor(filePath))) {
+      if (isExistingFile && (await this._writeToOpenEditor(filePath, cause))) {
         this._clearConflictLoserGuard(filePath);
         return;
       }
@@ -1289,7 +1311,7 @@ export class SyncCoordinator {
               filePath,
               diskBytes ?? new TextEncoder().encode(diskContent),
               "text-remote-overwrite",
-              { rule: "text-merge" },
+              cause,
             );
             if (!backup) {
               logger.error(
@@ -1304,7 +1326,7 @@ export class SyncCoordinator {
           } else {
             // An ordinary merge write: kept at most every few minutes, but
             // at once when the note is emptied or cut by half (plan 4.2).
-            backupId = await this._keepNoteWrite(filePath, diskContent, latestContent);
+            backupId = await this._keepNoteWrite(filePath, diskContent, latestContent, cause);
           }
         }
       }
@@ -1327,7 +1349,7 @@ export class SyncCoordinator {
 
       if (file instanceof TFile) {
         await this.vault.modify(file, latestContent);
-        this.gate.applied("overwrite", filePath, { rule: "text-merge" }, undefined, { hash: await this._hashText(latestContent), size: latestContent.length }, backupId);
+        this.gate.applied("overwrite", filePath, cause, undefined, { hash: await this._hashText(latestContent), size: latestContent.length }, backupId);
       } else {
         await ensureVaultParentFolder(this.vault as any, filePath, (folder) => this.watcher.markRemoteWrite(folder, "write"));
         await this.vault.create(filePath, latestContent);
@@ -1374,7 +1396,7 @@ export class SyncCoordinator {
    * Bring an open editor up to date with the doc. Returns false when the file
    * is not open in an editor.
    */
-  private async _writeToOpenEditor(filePath: string): Promise<boolean> {
+  private async _writeToOpenEditor(filePath: string, cause: OpContext = { rule: "text-merge" }): Promise<boolean> {
     for (let attempt = 0; attempt < 20; attempt++) {
       const editor = this._openEditors(filePath)[0];
       if (!editor) return false;
@@ -1392,7 +1414,7 @@ export class SyncCoordinator {
       }
       const latest = await this.docManager.getContent(filePath);
       // Notes open in an editor keep versions too (plan 4.2).
-      const kept = current !== latest ? await this._keepNoteWrite(filePath, current, latest) : undefined;
+      const kept = current !== latest ? await this._keepNoteWrite(filePath, current, latest, cause) : undefined;
 
       // Typing during the awaits above is folded in on the next round.
       if (editor.getValue() !== current) continue;
@@ -1416,7 +1438,7 @@ export class SyncCoordinator {
           }
         }
         editor.transaction({ changes });
-        this.gate.applied("overwrite", filePath, { rule: "text-merge" }, { hash: await this._hashText(current), size: current.length }, { hash: await this._hashText(latest), size: latest.length }, kept, "open editor");
+        this.gate.applied("overwrite", filePath, cause, { hash: await this._hashText(current), size: current.length }, { hash: await this._hashText(latest), size: latest.length }, kept, "open editor");
       }
       await this._markWritten(filePath, latest, false);
       return true;
@@ -1785,6 +1807,9 @@ export class SyncCoordinator {
       }
     }
 
+    // Before the peer's folders are made here: one removed here while sync
+    // was off may be one to remove on the peer instead.
+    this._inferFolderDeletions(remoteDeleted);
     if (meta.folders) await this._syncFolders(meta.folders, remoteDeleted);
     if (settled) this._scheduleTreeSync();
 
@@ -2112,12 +2137,57 @@ export class SyncCoordinator {
     for (const path of remote) {
       if (this.vault.getAbstractFileByPath(path)) continue;
       if (this._folderDeleted(path, (p) => (this.vault.getAbstractFileByPath(p) ? undefined : this.tombstones.get(p)))) continue;
+      // Removed here while sync was off, and its files' deletions are not
+      // settled yet (see _inferFolderDeletions): not brought back empty. A
+      // file of it that is kept or fetched makes it again.
+      if (this._folderGoneSinceLastRun(path)) continue;
       await this._createFolderFromRemote(path);
     }
     for (const path of this._listFolders()) {
       if (remote.has(path)) continue;
       if (this._folderDeleted(path, (p) => (remote.has(p) ? undefined : remoteDeleted.get(p)))) this._scheduleFolderDelete(path);
     }
+  }
+
+  /** A folder that was here when sync last ran and is gone, with no record of that. */
+  private _folderGoneSinceLastRun(path: string): boolean {
+    return this.lastRunFolders.has(path) && !this.vault.getAbstractFileByPath(path) && !this.tombstones.get(path);
+  }
+
+  /**
+   * Folders removed here while sync was off, as their files were: their
+   * removal goes to the peers once each file that was in them has gone the
+   * same way, its deletion recorded here (applied under the limits, or
+   * confirmed by the user) or by the peer (`remoteDeleted`). A peer then
+   * removes the folder only if it is empty there, as for any folder deleted
+   * here (see _scheduleFolderDelete). A file still held for the user, kept,
+   * or changed on a peer (and so fetched back) leaves the folder to come
+   * back with it.
+   */
+  private _inferFolderDeletions(remoteDeleted?: Map<string, Tombstone>): void {
+    if (this.lastRunFolders.size === 0) return;
+    const removed: string[] = [];
+    for (const [folder, files] of this.lastRunFolders) {
+      if (!this._folderGoneSinceLastRun(folder)) {
+        // Here again, or its deletion recorded: nothing left to infer.
+        if (this.vault.getAbstractFileByPath(folder) || this.tombstones.get(folder)) this.lastRunFolders.delete(folder);
+        continue;
+      }
+      const settled = files.every(
+        (f) =>
+          !this.vault.getAbstractFileByPath(f) &&
+          !this.breaker.isHeldInferred(f) &&
+          (!!this.tombstones.get(f) || !!remoteDeleted?.get(f)),
+      );
+      if (!settled) continue;
+      this.lastRunFolders.delete(folder);
+      this.tombstones.add(folder, FOLDER_HASH);
+      removed.push(folder);
+      this.eventLog.record({ op: "delete", path: folder, rule: "deleted-while-stopped", msg: "folder removed while sync was off, with its files" });
+    }
+    if (removed.length === 0) return;
+    for (const folder of removed) this.connectionManager.broadcast(encodeFolderOp(MessageType.FOLDER_DELETE, folder));
+    this._scheduleTreeSync();
   }
 
   private async _createFolderFromRemote(path: string): Promise<void> {
@@ -2273,8 +2343,15 @@ export class SyncCoordinator {
         this._noteStateBackupUsed(file, why),
       );
       if (!saved || typeof saved !== "object") return;
+      const folders: string[] = [];
+      this.lastRunFolders.clear();
       for (const [path, hash] of Object.entries(saved)) {
-        if (typeof hash === "string") this.lastRunFiles.set(path, hash);
+        if (hash === FOLDER_HASH) folders.push(path);
+        else if (typeof hash === "string") this.lastRunFiles.set(path, hash);
+      }
+      for (const folder of folders) {
+        const prefix = `${folder}/`;
+        this.lastRunFolders.set(folder, [...this.lastRunFiles.keys()].filter((p) => p.startsWith(prefix)));
       }
     } catch (err) {
       logger.warn("Could not read the list of synced files:", err);
@@ -2286,6 +2363,10 @@ export class SyncCoordinator {
     if (!adapter) return;
     const index: Record<string, string> = {};
     for (const [path, hash] of this.knownHashes) index[path] = hash;
+    // Folders too, to tell one removed while sync was off (see
+    // _inferFolderDeletions). An older version reads them as files whose
+    // hash no file has, which it never takes for deleted.
+    for (const folder of this._listFolders()) if (!(folder in index)) index[folder] = FOLDER_HASH;
     try {
       await ensureParentDirectory(adapter, FILE_INDEX_FILE);
       await writeAtomic(adapter, FILE_INDEX_FILE, JSON.stringify(index));
@@ -2324,6 +2405,12 @@ export class SyncCoordinator {
       differing,
       digestMatch: typeof meta.digest === "string" ? meta.digest === vaultDigest(localFiles.values()) : undefined,
       clockOffsetMs: this.connectionManager.getClockOffset(deviceId),
+      // Kept apart by a receive limit (maxReceiveMB): listed on their own.
+      tooLarge: HealthMonitor.tooLargeToSync(
+        diff,
+        this.connectionManager.receiveLimitBytes?.() ?? 0,
+        this.connectionManager.peerReceiveLimit?.(deviceId) ?? 0,
+      ),
     });
     this.health.noteWaiting(deviceId, this.binarySync.waitingFrom(deviceId));
   }
@@ -2653,7 +2740,7 @@ export class SyncCoordinator {
         const slash = newPath.lastIndexOf("/");
         if (slash > 0) await this._createFolderFromRemote(newPath.slice(0, slash));
       }
-      await this._writeFileFromRemote(newPath, merged.content, merged.previousContent);
+      await this._writeFileFromRemote(newPath, merged.content, merged.previousContent, { peer: this._peerLabel(deviceId), rule: "follow-rename" });
       if (file.path !== oldPath) return false;
       if (!(await this._removeFollowedFile(file, oldPath, newPath, deviceId))) return false;
       this.tombstones.add(oldPath, oldHash, undefined, newPath);
@@ -2736,6 +2823,22 @@ export class SyncCoordinator {
   private _reviveIfDeleted(path: string): void {
     if (!this.tombstones.get(path)) return;
     this.tombstones.revive(path);
+    if (this.tombstones.getRevival(path)) this._scheduleTreeSync();
+  }
+
+  /**
+   * A file is about to be put back from the version store (see
+   * VersionStore.setRestoreHook). It undoes the deletion now, not when its
+   * create event is handled: on a phone restoring hundreds of files that
+   * came seconds later, and a file list exchange meanwhile found a peer's
+   * deletion record matching the restored content and deleted it again.
+   * Without a record of its own (the deletion was never seen here, or its
+   * record expired), a restored file still undoes any deletion made before
+   * now, so that peers drop theirs and fetch it.
+   */
+  private _noteRestored(path: string, exists: boolean): void {
+    if (this.tombstones.get(path)) this.tombstones.revive(path);
+    else if (!exists) this.tombstones.noteRevival(path, Date.now());
     if (this.tombstones.getRevival(path)) this._scheduleTreeSync();
   }
 
@@ -2917,14 +3020,15 @@ export class SyncCoordinator {
    * empty or cut short (a storage fault, a write cut off) sends that as an
    * edit, and every device takes it.
    */
-  private async _keepNoteWrite(path: string, oldText: string, newText: string): Promise<string | undefined> {
+  private async _keepNoteWrite(path: string, oldText: string, newText: string, cause: OpContext): Promise<string | undefined> {
     if (!this.versionStore || oldText === newText) return undefined;
-    const r = await this.versionStore.keepNoteWrite(path, oldText, newText, { rule: "text-merge" }).catch(() => null);
+    const r = await this.versionStore.keepNoteWrite(path, oldText, newText, cause).catch(() => null);
     if (r?.shrink) {
       this.eventLog.record({
         op: "alert",
         level: "warn",
         path,
+        peer: cause.peer,
         rule: "content-shrank",
         before: { size: oldText.length },
         after: { size: newText.length },

@@ -144,7 +144,9 @@ export class SyncView extends ItemView {
     const section = container.createDiv({ cls: 'lan-sync-section' });
     section.createEl('h4', { text: t('health.title') });
     const connected = new Set(devices.map((d) => d.deviceId));
-    const shown = health.filter((p) => connected.has(p.id) && p.lastExchange !== undefined);
+    // A device that left is listed as disconnected for a while (see
+    // HealthMonitor.forgetPeerAfterMs), without its old comparison.
+    const shown = health.filter((p) => p.lastExchange !== undefined);
     if (shown.length === 0) {
       section.createEl('p', { text: t('health.noPeers'), cls: 'lan-sync-muted' });
     } else {
@@ -152,6 +154,10 @@ export class SyncView extends ItemView {
       for (const p of shown) {
         const name = devices.find((d) => d.deviceId === p.id)?.deviceName || peerName(p.name ?? p.id);
         const time = formatTime(p.lastExchange!);
+        if (!connected.has(p.id) || p.connected === false) {
+          list.createEl('li', { text: t('health.disconnected', { name, time }), cls: 'lan-sync-muted' });
+          continue;
+        }
         const parts = [
           p.unsynced.length > 0
             ? t('health.differing', { name, count: p.unsynced.length, time })
@@ -159,6 +165,11 @@ export class SyncView extends ItemView {
               ? t('health.pending', { name, time })
               : t('health.consistent', { name, time }),
         ];
+        // Apart by design: one side does not take files that large.
+        const here = p.tooLargeHere ?? [];
+        const there = p.tooLargeThere ?? [];
+        if (here.length > 0) parts.push(t('health.tooLargeHere', { count: here.length }));
+        if (there.length > 0) parts.push(t('health.tooLargeThere', { count: there.length, name }));
         if (p.waiting > 0) parts.push(t('health.waiting', { count: p.waiting }));
         if (p.clockOffsetMs !== undefined && Math.abs(p.clockOffsetMs) > 30000) {
           parts.push(t('health.clock', { secs: Math.round(Math.abs(p.clockOffsetMs) / 1000) }));
@@ -168,6 +179,10 @@ export class SyncView extends ItemView {
           item.addClass('lan-sync-state-error');
           const files = item.createEl('ul');
           for (const f of p.unsynced.slice(0, 5)) files.createEl('li', { text: f });
+        }
+        if (here.length + there.length > 0) {
+          const files = item.createEl('ul', { cls: 'lan-sync-muted' });
+          for (const f of [...here, ...there].slice(0, 5)) files.createEl('li', { text: f });
         }
       }
     }

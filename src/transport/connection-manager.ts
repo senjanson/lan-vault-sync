@@ -77,13 +77,16 @@ interface PairedPeer {
 type HandshakeStep = PairedPeer | null | 'continue';
 
 export interface AuthFailure {
+  /** The device's ID as it gave it, when it gave one. */
+  deviceId?: string;
   deviceName: string;
   address: string;
   /**
    * 'outdated' when the peer runs an older protocol version, 'newer' when
-   * this device does.
+   * this device does; 'vault-mismatch' when it syncs another vault (another
+   * vault ID, see utils/vault-id).
    */
-  reason: 'key-mismatch' | 'outdated' | 'newer';
+  reason: 'key-mismatch' | 'outdated' | 'newer' | 'vault-mismatch';
 }
 
 /** Unauthenticated sockets are closed after this long. */
@@ -243,7 +246,12 @@ export class ConnectionManager {
         }
 
         const payload = decodeJSON<HandshakePayload>(msg.payload);
-        if (!this._isValidPeer(payload)) {
+        const check = this._checkPeer(payload);
+        if (check === 'other-vault') {
+          this._refuseOtherVault(payload, address);
+          return null;
+        }
+        if (check !== 'ok') {
           logger.warn(`Rejected outbound peer ${payload.deviceId}: invalid handshake ack`);
           return null;
         }
@@ -253,14 +261,14 @@ export class ConnectionManager {
         // send it anything.
         const key = this.settings.syncKey;
         if (typeof payload.nonce !== 'string' || typeof payload.proof !== 'string') {
-          this._authFailed(payload.deviceName, address, 'outdated');
+          this._authFailed(payload.deviceName, address, 'outdated', payload.deviceId);
           return null;
         }
         const expected = key
           ? await authProof(key, ackMessage(nonce, payload.nonce, payload.deviceId))
           : '';
         if (!key || !proofsMatch(payload.proof, expected)) {
-          this._authFailed(payload.deviceName, address, 'key-mismatch');
+          this._authFailed(payload.deviceName, address, 'key-mismatch', payload.deviceId);
           return null;
         }
         ws.send(
@@ -482,12 +490,23 @@ export class ConnectionManager {
         }
 
         const payload = decodeJSON<HandshakePayload>(msg.payload);
-        if (!this._isValidPeer(payload)) {
+        const check = this._checkPeer(payload);
+        if (check === 'other-vault') {
+          this._refuseOtherVault(payload, ip);
+          // Say which vault this is before closing, so the calling device
+          // can tell its user why (it would otherwise see only a closed
+          // connection). An ack without a proof: nothing that needs the
+          // key, and a device that does not look for this reason closes
+          // it as an invalid ack, as it closed the connection before.
+          ws.send(encodeHandshakeAck({ ...this.localInfo, protocolVersion: PROTOCOL_VERSION }));
+          return null;
+        }
+        if (check !== 'ok') {
           logger.warn(`Rejected peer ${payload.deviceId}: invalid handshake`);
           return null;
         }
         if (typeof payload.nonce !== 'string' || payload.nonce.length < 16) {
-          this._authFailed(payload.deviceName, ip, 'outdated');
+          this._authFailed(payload.deviceName, ip, 'outdated', payload.deviceId);
           return null;
         }
         if (!this._checkVersion(payload, ip)) return null;
@@ -524,7 +543,7 @@ export class ConnectionManager {
         authMessage(pending.serverNonce, pending.clientNonce, pending.device.deviceId),
       );
       if (!proofsMatch(auth.proof, expected)) {
-        this._authFailed(pending.device.deviceName, ip, 'key-mismatch');
+        this._authFailed(pending.device.deviceName, ip, 'key-mismatch', pending.device.deviceId);
         return null;
       }
       return {
@@ -538,23 +557,47 @@ export class ConnectionManager {
   private _checkVersion(payload: HandshakePayload, address: string): boolean {
     const version = typeof payload.protocolVersion === 'number' ? payload.protocolVersion : 1;
     if (version === PROTOCOL_VERSION) return true;
-    this._authFailed(payload.deviceName, address, version < PROTOCOL_VERSION ? 'outdated' : 'newer');
+    this._authFailed(payload.deviceName, address, version < PROTOCOL_VERSION ? 'outdated' : 'newer', payload.deviceId);
     return false;
+  }
+
+  /**
+   * A device of another vault: its vault ID differs from ours (one side
+   * took a new vault ID, or was paired with another vault). Reported like
+   * the other refusals, so the user learns why the two do not connect.
+   */
+  private _refuseOtherVault(payload: HandshakePayload, address: string): void {
+    this._authFailed(
+      payload.deviceName,
+      address,
+      'vault-mismatch',
+      payload.deviceId,
+      `it syncs another vault (vault ID ${String(payload.vaultId)}; this device's is ${this.vaultId})`,
+    );
   }
 
   /**
    * Report a refusal once until that address pairs: the device is retried
    * (and refused again) for as long as nothing changes on either side.
    */
-  private _authFailed(deviceName: string, address: string, reason: AuthFailure['reason']): void {
+  private _authFailed(
+    deviceName: string,
+    address: string,
+    reason: AuthFailure['reason'],
+    deviceId?: string,
+    why: string = reason,
+  ): void {
     const key = `${reason} ${address} ${deviceName}`;
     if (this.reportedRefusals.has(key)) {
       logger.debug(`Rejected ${deviceName} (${address}) again: ${reason}`);
       return;
     }
     this.reportedRefusals.set(key, address);
-    logger.warn(`Rejected ${deviceName} (${address}): ${reason}`);
-    this.onAuthFailedCb?.({ deviceName: String(deviceName ?? ''), address, reason });
+    // A warning, so it is also in the sync log (see logger.setLogSink).
+    logger.warn(`Rejected ${deviceName} (${address}): ${why}`);
+    const failure: AuthFailure = { deviceName: String(deviceName ?? ''), address, reason };
+    if (typeof deviceId === 'string' && deviceId) failure.deviceId = deviceId;
+    this.onAuthFailedCb?.(failure);
   }
 
   /**
@@ -822,21 +865,22 @@ export class ConnectionManager {
     return this.settings.deviceId <= device.deviceId;
   }
 
-  private _isValidPeer(payload: HandshakePayload): boolean {
-    if (!payload.deviceId) return false;
+  /** Whether a handshake comes from a device this one may pair with. */
+  private _checkPeer(payload: HandshakePayload): 'ok' | 'invalid' | 'other-vault' {
+    if (!payload.deviceId) return 'invalid';
     if (payload.deviceId === this.settings.deviceId) {
       if (payload.instance && this.localInfo.instance && payload.instance !== this.localInfo.instance) {
         this.onDuplicateDeviceCb?.(payload.deviceName ?? "");
       }
-      return false;
-    }
-    if (payload.vaultId !== this.vaultId) {
-      return false;
+      return 'invalid';
     }
     if (!Number.isInteger(payload.port) || payload.port <= 0 || payload.port > 65535) {
-      return false;
+      return 'invalid';
     }
-    return true;
+    if (payload.vaultId !== this.vaultId) {
+      return 'other-vault';
+    }
+    return 'ok';
   }
 
   private _peerAcceptsIncomingConnections(

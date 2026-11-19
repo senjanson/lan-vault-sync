@@ -6,6 +6,7 @@ class FakeEl {
   children: FakeEl[] = [];
   constructor(public text = '') {}
   empty() { this.children = []; }
+  addClass() {}
   private add(opts?: { text?: string }) {
     const el = new FakeEl(opts?.text ?? '');
     this.children.push(el);
@@ -84,5 +85,28 @@ describe('SyncView', () => {
     expect(text.indexOf('| Keep them |')).toBeLessThan(text.indexOf('| Delete them'));
     await content.find('Keep them').onclick();
     expect((Notice as any).shown.join(' ')).toContain('already handled');
+  });
+
+  it('lists files too large for one side apart, and a device that left as disconnected', async () => {
+    const peer = (id: string, extra: object) => ({
+      id, name: `${id} (${id})`, connected: true, lastExchange: 0, differing: 0, unsynced: [], waiting: 0,
+      tooLargeHere: [], tooLargeThere: [], ...extra,
+    });
+    const { view, content } = openView(() => ({
+      state: 'watching',
+      devices: [device('pixel')],
+      unreachable: [],
+      health: [
+        peer('pixel', { tooLargeHere: ['big.bin'], tooLargeThere: ['a.bin', 'b.bin'] }),
+        peer('macb', { connected: false, differing: 1, unsynced: ['x.md'] }),
+      ],
+    }));
+    await view.onOpen();
+    const text = content.allText();
+    expect(text).toContain('pixel: all files match');
+    expect(text).toContain('1 file(s) not received: larger than this device');
+    expect(text).toContain("2 file(s) not sent: larger than pixel's limit");
+    expect(text).toContain('macb: disconnected');
+    expect(text).not.toContain('not yet in sync');
   });
 });

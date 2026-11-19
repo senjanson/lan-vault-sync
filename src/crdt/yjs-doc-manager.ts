@@ -48,9 +48,10 @@ export class YjsDocManager {
     | ((filePath: string, update: Uint8Array, fromDeviceId: string) => void)
     | null = null;
   /** previousContent is undefined when the doc was replaced by an unrelated
-   *  history, so the caller must back up whatever is on disk. */
+   *  history, so the caller must back up whatever is on disk. fromDeviceId:
+   *  the peer whose change it is, when it is one peer's. */
   private onRemoteContentCb:
-    | ((filePath: string, content: string, previousContent: string | undefined) => Promise<void> | void)
+    | ((filePath: string, content: string, previousContent: string | undefined, fromDeviceId?: string) => Promise<void> | void)
     | null = null;
 
   private keepsWrittenContent: (filePath: string) => boolean = () => false;
@@ -125,7 +126,7 @@ export class YjsDocManager {
 
   /** Register callback: fired when a remote update changes doc content → should write to file */
   onRemoteContent(
-    cb: (filePath: string, content: string, previousContent: string | undefined) => Promise<void> | void,
+    cb: (filePath: string, content: string, previousContent: string | undefined, fromDeviceId?: string) => Promise<void> | void,
   ): void {
     this.onRemoteContentCb = cb;
   }
@@ -360,6 +361,7 @@ export class YjsDocManager {
         filePath,
         remoteContentChange.content,
         remoteContentChange.previousContent,
+        fromDeviceId,
       );
     }
   }
@@ -453,6 +455,7 @@ export class YjsDocManager {
         filePath,
         remoteContentChange.content,
         remoteContentChange.previousContent,
+        fromDeviceId,
       );
     }
     return related;
@@ -512,7 +515,7 @@ export class YjsDocManager {
 
     const pending = change as { content: string; previousContent: string | undefined } | null;
     if (pending) {
-      await this.onRemoteContentCb?.(filePath, pending.content, pending.previousContent);
+      await this.onRemoteContentCb?.(filePath, pending.content, pending.previousContent, fromDeviceId);
     }
     return result;
   }
@@ -587,6 +590,7 @@ export class YjsDocManager {
         filePath,
         remoteContentChange.content,
         remoteContentChange.previousContent,
+        fromDeviceId,
       );
     }
   }

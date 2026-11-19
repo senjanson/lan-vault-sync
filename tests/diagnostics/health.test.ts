@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HealthMonitor, vaultDigest, type Alert } from '../../src/diagnostics/health';
+import { HealthMonitor, alertText, vaultDigest, type Alert } from '../../src/diagnostics/health';
 import { EventLog } from '../../src/diagnostics/event-log';
 import { buildDiagnostics, maskSettings } from '../../src/diagnostics/export';
 import { DEFAULT_SETTINGS } from '../../src/types';
@@ -121,5 +121,159 @@ describe('alert text', () => {
     }
     expect(peerName('kg9t76s8s5nhzkj5 (v2)')).toBe('v2');
     expect(peerName(undefined)).toBe('?');
+  });
+});
+
+describe('alerts that go away with their problem', () => {
+  it('clears a held-deletion alert once its batch no longer waits', () => {
+    const h = new HealthMonitor();
+    const log = new EventLog(null);
+    h.watch(log);
+    log.record({ op: 'held', level: 'warn', path: 'a.md', peer: 'mac (Mac)', batch: 'b1', rule: 'bulk-delete' });
+    log.record({ op: 'held', level: 'warn', peer: 'mac (Mac)', batch: 'b2', rule: 'deleted-while-stopped' });
+    expect(h.alerts().filter((a) => a.kind === 'bulk-held')).toHaveLength(2);
+    h.keepHeld(['b2']);
+    expect(h.alerts().map((a) => a.key)).toEqual(['bulk-held\nb2']);
+    h.keepHeld([]);
+    expect(h.alerts()).toEqual([]);
+  });
+
+  it('clears a failed keep or write for a path once a later step on it succeeds', () => {
+    const h = new HealthMonitor();
+    const log = new EventLog(null);
+    h.watch(log);
+    log.record({ op: 'error', level: 'error', path: 'a.png', msg: 'remote-file-delete: could not keep the old version; nothing was changed' });
+    log.record({ op: 'error', level: 'error', path: 'b.png', msg: 'remote-file-delete: could not keep the old version; nothing was changed' });
+    log.record({ op: 'error', level: 'error', path: 'c.png', error: 'EACCES', msg: 'write failed' });
+    expect(h.alerts()).toHaveLength(3);
+    // The version store is writable again and the deletion went ahead.
+    log.record({ op: 'delete', path: 'a.png', peer: 'mac (Mac)', rule: 'tombstone-covers' });
+    expect(h.alerts().map((a) => a.path).sort()).toEqual(['b.png', 'c.png']);
+    // A skip or a failed precondition is no success.
+    log.record({ op: 'precondition-failed', level: 'warn', path: 'b.png' });
+    expect(h.alerts()).toHaveLength(2);
+    log.record({ op: 'overwrite', path: 'b.png' });
+    expect(h.alerts().map((a) => a.path)).toEqual(['c.png']);
+  });
+
+  it('clears a failed keep or write once the file is gone, and a failed write once the file is written', () => {
+    const h = new HealthMonitor();
+    const log = new EventLog(null);
+    h.watch(log);
+    log.record({ op: 'error', level: 'error', path: 'a.png', msg: 'remote-file-delete: could not keep the old version; nothing was changed' });
+    log.record({ op: 'error', level: 'error', path: 'b.png', error: 'EACCES', msg: 'write failed' });
+    log.record({ op: 'error', level: 'error', path: 'c.png', error: 'EACCES', msg: 'write failed' });
+    h.notePathWritten('a.png');
+    // A write to the file says nothing about the version store.
+    expect(h.alerts()).toHaveLength(3);
+    h.notePathGone('a.png');
+    h.notePathWritten('b.png');
+    expect(h.alerts().map((a) => a.path)).toEqual(['c.png']);
+  });
+
+  it('keeps an event alert like a shrink until it is dismissed', () => {
+    const h = new HealthMonitor();
+    const log = new EventLog(null);
+    h.watch(log);
+    log.record({ op: 'alert', level: 'warn', path: 'c.md', rule: 'content-shrank', msg: 'emptied' });
+    log.record({ op: 'overwrite', path: 'c.md' });
+    h.notePathGone('c.md');
+    h.keepHeld([]);
+    expect(h.alerts().map((a) => a.kind)).toEqual(['content-shrank']);
+  });
+});
+
+describe('emptied note alert', () => {
+  it('names the device whose change emptied the note, when the record has it', () => {
+    const h = new HealthMonitor();
+    const log = new EventLog(null);
+    h.watch(log);
+    log.record({ op: 'alert', level: 'warn', path: 'c.md', peer: 'aaaa (macA)', rule: 'content-shrank', msg: 'emptied' });
+    expect(alertText(h.alerts()[0])).toContain('macA');
+    const h2 = new HealthMonitor();
+    const log2 = new EventLog(null);
+    h2.watch(log2);
+    log2.record({ op: 'alert', level: 'warn', path: 'd.md', rule: 'content-shrank', msg: 'emptied' });
+    expect(alertText(h2.alerts()[0])).toContain('another device');
+  });
+});
+
+describe('devices that are gone', () => {
+  it('shows a disconnected device as disconnected for a while, then drops it', () => {
+    let now = 0;
+    const h = new HealthMonitor({ now: () => now, forgetPeerAfterMs: 30 * MIN });
+    const log = new EventLog(null, { now: () => now });
+    h.watch(log);
+    log.record({ op: 'connect', peer: 'macb (macB)' });
+    h.noteExchange('macb', { name: 'macb (macB)', differing: ['a.md'] });
+    h.noteExchange('macb', { name: 'macb (macB)', differing: ['a.md'] });
+    expect(h.peers()[0]).toMatchObject({ id: 'macb', connected: true, unsynced: ['a.md'] });
+    log.record({ op: 'disconnect', peer: 'macb' });
+    now += 10 * MIN;
+    expect(h.peers()[0]).toMatchObject({ id: 'macb', connected: false });
+    // Not counted while away.
+    expect(h.summary(['other'])).toMatchObject({ unsynced: 0 });
+    now += 25 * MIN;
+    expect(h.peers()).toEqual([]);
+  });
+
+  it('keeps a device that comes back before then', () => {
+    let now = 0;
+    const h = new HealthMonitor({ now: () => now, forgetPeerAfterMs: 30 * MIN });
+    const log = new EventLog(null, { now: () => now });
+    h.watch(log);
+    log.record({ op: 'connect', peer: 'pixel (Pixel)' });
+    h.noteExchange('pixel', { name: 'pixel (Pixel)', differing: [] });
+    log.record({ op: 'disconnect', peer: 'pixel (Pixel)' });
+    now += 20 * MIN;
+    log.record({ op: 'connect', peer: 'pixel (Pixel)' });
+    now += 20 * MIN;
+    expect(h.peers()).toMatchObject([{ id: 'pixel', connected: true }]);
+  });
+
+  it('drops a device at once when the same device comes back under a new ID', () => {
+    let now = 0;
+    const h = new HealthMonitor({ now: () => now, stuckMs: 0 });
+    const log = new EventLog(null, { now: () => now });
+    h.watch(log);
+    for (let i = 0; i < 4; i++) h.noteExchange('5wpgwawbf5wpwhws', { name: '5wpgwawbf5wpwhws (macB)', differing: ['a.md'] });
+    expect(h.alerts().length).toBeGreaterThan(0);
+    log.record({ op: 'disconnect', peer: '5wpgwawbf5wpwhws' });
+    log.record({ op: 'connect', peer: 'kg9t76s8s5nhzkj5 (macB)' });
+    expect(h.peers().map((p) => p.id)).toEqual(['kg9t76s8s5nhzkj5']);
+    expect(h.alerts().filter((a) => a.kind === 'file-mismatch')).toEqual([]);
+  });
+
+  it('does not drop another connected device that happens to share the name', () => {
+    const h = new HealthMonitor();
+    const log = new EventLog(null);
+    h.watch(log);
+    log.record({ op: 'connect', peer: 'aaaa (Phone)' });
+    log.record({ op: 'connect', peer: 'bbbb (Phone)' });
+    expect(h.peers().map((p) => p.id).sort()).toEqual(['aaaa', 'bbbb']);
+  });
+});
+
+describe('files too large for one side', () => {
+  const file = (path: string, size: number, isTextFile = false) => ({ path, size, isTextFile, hash: path + size, mtime: 0 });
+  it('picks the files a receive limit keeps apart, on either side', () => {
+    const diff = {
+      localOnly: [file('big-here.bin', 300), file('small.bin', 10), file('huge.md', 300, true)],
+      remoteOnly: [file('big-there.bin', 300), file('small2.bin', 10)],
+      conflicting: [{ local: file('c.bin', 10), remote: file('c.bin', 300) }],
+    };
+    // This device takes up to 200; the peer up to 100.
+    expect(HealthMonitor.tooLargeToSync(diff, 200, 100)).toEqual({ here: ['big-there.bin', 'c.bin'], there: ['big-here.bin'] });
+    expect(HealthMonitor.tooLargeToSync(diff, 0, 0)).toEqual({ here: [], there: [] });
+  });
+
+  it('lists such files apart and does not count them as out of sync', () => {
+    const h = new HealthMonitor({ stuckMs: 0 });
+    for (let i = 0; i < 4; i++) {
+      h.noteExchange('pixel', { name: 'pixel (Pixel)', differing: ['big.bin', 'out.bin'], tooLarge: { here: ['big.bin'], there: ['out.bin'] } });
+    }
+    expect(h.peers()[0]).toMatchObject({ differing: 0, unsynced: [], tooLargeHere: ['big.bin'], tooLargeThere: ['out.bin'] });
+    expect(h.summary(['pixel'])).toMatchObject({ consistent: 1, unsynced: 0 });
+    expect(h.alerts()).toEqual([]);
   });
 });
