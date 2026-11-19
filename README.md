@@ -33,7 +33,10 @@ Most sync solutions route your notes through a third-party server. LAN Vault Syn
 | **QR code pairing** | Generate a QR code on desktop; scan with your phone to add the peer instantly — no typing required |
 | **Offline-friendly** | Edit while offline; changes are merged automatically on reconnect |
 | **P2P architecture** | Every device is equal — no central server or hub required |
-| **Conflict backups** | Binary-file conflicts are backed up before overwrite so nothing is lost |
+| **Version history** | Every version replaced or deleted by sync is kept for 30 days in `.lan-vault-sync/history`; restore it from the recovery center |
+| **Delete protection** | Many deletions at once, or deletions found after sync was off, wait for your confirmation |
+| **Sync health** | The status bar and sync panel show, per device, whether everything is in sync, and raise an alert when something needs you |
+| **Diagnostics export** | One command writes a diagnostics file to share when something goes wrong, with the sync key masked |
 
 ---
 
@@ -73,6 +76,16 @@ Device A (Mac)                        Device B (iPhone / iPad)
 2. In your vault, create the folder `.obsidian/plugins/lan-vault-sync/`.
 3. Copy the three downloaded files into that folder.
 4. In Obsidian, go to **Settings → Community Plugins**, toggle off **Restricted Mode**, and enable **LAN Vault Sync**.
+
+### Upgrading to 0.5
+
+- **Update every device at the same time.** Version 0.5 speaks sync protocol 3 and does not sync with 0.4 or older. A device with an older version is refused with a notice that names it.
+- **New `.lan-vault-sync/` folder in the vault.** It holds the version history (`history/`), the activity log, diagnostics exports and files being received. Obsidian does not show it and it is not synced. Exclude it from other sync or backup tools if you like; deleting it only loses the version history.
+- **Pair again to share the vault ID.** Each vault now has its own ID, sent in the pairing link and QR code, so two vaults with the same folder name are told apart. Devices paired before keep working: until you pair again, the vault's folder name stands in for the ID, as before.
+- **Recovery center.** Run *Open recovery center* to see every version that sync replaced or deleted, and put any back. Conflict copies of attachments are no longer made next to the file; the older version goes to the history.
+- **Large files.** Files are streamed and checked on arrival. Phones take files up to 200 MB by default (setting *Largest file to receive*); a larger file is not sent to them and the sync panel says which.
+- **Same device ID on two devices** (for example after copying a vault with its `.obsidian` folder) is now detected. Use *New device ID* in settings on one of them.
+- The *Conflict strategy* setting is gone: every conflict keeps both versions.
 
 ### Upgrading to 0.4
 
@@ -114,13 +127,7 @@ Auto-discovery uses UDP broadcast, which is blocked on some managed Wi-Fi networ
 
 ### Status Bar
 
-The plugin shows a status indicator in the Obsidian status bar:
-
-| Icon | Meaning |
-|---|---|
-| 🔴 | Sync disabled or no peers found |
-| 🟡 | Discovering peers |
-| 🟢 | Connected and syncing |
+The status bar says whether this device is in sync with the others, for example *LAN Sync: in sync with 3 · 14:02*, or how many files are still different, or that something needs you. Click it to open the sync panel, which shows each device, any alerts, and buttons to dismiss them or export diagnostics.
 
 ### Commands
 
@@ -130,6 +137,8 @@ Open the command palette (`Cmd/Ctrl + P`) and search for:
 - **LAN Vault Sync: Open sync panel** — open the sidebar panel with connected peers and sync log
 - **LAN Vault Sync: Add device by address** — add a peer by `IP:port`
 - **LAN Vault Sync: Open sync log** — open the sync log
+- **LAN Vault Sync: Open recovery center** — see and restore versions that sync replaced or deleted
+- **LAN Vault Sync: Export diagnostics** — write a diagnostics file (sync key masked) to `.lan-vault-sync/diagnostics/` and copy it
 
 Version 0.4 renamed these commands, so hotkeys set for them before must be set again.
 
@@ -145,6 +154,10 @@ Version 0.4 renamed these commands, so hotkeys set for them before must be set a
 | Ignored Paths | `.obsidian/`, `.trash/` | Glob patterns excluded from sync |
 | Sync Check Interval | `30s` | Period between full file-tree verification passes |
 | Debug Logging | Off | Write verbose logs to the developer console |
+| Keep old versions for (days) | `30` | How long the version history keeps replaced and deleted versions |
+| Space limit on a phone (MB) | `500` | Space the history may take on a phone; oldest versions go first |
+| Largest file to receive (MB) | `200` on phones, `0` (no limit) on computers | Larger files from other devices are not taken |
+| Device ID | Generated | Shown with a *New device ID* button, for when two devices share one |
 
 ---
 
@@ -157,14 +170,15 @@ Version 0.4 renamed these commands, so hotkeys set for them before must be set a
 - **Binary sync**: SHA-256 hash comparison; full file transferred when hashes differ
 - **Discovery**: UDP broadcast on port `53713` (same subnet only)
 - **CRDT persistence**: Yjs document states saved to `.obsidian/plugins/lan-vault-sync/crdt-state/`
-- **Conflict backups**: Overwritten binary files backed up to `.obsidian/plugins/lan-vault-sync/conflicts/`
+- **Version history**: Replaced and deleted versions kept in `.lan-vault-sync/history/` for 30 days
+- **State files**: Written to a temporary file and renamed, with a `.bak` of the previous one, so a crash mid-save cannot lose the record of synced or deleted files
 
 ### Conflict Resolution
 
 | File type | Strategy |
 |---|---|
 | Text (`.md`, `.txt`, `.canvas`, …) | Yjs CRDT — automatic, **lossless** merge at character level |
-| Binary (images, PDFs, audio, …) | Last-write-wins by modification timestamp; previous version backed up |
+| Binary (images, PDFs, audio, …) | A side changed alone wins; changed on both, the later version wins and the other is kept in the version history |
 
 ### Mobile Compatibility
 

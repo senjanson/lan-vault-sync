@@ -62,17 +62,17 @@ describe('versions shared with peers, saved', { timeout: 20000 }, () => {
     const port = ports();
     const A = await startNode(root, 'aaaa', port, []);
     const now = Date.now();
-    const c = A.coord as any;
-    c.agreedHashes = new Map([
+    const c = (A.coord as any).agreed;
+    c.byPeer = new Map([
       ['p1', new Map([['x.md', 'h1'], ['y.md', 'h2']])],
       ['p2', new Map([['x.md', 'h1'], ['y.md', 'h3']])],
       ['p3', new Map([['x.md', 'h1']])],
       ['gone', new Map([['x.md', 'h0']])],
     ]);
-    c.agreedPeersSeen = new Map([['p1', now], ['p2', now], ['p3', now], ['gone', now - 200 * 24 * 3600 * 1000]]);
-    c.versionTimes = new Map([['x.md', { hash: 'h1', at: 1234 }]]);
-    c.agreedHashesChanged = true;
-    await c._saveAgreedHashes();
+    c.peerSeen = new Map([['p1', now], ['p2', now], ['p3', now], ['gone', now - 200 * 24 * 3600 * 1000]]);
+    c.times = new Map([['x.md', { hash: 'h1', at: 1234 }]]);
+    c.changed = true;
+    await c.save();
     const saved = JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
     expect(saved.version).toBe(2);
     expect(saved.peers.map((p: { id: string }) => p.id)).toEqual(['p1', 'p2', 'p3', 'gone']);
@@ -83,22 +83,22 @@ describe('versions shared with peers, saved', { timeout: 20000 }, () => {
     await A.coord.stop();
 
     const B = await startNode(root, 'aaaa', port, []);
-    const d = B.coord as any;
-    expect([...d.agreedHashes.keys()]).toEqual(['p1', 'p2', 'p3']);
-    expect(Object.fromEntries(d.agreedHashes.get('p1'))).toEqual({ 'x.md': 'h1', 'y.md': 'h2' });
-    expect(Object.fromEntries(d.agreedHashes.get('p2'))).toEqual({ 'x.md': 'h1', 'y.md': 'h3' });
-    expect(Object.fromEntries(d.agreedHashes.get('p3'))).toEqual({ 'x.md': 'h1' });
-    expect(d.versionTimes.get('x.md')).toEqual({ hash: 'h1', at: 1234 });
-    d.agreedHashes.delete('p3');
-    d.agreedHashesChanged = true;
-    await d._saveAgreedHashes();
+    const d = (B.coord as any).agreed;
+    expect([...d.byPeer.keys()]).toEqual(['p1', 'p2', 'p3']);
+    expect(Object.fromEntries(d.byPeer.get('p1'))).toEqual({ 'x.md': 'h1', 'y.md': 'h2' });
+    expect(Object.fromEntries(d.byPeer.get('p2'))).toEqual({ 'x.md': 'h1', 'y.md': 'h3' });
+    expect(Object.fromEntries(d.byPeer.get('p3'))).toEqual({ 'x.md': 'h1' });
+    expect(d.times.get('x.md')).toEqual({ hash: 'h1', at: 1234 });
+    d.byPeer.delete('p3');
+    d.changed = true;
+    await d.save();
     expect(JSON.parse(fs.readFileSync(path.join(root, file), 'utf8')).files['x.md']).toBe('h1');
     await B.coord.stop();
 
     // The earlier form, one hash per note, does not say which peer had it.
     fs.writeFileSync(path.join(root, file), JSON.stringify({ 'x.md': 'h1' }));
     const C = await startNode(root, 'aaaa', port, []);
-    expect((C.coord as any).agreedHashes.size).toBe(0);
+    expect((C.coord as any).agreed.byPeer.size).toBe(0);
     await C.coord.stop();
   });
 });
@@ -360,7 +360,7 @@ describe('separate histories that both devices keep', { timeout: 20000 }, () => 
     b.historyWinners.set('aaaa\nn.md', { localWins: true, keepCopy: false });
     await b.docManager.removeDoc('n.md');
     const before = count(A, 'Resolving unrelated history') + count(B, 'Resolving unrelated history');
-    await b._sendFullTextState('aaaa', 'n.md', 'Sending text state');
+    await b._sendFullTextState('aaaa', 'n.md', 'event.sending-text');
     await sleep(2000);
     const sent = count(A, 'Resolving unrelated history') + count(B, 'Resolving unrelated history') - before;
     expect(sent).toBeGreaterThan(0);

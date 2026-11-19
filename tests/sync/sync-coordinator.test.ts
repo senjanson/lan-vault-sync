@@ -127,9 +127,7 @@ describe('SyncCoordinator text conflict safety', () => {
     const applyLocalChange = vi.fn().mockResolvedValue(undefined);
     const getContent = vi.fn().mockResolvedValue('merged content');
     const markRemoteWrite = vi.fn();
-    const backupTextFile = vi.fn().mockResolvedValue({
-      contentPath: '.obsidian/plugins/lan-sync/conflicts/mock/files/note.md',
-    });
+    const keepOld = vi.spyOn((coordinator as any).gate, 'keepOld').mockResolvedValue({ id: 'v1' });
 
     (coordinator as any).watcher = {
       consumePendingModify: vi.fn().mockReturnValue(true),
@@ -140,10 +138,6 @@ describe('SyncCoordinator text conflict safety', () => {
       applyLocalChange,
       getContent,
     };
-    (coordinator as any).backupService = {
-      backupTextFile,
-    };
-
     await (coordinator as any)._writeFileFromRemote(
       'note.md',
       'stale remote content',
@@ -152,14 +146,12 @@ describe('SyncCoordinator text conflict safety', () => {
 
     expect(applyLocalChange).toHaveBeenCalledWith('note.md', 'local pending', true);
     expect(getContent).toHaveBeenCalledWith('note.md');
-    expect(backupTextFile).toHaveBeenCalledWith(
+    // The divergent disk text is kept before it is replaced.
+    expect(keepOld).toHaveBeenCalledWith(
       'note.md',
-      'local pending',
+      new TextEncoder().encode('local pending'),
       'text-remote-overwrite',
-      {
-        previousContent: 'server previous',
-        mergedContent: 'merged content',
-      },
+      { rule: 'text-merge' },
     );
     expect(markRemoteWrite).toHaveBeenCalledWith('note.md');
     expect(await vault.cachedRead(vault.getFile('note.md')!)).toBe('merged content');
@@ -169,7 +161,7 @@ describe('SyncCoordinator text conflict safety', () => {
     const applyLocalChange = vi.fn().mockResolvedValue(undefined);
     const getContent = vi.fn().mockResolvedValue('merged content');
     const markRemoteWrite = vi.fn();
-    const backupTextFile = vi.fn().mockResolvedValue(null);
+    const keepOld = vi.spyOn((coordinator as any).gate, 'keepOld').mockResolvedValue(null);
 
     (coordinator as any).watcher = {
       consumePendingModify: vi.fn().mockReturnValue(true),
@@ -180,17 +172,13 @@ describe('SyncCoordinator text conflict safety', () => {
       applyLocalChange,
       getContent,
     };
-    (coordinator as any).backupService = {
-      backupTextFile,
-    };
-
     await (coordinator as any)._writeFileFromRemote(
       'note.md',
       'stale remote content',
       'server previous',
     );
 
-    expect(backupTextFile).toHaveBeenCalled();
+    expect(keepOld).toHaveBeenCalled();
     expect(markRemoteWrite).not.toHaveBeenCalled();
     expect(await vault.cachedRead(vault.getFile('note.md')!)).toBe('local pending');
   });
@@ -201,7 +189,7 @@ describe('SyncCoordinator text conflict safety', () => {
     const buildSpy = vi.spyOn(buildFileTreeModule, 'buildFileTree');
 
     vault.setText('local.md', 'local');
-    (coordinator as any).connectionManager = { sendTo };
+    (coordinator as any).connectionManager = { sendTo, getConnectedPeers: () => [], getClockOffset: () => undefined };
     (coordinator as any).docManager = {
       removeDoc: vi.fn().mockResolvedValue(undefined),
       hasDocState: vi.fn().mockResolvedValue(false),
@@ -240,7 +228,7 @@ describe('SyncCoordinator text conflict safety', () => {
     const buildFileTreeModule = await import('../../src/sync/file-tree');
     const buildSpy = vi.spyOn(buildFileTreeModule, 'buildFileTree');
 
-    (coordinator as any).connectionManager = { sendTo };
+    (coordinator as any).connectionManager = { sendTo, getConnectedPeers: () => [], getClockOffset: () => undefined };
     buildSpy.mockResolvedValueOnce({
       files: new Map([
         ['note.md', { path: 'note.md', hash: 'local-hash', mtime: 1, size: 13, isTextFile: true }],
@@ -254,7 +242,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     await (coordinator as any)._handleRemoteFileTree('peer-1', remoteTree);
 
-    expect(sendFullTextState).toHaveBeenCalledWith('peer-1', 'note.md', 'Sending text state');
+    expect(sendFullTextState).toHaveBeenCalledWith('peer-1', 'note.md', 'event.sending-text');
     expect(sendTo).not.toHaveBeenCalled();
     buildSpy.mockRestore();
   });
@@ -286,7 +274,7 @@ describe('SyncCoordinator text conflict safety', () => {
 
     await (coordinator as any)._handleRemoteFileTree('peer-z', remoteTree);
 
-    expect(sendFullTextState).toHaveBeenCalledWith('peer-z', 'note.md', 'Bootstrapping shared text state');
+    expect(sendFullTextState).toHaveBeenCalledWith('peer-z', 'note.md', 'event.bootstrapping');
     expect((coordinator as any).pendingInitialBootstrapPeers.has('peer-z')).toBe(false);
 
     buildSpy.mockRestore();
@@ -305,7 +293,7 @@ describe('SyncCoordinator text conflict safety', () => {
     const localFile = vault.getFile('note.md')!;
     localFile.stat.mtime = 10;
 
-    (coordinator as any).connectionManager = { sendTo };
+    (coordinator as any).connectionManager = { sendTo, getConnectedPeers: () => [], getClockOffset: () => undefined };
     (coordinator as any).watcher = {
       consumePendingModify,
       takePendingModify: vi.fn().mockReturnValue(null),
@@ -531,5 +519,65 @@ describe('SyncCoordinator open editor writes', () => {
     expect(modify).not.toHaveBeenCalled();
     expect(editor.getValue()).toBe('L1 C\nL2 B\n');
     expect(await docManager.getContent('note.md')).toBe('L1 C\nL2 B\n');
+  });
+});
+
+describe('SyncCoordinator events', () => {
+  it('shows sync events in the user\'s language and keeps the log in English', async () => {
+    const { setLanguage } = await import('../../src/i18n');
+    const vault = new FakeVault();
+    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] });
+    const shown: string[] = [];
+    coordinator.onSyncEvent((m) => shown.push(m));
+    (coordinator as any).connectionManager = {
+      sendTo: vi.fn(),
+      getConnectedPeers: () => [{ deviceId: 'peer-1', deviceName: '手机' }],
+      getClockOffset: () => undefined,
+    };
+    const progress: string[] = [];
+    try {
+      setLanguage('zh');
+      await (coordinator as any)._handleRemoteFileTree('peer-1', { files: [] });
+      (coordinator as any).connectionManager.getConnectedPeerIds = () => [];
+      await coordinator.manualFullSync((_p, m) => progress.push(m));
+    } finally {
+      setLanguage(null);
+    }
+    expect(shown.length).toBeGreaterThan(0);
+    for (const m of [...shown, ...progress]) expect(m).not.toMatch(/[A-Za-z]{3,}/);
+    expect(shown.join(' ')).toContain('手机');
+    const logged = (coordinator as any).eventLog.recentRecords?.() ?? [];
+    for (const r of logged.filter((r: any) => r.op === 'log')) expect(r.msg.replace('手机', '')).not.toMatch(/[\u4e00-\u9fff]/);
+  });
+});
+
+describe('SyncCoordinator held deletions', () => {
+  it('tells whether a held group was still waiting', async () => {
+    const coordinator = new SyncCoordinator(new FakeVault() as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] });
+    expect(await coordinator.resolveHeldDeletions('held-9', 'keep')).toBe(false);
+  });
+});
+
+describe('SyncCoordinator held deletions from a relaying device', () => {
+  it('names the device that deleted the files, not the one that passed the deletions on', () => {
+    const vault = new FakeVault();
+    for (let i = 0; i < 4; i++) vault.setText(`f${i}.md`, 'x');
+    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] },
+      { deleteLimits: { incomingMin: 1, incomingShare: 0.1 } } as any);
+    (coordinator as any).connectionManager = { getConnectedPeers: () => [{ deviceId: 'relay-1', deviceName: 'Mac' }] };
+    for (let i = 0; i < 4; i++) {
+      const record = { path: `f${i}.md`, deletedAt: 1, hash: 'h', by: 'phone-1 (Phone)' };
+      (coordinator as any)._admitDelete('relay-1', `f${i}.md`, { tree: { record, expectHash: 'h' } });
+    }
+    const held = coordinator.getHeldDeletions();
+    expect(held).toHaveLength(1);
+    expect(held[0].peer).toBe('phone-1 (Phone)');
+  });
+
+  it('keeps who deleted a file in its deletion record, for devices it passes the record on to', async () => {
+    const { TombstoneStore } = await import('../../src/sync/tombstones');
+    const store = new TombstoneStore(null as any);
+    store.add('a.md', 'h', 5, undefined, 'phone-1 (Phone)');
+    expect(store.get('a.md')?.by).toBe('phone-1 (Phone)');
   });
 });

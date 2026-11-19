@@ -1,4 +1,5 @@
 import { App, Modal, Setting } from "obsidian";
+import { t } from "../i18n";
 
 /** A yes/no dialog. Resolves true only when the user presses the confirm button. */
 export function confirmDialog(
@@ -15,7 +16,7 @@ export function confirmDialog(
         for (const line of lines) this.contentEl.createEl("p", { text: line });
         new Setting(this.contentEl)
           .addButton((b) =>
-            b.setButtonText("Cancel").onClick(() => this.close()),
+            b.setButtonText(t("common.cancel")).onClick(() => this.close()),
           )
           .addButton((b) =>
             b

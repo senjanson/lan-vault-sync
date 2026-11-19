@@ -119,16 +119,20 @@ describe('settings changes', () => {
   });
 });
 
+const noHealth = { peers: () => [], alerts: () => [], summary: () => ({ consistent: 0, unsynced: 0 }) };
+
 describe('sync status', () => {
   const device = (name: string) => ({ deviceId: name, deviceName: name, ip: '10.0.0.2', port: 50000, vaultId: 'v', lastSeen: 0 });
 
   it('reads the state and the connected devices from the running sync', () => {
     const plugin = createPlugin() as any;
-    expect(plugin.getSyncStatus()).toEqual({ state: 'idle', devices: [], unreachable: [] });
+    expect(plugin.getSyncStatus()).toEqual({ state: 'idle', devices: [], unreachable: [], held: [], health: [], alerts: [], summary: undefined });
     plugin.coordinator = {
       getState: () => 'watching',
       getConnectedPeers: () => [device('mac'), device('iphone'), device('pixel')],
       getUnreachablePeers: () => [],
+      getHeldDeletions: () => [],
+      health: noHealth,
     };
     const status = plugin.getSyncStatus();
     expect(status.state).toBe('watching');
@@ -140,7 +144,7 @@ describe('sync status', () => {
     let unreachable: string[] = [];
     const shown: string[][] = [];
     plugin.statusBar = { update: (_s: string, _n: number, u: string[]) => shown.push(u) };
-    plugin.coordinator = { getState: () => 'watching', getConnectedPeers: () => [], getUnreachablePeers: () => unreachable };
+    plugin.coordinator = { getState: () => 'watching', getConnectedPeers: () => [], getUnreachablePeers: () => unreachable, getHeldDeletions: () => [], health: noHealth };
     notices.length = 0;
 
     unreachable = ['192.168.1.5:50000'];

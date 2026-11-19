@@ -1,4 +1,4 @@
-import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Platform, Plugin, WorkspaceLeaf } from "obsidian";
 import { LANSyncSettings, DEFAULT_SETTINGS } from "./types";
 import {
   PLUGIN_ID,
@@ -6,8 +6,9 @@ import {
   SYNC_LOG_VIEW_TYPE,
   WS_PORT_MIN,
   WS_PORT_MAX,
+  FILE_INDEX_FILE,
 } from "./constants";
-import { setDebugEnabled } from "./logger";
+import { setDebugEnabled, setLogSink } from "./logger";
 import { parsePeerAddress } from "./discovery/manual-peers";
 import { SyncCoordinator } from "./sync/sync-coordinator";
 import { generateSyncKey, normalizeSyncKey } from "./transport/auth";
@@ -22,6 +23,13 @@ import { SyncView } from "./ui/sync-view";
 import type { SyncViewStatus } from "./ui/sync-view";
 import { SyncLogView } from "./ui/sync-log-view";
 import { canUseNodeRuntime } from "./utils/runtime";
+import { t } from "./i18n";
+import { openRecoveryCenter, registerRecoveryCenter } from "./history/recovery-view";
+import { EventLog } from "./diagnostics/event-log";
+import { buildDiagnostics, diagnosticsFileName, DIAGNOSTICS_DIR } from "./diagnostics/export";
+import { alertText } from "./diagnostics/health";
+import { ensureDirectory } from "./utils/path-utils";
+import { effectiveVaultId, isValidVaultId } from "./utils/vault-id";
 
 function generateDeviceId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -38,6 +46,9 @@ function generateRandomPort(): number {
     Math.floor(Math.random() * (WS_PORT_MAX - WS_PORT_MIN + 1)) + WS_PORT_MIN
   );
 }
+
+/** How long the notice of another device with this device's ID stays up. */
+const DUPLICATE_NOTICE_MS = 60_000;
 
 export default class LANSyncPlugin extends Plugin {
   settings: LANSyncSettings = DEFAULT_SETTINGS;
@@ -96,11 +107,20 @@ export default class LANSyncPlugin extends Plugin {
 
     // Register view
     this.registerView(SYNC_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
-      this.syncView = new SyncView(leaf, () => this.getSyncStatus());
+      this.syncView = new SyncView(leaf, () => this.getSyncStatus(), {
+        resolveHeld: async (id, choice) => {
+          return (await this.coordinator?.resolveHeldDeletions(id, choice)) ?? false;
+        },
+        dismissAlert: (key) => this.coordinator?.health.dismiss(key),
+        exportDiagnostics: () => this.exportDiagnostics(),
+      });
       return this.syncView;
     });
 
     // Register sync log view
+    // Recovery center: old versions kept before sync changed a file.
+    registerRecoveryCenter(this, () => this.coordinator?.versionStore ?? null);
+
     this.registerView(SYNC_LOG_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
       this.syncLogView = new SyncLogView(leaf, this.syncLogService!);
       return this.syncLogView;
@@ -115,7 +135,7 @@ export default class LANSyncPlugin extends Plugin {
     // Commands
     this.addCommand({
       id: "toggle-sync",
-      name: "Turn sync on or off",
+      name: t("cmd.toggle"),
       callback: async () => {
         this.settings.enabled = !this.settings.enabled;
         await this.saveSettings();
@@ -129,31 +149,37 @@ export default class LANSyncPlugin extends Plugin {
 
     this.addCommand({
       id: "open-sync-panel",
-      name: "Open sync panel",
+      name: t("cmd.openPanel"),
       callback: () => this.activateView(),
     });
 
     this.addCommand({
       id: "open-sync-log",
-      name: "Open sync log",
+      name: t("cmd.openLog"),
       callback: () => this.activateSyncLogView(),
     });
 
     this.addCommand({
+      id: "export-diagnostics",
+      name: t("cmd.exportDiagnostics"),
+      callback: () => void this.exportDiagnostics(),
+    });
+
+    this.addCommand({
       id: "add-device-by-address",
-      name: "Add device by address",
+      name: t("cmd.addPeer"),
       callback: async () => {
         const input = await textInputDialog(
           this.app,
-          "Add a device by address",
+          t("pair.addTitle"),
           "192.168.1.20:53712",
-          "Add",
+          t("common.add"),
         );
         if (!input) return;
         if (await this.addManualPeer(input)) {
-          new Notice(`LAN Sync: Peer ${input} added`);
+          new Notice(t("notice.peerAdded", { address: input }));
         } else {
-          new Notice(`LAN Sync: Invalid address ${input}. Use ip:port, for example 192.168.1.20:53712.`);
+          new Notice(t("notice.peerInvalid", { address: input }));
         }
       },
     });
@@ -202,6 +228,7 @@ export default class LANSyncPlugin extends Plugin {
 
   async onunload(): Promise<void> {
     this.unloaded = true;
+    setLogSink(null);
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -216,6 +243,8 @@ export default class LANSyncPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // Unused since 0.5: every conflict keeps both versions.
+    delete (this.settings as unknown as Record<string, unknown>).conflictStrategy;
   }
 
   async saveSettings(): Promise<void> {
@@ -249,34 +278,66 @@ export default class LANSyncPlugin extends Plugin {
     if (!params.address) return;
     const address = params.address.trim();
     if (!parsePeerAddress(address)) {
-      new Notice(`LAN Sync: Failed to add peer. Invalid address: ${address}`);
+      new Notice(t("notice.peerAddFailed", { address }));
       return;
     }
 
     // Any web page or message can open an obsidian:// link, so nothing is
     // changed without the user's confirmation.
     const key = params.key ? params.key.trim() : "";
+    // The vault the link's device syncs (plan 6.3); links from before 0.5
+    // carry none.
+    const vault = params.vault && isValidVaultId(params.vault.trim()) ? params.vault.trim() : "";
+    const changesVault = !!vault && vault !== this.getVaultId();
     const changesKey =
       !!key && normalizeSyncKey(key) !== normalizeSyncKey(this.settings.syncKey);
-    const lines = [`Add the device at ${address} as a sync peer?`];
+    const lines = [t("pair.ask", { address })];
     if (changesKey) {
       lines.push(
-        "This also sets this device's sync key to the one in the link. Other devices that use the current key will stop syncing with this one until they get the new key.",
+        t("pair.keyChange"),
       );
     }
-    lines.push("Only continue if you opened this link yourself, for example by scanning the QR code on your own device.");
-    const ok = await confirmDialog(this.app, "Pair with device", lines, "Pair");
+    lines.push(t("pair.onlyYours"));
+    const ok = await confirmDialog(this.app, t("pair.title"), lines, t("pair.confirm"));
     if (!ok) return;
 
+    if (changesVault) {
+      this.settings.vaultId = vault;
+      await this.saveSettings();
+      if (!changesKey && this.coordinator) await this.startSync();
+    }
     if (changesKey) {
       await this.setSyncKey(key);
     }
     const added = await this.addManualPeer(address);
     if (added) {
-      new Notice(`LAN Sync: Peer ${address} added`);
+      new Notice(t("notice.peerAdded", { address }));
     } else {
-      new Notice(`LAN Sync: Failed to add peer. Invalid address: ${address}`);
+      new Notice(t("notice.peerAddFailed", { address }));
     }
+  }
+
+  /** This vault's ID as peers know it (see utils/vault-id). */
+  getVaultId(): string {
+    return this.coordinator?.getVaultId() ?? effectiveVaultId(this.settings, this.app.vault.getName());
+  }
+
+  /**
+   * A new device ID, for a device that shares its ID with another. The
+   * record of files synced so far is cleared with it: it was made under the
+   * old ID, and read under the new one it could take files for deleted.
+   */
+  async regenerateDeviceId(): Promise<void> {
+    const running = !!this.coordinator;
+    if (running) await this.stopSync();
+    this.settings.deviceId = generateDeviceId();
+    await this.saveSettings();
+    const adapter = this.app.vault.adapter as any;
+    for (const f of [FILE_INDEX_FILE, `${FILE_INDEX_FILE}.bak`, `${FILE_INDEX_FILE}.tmp`]) {
+      if (await adapter.exists(f).catch(() => false)) await adapter.remove(f).catch(() => undefined);
+    }
+    new Notice(t("notice.idRegenerated", { id: this.settings.deviceId }));
+    if (running) await this.startSync();
   }
 
   /** Change the pairing key and reconnect with it. */
@@ -300,10 +361,10 @@ export default class LANSyncPlugin extends Plugin {
     const name = failure.deviceName || failure.address;
     new Notice(
       failure.reason === "outdated"
-        ? `LAN Sync: ${name} runs an older version of LAN Vault Sync. Update the plugin on that device to sync with it.`
+        ? t("notice.peerOutdated", { name })
         : failure.reason === "newer"
-          ? `LAN Sync: ${name} runs a newer version of LAN Vault Sync. Update the plugin on this device to sync with it.`
-          : `LAN Sync: ${name} has a different sync key. Use the same key on both devices (Settings → LAN Vault Sync → Sync key).`,
+          ? t("notice.peerNewer", { name })
+          : t("notice.peerBadKey", { name }),
       10000,
     );
   }
@@ -326,9 +387,9 @@ export default class LANSyncPlugin extends Plugin {
       this.unsyncable = [];
       if (!first || this.unloaded) return;
       const more = rest.length > 0
-        ? ` ${rest.length} more file${rest.length > 1 ? "s" : ""} cannot be synced either; the LAN Sync panel lists them.`
+        ? t("notice.cannotSyncMore", { count: rest.length })
         : "";
-      new Notice(`LAN Sync: Cannot sync ${first.path}: ${first.reason}.${more}`, 15000);
+      new Notice(t("notice.cannotSync", { path: first.path, reason: first.reason, more }), 15000);
     }, 1000);
   }
 
@@ -378,9 +439,71 @@ export default class LANSyncPlugin extends Plugin {
       backupService: this.backupService!,
       syncLogService: this.syncLogService!,
       workspace: this.app.workspace,
+      trash: (file) => this.app.fileManager.trashFile(file),
+    });
+    setLogSink(this.coordinator.eventLog);
+    this.syncLogService?.setVersionStore(this.coordinator.versionStore);
+
+    // A bulk deletion waits for the user: say so once per new batch.
+    // The notice stays until those deletions are decided, then goes.
+    let heldSeen = new Set<string>();
+    const heldNotices: Array<{ ids: string[]; notice: Notice }> = [];
+    this.coordinator.onHeldDeletionsChange((held) => {
+      const fresh = held.filter((h) => !heldSeen.has(h.id));
+      heldSeen = new Set(held.map((h) => h.id));
+      for (let i = heldNotices.length - 1; i >= 0; i--) {
+        if (heldNotices[i].ids.some((id) => heldSeen.has(id))) continue;
+        heldNotices[i].notice.hide();
+        heldNotices.splice(i, 1);
+      }
+      if (fresh.length > 0) {
+        const count = fresh.reduce((n, h) => n + h.paths.length, 0);
+        heldNotices.push({ ids: fresh.map((h) => h.id), notice: new Notice(t("notice.held", { count }), 0) });
+      }
+      this.syncView?.refresh();
     });
 
     this.coordinator.onStateChange(() => this.showStatus());
+
+    // Two devices with one ID (settings copied with the vault) cannot sync
+    // with each other: offer to give this one a new ID.
+    this.coordinator.onDuplicateDevice((name) => {
+      const text = t("notice.duplicateDevice", { name: name || "?" });
+      // Shown for a minute: told again while the clash lasts (see
+      // SyncCoordinator._reportDuplicateDevice), so a notice left from a
+      // clash the other device already resolved does not linger.
+      if (typeof createFragment !== "function") {
+        new Notice(text, DUPLICATE_NOTICE_MS);
+        return;
+      }
+      const notice = new Notice(
+        createFragment((f) => {
+          f.createDiv({ text });
+          const btn = f.createEl("button", { text: t("set.regenerateId") });
+          btn.onclick = () => {
+            notice.hide();
+            void this.regenerateDeviceId();
+          };
+        }),
+        DUPLICATE_NOTICE_MS,
+      );
+    });
+
+    // Alerts (plan 5.4): a notice at most once per kind per 10 minutes; the
+    // sync panel lists them until they are gone. Held deletions have their
+    // own notice above.
+    this.coordinator.health.onAlert((a) => {
+      if (a.kind === "bulk-held") return;
+      new Notice(alertText(a), 10000);
+    });
+    let healthTimer: ReturnType<typeof setTimeout> | null = null;
+    this.coordinator.health.onChange(() => {
+      if (healthTimer) return;
+      healthTimer = setTimeout(() => {
+        healthTimer = null;
+        this.showStatus();
+      }, 500);
+    });
 
     this.coordinator.onAuthFailed((failure) => this.notifyAuthFailure(failure));
     this.coordinator.onUnsyncableFile((path, reason) => this.notifyUnsyncable(path, reason));
@@ -391,7 +514,7 @@ export default class LANSyncPlugin extends Plugin {
 
     await this.coordinator.start();
     const error = this.coordinator.getStartError();
-    if (error) new Notice(`LAN Sync: ${error}`, 15000);
+    if (error) new Notice(t("notice.error", { error }), 15000);
   }
 
   async stopSync(): Promise<void> {
@@ -409,12 +532,60 @@ export default class LANSyncPlugin extends Plugin {
       state: coordinator?.getState() ?? "idle",
       devices: coordinator?.getConnectedPeers() ?? [],
       unreachable: coordinator?.getUnreachablePeers() ?? [],
+      held: coordinator?.getHeldDeletions() ?? [],
+      health: coordinator?.health.peers() ?? [],
+      alerts: coordinator?.health.alerts() ?? [],
+      summary: coordinator
+        ? coordinator.health.summary(coordinator.getConnectedPeers().map((d) => d.deviceId))
+        : undefined,
     };
+  }
+
+  /**
+   * Writes a diagnostics file (plan 5.2) into the vault's
+   * .lan-vault-sync/diagnostics folder and copies it to the clipboard where
+   * that works. The sync key is masked.
+   */
+  async exportDiagnostics(): Promise<string | null> {
+    const adapter = this.app.vault.adapter as any;
+    const coordinator = this.coordinator;
+    try {
+      const log = await (coordinator?.eventLog ?? new EventLog(adapter)).readAll(5000);
+      const status = this.getSyncStatus();
+      const text = buildDiagnostics({
+        pluginVersion: this.manifest.version,
+        platform: Platform.isMobile ? (Platform.isIosApp ? "ios" : "android") : ((globalThis as any).process?.platform ?? "desktop"),
+        settings: this.settings,
+        state: status.state,
+        peers: status.devices.map((d) => ({ deviceId: d.deviceId, deviceName: d.deviceName, ip: d.ip, port: d.port })),
+        health: status.health ?? [],
+        alerts: status.alerts ?? [],
+        held: (status.held ?? []).map((h) => ({ id: h.id, kind: h.kind, count: h.paths.length, peer: h.peer })),
+        history: coordinator?.versionStore ? await coordinator.versionStore.usage().catch(() => null) : null,
+        tombstones: coordinator?.getTombstoneCount(),
+        log,
+      });
+      const file = diagnosticsFileName();
+      await ensureDirectory(adapter, DIAGNOSTICS_DIR);
+      await adapter.write(file, text);
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch {
+        /* no clipboard: the file is enough */
+      }
+      new Notice(t(copied ? "notice.diagnosticsCopied" : "notice.diagnostics", { path: file }), 10000);
+      return file;
+    } catch (err) {
+      new Notice(t("notice.error", { error: err instanceof Error ? err.message : String(err) }), 10000);
+      return null;
+    }
   }
 
   private showStatus(): void {
     const status = this.getSyncStatus();
-    this.statusBar?.update(status.state, status.devices.length, status.unreachable);
+    this.statusBar?.update(status.state, status.devices.length, status.unreachable, status.summary);
     this.syncView?.refresh();
     this.notifyUnreachable(status.unreachable);
   }
@@ -431,12 +602,12 @@ export default class LANSyncPlugin extends Plugin {
     if (fresh.length === 0) return;
     for (const address of fresh) this.unreachableNotified.add(address);
     new Notice(
-      `LAN Sync: Cannot reach ${fresh.join(", ")}. Retrying in the background.` +
+      t("notice.unreachable", { addresses: fresh.join(", ") }) +
         // In testing this was a phone without local network permission:
         // every connection failed at once.
         (canUseNodeRuntime()
           ? ""
-          : " If that device is on and on the same network, check that Obsidian is allowed to use the local network (iPhone: Settings → Privacy & Security → Local Network)."),
+          : t("notice.localNetworkHint")),
       15000,
     );
   }
@@ -445,7 +616,7 @@ export default class LANSyncPlugin extends Plugin {
     onProgress: (percent: number, message: string) => void,
   ): Promise<void> {
     if (!this.coordinator) {
-      onProgress(100, "Sync is not running");
+      onProgress(100, t("progress.not-running"));
       return;
     }
     await this.coordinator.manualFullSync(onProgress);
@@ -483,5 +654,9 @@ export default class LANSyncPlugin extends Plugin {
     if (leaf) {
       workspace.revealLeaf(leaf);
     }
+  }
+
+  async activateRecoveryCenter(): Promise<void> {
+    await openRecoveryCenter(this);
   }
 }

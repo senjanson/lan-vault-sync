@@ -1,4 +1,5 @@
 import { App, Modal, Setting } from "obsidian";
+import { t } from "../i18n";
 
 /**
  * Ask for one line of text. Resolves with the text, or null when the dialog
@@ -29,7 +30,7 @@ export function textInputDialog(
           window.setTimeout(() => text.inputEl.focus(), 0);
         });
         new Setting(this.contentEl)
-          .addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
+          .addButton((b) => b.setButtonText(t("common.cancel")).onClick(() => this.close()))
           .addButton((b) => b.setButtonText(confirmText).setCta().onClick(submit));
       }
 

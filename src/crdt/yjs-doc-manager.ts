@@ -55,6 +55,11 @@ export class YjsDocManager {
 
   private keepsWrittenContent: (filePath: string) => boolean = () => false;
 
+  /** Told when the saved notes' index was damaged and read from its backup. */
+  setOnStateBackupUsed(listener: (path: string, why: string) => void): void {
+    this.persistence.setOnBackupUsed(listener);
+  }
+
   constructor(private vault: Vault) {
     this.pool = new DocPool();
     this.persistence = new StatePersistence(vault, (vault as any).adapter);
@@ -315,6 +320,12 @@ export class YjsDocManager {
       }
       this.seeded.add(doc);
       if (onDisk) this.noteDiskContent(filePath, newContent);
+      // As in initDocFromContentSilent: a file cut short when first read.
+      if (recovering && onDisk && isCutShort(current, newContent)) {
+        logger.warn(`${filePath} holds only the start of its note (${newContent.length} of ${current.length} characters): written back whole`);
+        this.lastKnownContent.set(filePath, newContent);
+        return current;
+      }
 
       if (oldContent !== newContent) {
         applyRebasedEdit(ytext, oldContent, newContent, 'local');
@@ -519,6 +530,21 @@ export class YjsDocManager {
     });
   }
 
+  /**
+   * Whether everything in this note's history is in the given state vector:
+   * the peer that sent it had seen all of our edits.
+   */
+  async isCoveredBy(filePath: string, remoteStateVector: Uint8Array): Promise<boolean> {
+    return this._enqueueForPath(filePath, async () => {
+      const doc = await this.getOrCreateDoc(filePath);
+      const remote = Y.decodeStateVector(remoteStateVector);
+      for (const [client, clock] of Y.decodeStateVector(Y.encodeStateVector(doc))) {
+        if (clock > (remote.get(client) ?? 0)) return false;
+      }
+      return true;
+    });
+  }
+
   async encodeSyncStep1(filePath: string): Promise<Uint8Array> {
     return this._enqueueForPath(filePath, async () => {
       const doc = await this.getOrCreateDoc(filePath);
@@ -620,9 +646,16 @@ export class YjsDocManager {
       this.seeded.add(doc);
       const ytext = doc.getText('content');
       const existing = ytext.toString();
-      const base = this._startingPoint(this.savedBase.get(filePath), existing, content);
       this.noteDiskContent(filePath, content);
       this.lastKnownContent.set(filePath, content);
+      // The file holds the start of the note only: most likely a write cut
+      // off (the app killed while saving), not an edit. It is written back
+      // whole instead of the cut being sent to every device (plan 4.6).
+      if (isCutShort(existing, content)) {
+        logger.warn(`${filePath} holds only the start of its note (${content.length} of ${existing.length} characters): written back whole`);
+        return existing;
+      }
+      const base = this._startingPoint(this.savedBase.get(filePath), existing, content);
 
       // A neutral origin ('init'), so the change is not sent out as a local
       // edit. Applied on top of what the doc holds beyond the file, if the
@@ -837,4 +870,12 @@ class RemoteOrigin {
 
 function remoteOrigin(deviceId: string | undefined): RemoteOrigin | 'remote' {
   return deviceId ? new RemoteOrigin(deviceId) : 'remote';
+}
+
+/**
+ * Whether `file` is the start of `doc` and much shorter (at most three
+ * quarters of it): what a write cut off part way leaves.
+ */
+export function isCutShort(doc: string, file: string): boolean {
+  return doc.length > 0 && file.length < doc.length && file.length <= doc.length * 0.75 && doc.startsWith(file);
 }

@@ -60,6 +60,10 @@ class FakeVault {
     this.setText(path, content);
   }
 
+  async read(file: TFile): Promise<string> {
+    return this.cachedRead(file);
+  }
+
   async cachedRead(file: TFile): Promise<string> {
     return this.files.get(file.path)?.content ?? "";
   }
@@ -248,6 +252,36 @@ describe("SyncLogService", () => {
       vault.getAbstractFileByPath("notes/restore-me.md")! as TFile,
     );
     expect(restored).toBe("original");
+  });
+
+  it("T5: keeps the current version before restoring over it", async () => {
+    vault.setText("notes/r.md", "v1");
+    const backup = await backupService.backupTextFile("notes/r.md", "v1", "test-backup");
+    vault.setText("notes/r.md", "v2 written since");
+    const entry = service.addEntry("remote-overwrite", "notes/r.md", {
+      snapshotId: backup!.backupId,
+      details: { isText: true },
+    })!;
+    const spy = vi.spyOn(backupService, "backupTextFile");
+
+    expect(await service.restoreFromSnapshot(entry)).toBe(true);
+    expect(spy).toHaveBeenCalledWith("notes/r.md", "v2 written since", "before-restore", expect.anything());
+    const kept = spy.mock.results[0].value as Promise<{ backupId: string } | null>;
+    expect(await backupService.readTextBackup((await kept)!.backupId, "notes/r.md")).toBe("v2 written since");
+  });
+
+  it("T5: does not restore when the current version cannot be kept", async () => {
+    vault.setText("notes/r2.md", "v1");
+    const backup = await backupService.backupTextFile("notes/r2.md", "v1", "test-backup");
+    vault.setText("notes/r2.md", "v2");
+    const entry = service.addEntry("remote-overwrite", "notes/r2.md", {
+      snapshotId: backup!.backupId,
+      details: { isText: true },
+    })!;
+    vi.spyOn(backupService, "backupTextFile").mockResolvedValue(null);
+
+    expect(await service.restoreFromSnapshot(entry)).toBe(false);
+    expect(await vault.cachedRead(vault.getAbstractFileByPath("notes/r2.md")! as TFile)).toBe("v2");
   });
 
   it("restores a deleted file from snapshot", async () => {

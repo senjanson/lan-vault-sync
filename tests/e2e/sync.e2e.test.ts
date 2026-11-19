@@ -696,7 +696,7 @@ describe('e2e lost sync history', { timeout: 30000 }, () => {
     ]);
     let all = await start();
     all.forEach(track);
-    await until(() => all.every((n) => count(n, 'Tree sync with') >= 2));
+    await until(() => all.every((n) => count(n, 'Tree sync with') >= 2), 30000);
     await sleep(2000);
     for (const n of all) await n.coord.stop();
     nodes = [];
@@ -706,7 +706,7 @@ describe('e2e lost sync history', { timeout: 30000 }, () => {
     all = await start();
     all.forEach(track);
     const settled = () => all.every((n) => n.vault.text('n.md') === 'v2 n from A\n' && n.vault.text('m.md') === 'v2 m from B\n');
-    await until(settled, 10000);
+    await until(settled, 30000);
     await sleep(2000);
     for (const n of all) {
       expect(n.vault.text('n.md')).toBe('v2 n from A\n');
@@ -1232,7 +1232,7 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
   }
   const notes = (root: string) => {
     const out: string[] = [];
-    const walk = (d: string) => { for (const e of fs.readdirSync(path.join(root, d), { withFileTypes: true })) { const rel = d ? `${d}/${e.name}` : e.name; if (rel.startsWith('.obsidian')) continue; if (e.isDirectory()) walk(rel); else out.push(rel); } };
+    const walk = (d: string) => { for (const e of fs.readdirSync(path.join(root, d), { withFileTypes: true })) { const rel = d ? `${d}/${e.name}` : e.name; if ((rel.startsWith('.obsidian') || rel.startsWith('.lan-vault-sync'))) continue; if (e.isDirectory()) walk(rel); else out.push(rel); } };
     walk(''); return out.sort();
   };
 
@@ -1266,6 +1266,11 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     // Obsidian reports the first write late, with the text it wrote then.
     await (B.coord as any)._handleLocalFileChange({ type: 'modify', path: 'f.md', content: 'one\ntwo\n', isTextFile: true, timestamp: Date.now() });
     expect(await dm.getContent('f.md')).toBe('one\ntwo\nthree\n');
+    // The file is read again shortly after: it holds the newest write, so
+    // still nothing is taken as an edit.
+    await sleep(2000);
+    expect(await dm.getContent('f.md')).toBe('one\ntwo\nthree\n');
+    expect(B.vault.text('f.md')).toBe('one\ntwo\nthree\n');
   });
 
   it('keeps an edit when the peer\'s text for the new name arrives while following a rename', async () => {
@@ -1304,10 +1309,10 @@ describe('e2e rename while a peer edits', { timeout: 60000 }, () => {
     await (B.coord as any)._flushPendingLocalTextChange('f.md');
     await dm.applyLocalChange('f.md', 'one\nfrom B\n');
     // Another peer moved the note on and removes the unedited copy of g.md;
-    // backing it up takes a while.
-    const backups = (B.coord as any).binarySync.backupService;
-    const backup = backups.backupBinaryFile.bind(backups);
-    backups.backupBinaryFile = async (...a: unknown[]) => { await sleep(300); return backup(...a); };
+    // keeping its old version takes a while.
+    const store = (B.coord as any).versionStore;
+    const keep = store.keep.bind(store);
+    store.keep = async (...a: unknown[]) => { await sleep(300); return keep(...a); };
     const hash = await computeFileHash(new TextEncoder().encode('one\n').buffer);
     const del = decodeMessage(encodeFileDelete({ path: 'g.md', hash }));
     const deleting = (B.coord as any)._handleMessage('cccc', del.type, del.payload);

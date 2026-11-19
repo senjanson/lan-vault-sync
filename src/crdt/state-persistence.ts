@@ -3,6 +3,7 @@ import * as Y from 'yjs';
 import { CRDT_STATE_DIR } from '../constants';
 import { logger } from '../logger';
 import { ensureParentDirectory } from '../utils/path-utils';
+import { readJsonWithBackup, writeAtomic } from '../utils/atomic-write';
 import { computeFileHash } from '../binary-sync/file-hash';
 
 /**
@@ -86,7 +87,14 @@ export class StatePersistence {
   private listingStates: Promise<Set<string> | null> | null = null;
   private stateChangesWhileListing: Array<[string, boolean]> | null = [];
 
+  /** Told when the digest index was damaged and read from its backup. */
+  private onBackupUsed: ((path: string, why: string) => void) | undefined;
+
   constructor(private vault: Vault, private adapter: any) {}
+
+  setOnBackupUsed(listener: (path: string, why: string) => void): void {
+    this.onBackupUsed = listener;
+  }
 
   /** The digest of the saved history of a note, if it has one. */
   async digestOf(filePath: string): Promise<string | undefined> {
@@ -99,7 +107,7 @@ export class StatePersistence {
     this.digestsDirty = false;
     try {
       await ensureParentDirectory(this.adapter, DIGEST_INDEX);
-      await this.adapter.write(DIGEST_INDEX, JSON.stringify(Object.fromEntries(this.digests)));
+      await writeAtomic(this.adapter, DIGEST_INDEX, JSON.stringify(Object.fromEntries(this.digests)));
     } catch (err) {
       this.digestsDirty = true;
       logger.error('Failed to save CRDT digests:', err);
@@ -119,8 +127,12 @@ export class StatePersistence {
       this.digestsLoading = (async () => {
         const index = new Map<string, [string, string]>();
         try {
-          if (await this._exists(DIGEST_INDEX)) {
-            const saved = JSON.parse(await this.adapter.read(DIGEST_INDEX)) as Record<string, [string, string]>;
+          const saved = await readJsonWithBackup<Record<string, [string, string]>>(
+            this.adapter,
+            DIGEST_INDEX,
+            (p, why) => this.onBackupUsed?.(p, why),
+          );
+          if (saved && typeof saved === 'object') {
             const listed = await this.adapter.list(CRDT_STATE_DIR);
             const files = new Set<string>(listed?.files ?? []);
             for (const [path, entry] of Object.entries(saved)) {
@@ -195,6 +207,7 @@ export class StatePersistence {
     }
   }
 
+  /** A note's state file; never a `.ystate.tmp` left by an interrupted save. */
   private _isStateFile(path: string): boolean {
     return path.startsWith(`${CRDT_STATE_DIR}/`) && path.endsWith('.ystate');
   }
@@ -264,7 +277,15 @@ export class StatePersistence {
         this.stateDirReady = true;
       }
 
-      await this.adapter.writeBinary(stateFile, state.buffer.slice(state.byteOffset, state.byteOffset + state.byteLength));
+      // Written aside and moved into place, so a crash mid-save leaves the
+      // previous history rather than a cut-off one. No backup: there is one
+      // file per note, and a lost history is rebuilt from the note's text.
+      await writeAtomic(
+        this.adapter,
+        stateFile,
+        state.buffer.slice(state.byteOffset, state.byteOffset + state.byteLength) as ArrayBuffer,
+        { backup: false, exists: await this._exists(stateFile) },
+      );
       this._noteState(stateFile, true);
       await this._removeLegacyFile(filePath);
       const digest = await docDigest(doc);

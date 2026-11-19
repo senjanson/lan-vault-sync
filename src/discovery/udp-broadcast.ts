@@ -64,8 +64,9 @@ export class UdpBroadcast {
         socket.on('message', (msg: Uint8Array, rinfo: { address: string }) => {
           try {
             const data = JSON.parse(new TextDecoder().decode(msg)) as DeviceInfo;
-            // Ignore our own broadcasts
-            if (data.deviceId === this.localDevice.deviceId) return;
+            // Ignore our own broadcasts. Another device with our ID (a
+            // different run) goes on, to be reported as such.
+            if (data.deviceId === this.localDevice.deviceId && data.instance === this.localDevice.instance) return;
             // Fill in the sender's IP from the packet (more reliable)
             data.ip = rinfo.address;
             data.lastSeen = Date.now();

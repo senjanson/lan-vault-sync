@@ -4,9 +4,13 @@ import { PLUGIN_ID } from '../constants';
  * Build the obsidian:// URI that, when opened, adds a manual peer and (after
  * the user confirms) takes over this device's sync key.
  */
-export function buildPeerURI(ip: string, port: number, syncKey?: string): string {
-  const base = `obsidian://${PLUGIN_ID}?address=${ip}:${port}`;
-  return syncKey ? `${base}&key=${encodeURIComponent(syncKey)}` : base;
+export function buildPeerURI(ip: string, port: number, syncKey?: string, vaultId?: string): string {
+  let uri = `obsidian://${PLUGIN_ID}?address=${ip}:${port}`;
+  if (syncKey) uri += `&key=${encodeURIComponent(syncKey)}`;
+  // The vault's ID, so the other device joins this vault whatever its
+  // folder is called there (plan 6.3).
+  if (vaultId) uri += `&vault=${encodeURIComponent(vaultId)}`;
+  return uri;
 }
 
 /**

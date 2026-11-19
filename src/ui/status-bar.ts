@@ -1,5 +1,7 @@
 import { Plugin } from 'obsidian';
 import { SyncState } from '../types';
+import { t, formatTime } from '../i18n';
+import type { HealthSummary } from '../diagnostics/health';
 
 export class StatusBar {
   private el: HTMLElement;
@@ -11,7 +13,7 @@ export class StatusBar {
   }
 
   /** `unreachable`: addresses added by hand that keep failing to connect. */
-  update(state: SyncState, peerCount = 0, unreachable: string[] = []): void {
+  update(state: SyncState, peerCount = 0, unreachable: string[] = [], health?: HealthSummary): void {
     this.el.empty();
 
     const icon = this.el.createSpan({ cls: 'lan-sync-status-icon' });
@@ -20,27 +22,35 @@ export class StatusBar {
     switch (state) {
       case 'idle':
         icon.setText('⏸');
-        text.setText('LAN Sync: Off');
+        text.setText(t('status.off'));
         break;
       case 'discovering':
         icon.setText('🔍');
-        text.setText('LAN Sync: Searching...');
+        text.setText(t('status.searching'));
         break;
       case 'connecting':
         icon.setText('🔗');
-        text.setText('LAN Sync: Connecting...');
+        text.setText(t('status.connecting'));
         break;
       case 'initial-sync':
         icon.setText('🔄');
-        text.setText('LAN Sync: Syncing...');
+        text.setText(t('status.syncing'));
         break;
       case 'watching':
         icon.setText('✅');
-        text.setText(`LAN Sync: ${peerCount} peer${peerCount !== 1 ? 's' : ''}`);
+        text.setText(t('status.peers', { count: peerCount }));
+        // Plan 5.3: whether the files match, not only who is connected.
+        if (health && health.unsynced > 0) {
+          icon.setText('⚠️');
+          text.setText(t('status.unsynced', { count: health.unsynced }));
+        } else if (health && health.consistent > 0 && health.consistent === peerCount && health.since) {
+          const time = formatTime(health.since, { hour: 'numeric', minute: '2-digit' });
+          text.setText(t('status.consistent', { count: health.consistent, time }));
+        }
         break;
       case 'error':
         icon.setText('⚠️');
-        text.setText('LAN Sync: Error');
+        text.setText(t('status.error'));
         break;
     }
 
@@ -50,7 +60,7 @@ export class StatusBar {
     if (state !== 'idle' && unreachable.length > 0) {
       icon.setText('⚠️');
       const what = unreachable.length === 1 ? unreachable[0] : `${unreachable.length} devices`;
-      text.setText(`${text.textContent} · can't reach ${what}`);
+      text.setText(`${text.textContent} · ${t('status.unreachable', { what })}`);
       this.el.setAttribute('aria-label', `Cannot reach ${unreachable.join(', ')}. Retrying in the background.`);
     } else {
       this.el.removeAttribute('aria-label');

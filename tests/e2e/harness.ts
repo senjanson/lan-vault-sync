@@ -27,6 +27,8 @@ export class DiskVault {
       writeBinary: async (p: string, d: ArrayBuffer) => fs.writeFileSync(abs(p), Buffer.from(d)),
       readBinary: async (p: string) => { const b = fs.readFileSync(abs(p)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); },
       remove: async (p: string) => fs.rmSync(abs(p)),
+      append: async (p: string, d: string) => fs.appendFileSync(abs(p), d),
+      stat: async (p: string) => (fs.existsSync(abs(p)) ? { size: fs.statSync(abs(p)).size, mtime: fs.statSync(abs(p)).mtimeMs, type: fs.statSync(abs(p)).isDirectory() ? 'folder' : 'file' } : null),
       rename: async (a: string, b: string) => fs.renameSync(abs(a), abs(b)),
       list: async (p: string) => {
         const entries = fs.existsSync(abs(p)) ? fs.readdirSync(abs(p), { withFileTypes: true }) : [];
@@ -41,7 +43,7 @@ export class DiskVault {
   private scan(dir: string) {
     for (const e of fs.readdirSync(path.join(this.root, dir), { withFileTypes: true })) {
       const rel = dir ? `${dir}/${e.name}` : e.name;
-      if (rel.startsWith('.obsidian')) continue; // Obsidian does not index config dir
+      if ((rel.startsWith('.obsidian') || rel.startsWith('.lan-vault-sync'))) continue; // Obsidian does not index config dir
       if (e.isDirectory()) this.scan(rel); else this.track(rel);
     }
   }
@@ -58,7 +60,7 @@ export class DiskVault {
   getAbstractFileByPath(p: string): any { return this.files.get(p) ?? this.folder(p); }
   /** Folders come straight from disk, with their children, like Obsidian's tree. */
   folder(p: string): TFolder | null {
-    if (!p || p.startsWith('.obsidian') || !fs.existsSync(this.abs(p)) || !fs.statSync(this.abs(p)).isDirectory()) return null;
+    if (!p || (p.startsWith('.obsidian') || p.startsWith('.lan-vault-sync')) || !fs.existsSync(this.abs(p)) || !fs.statSync(this.abs(p)).isDirectory()) return null;
     return this.liveFolder(p);
   }
   getRoot(): TFolder { return this.liveFolder(''); }
@@ -70,7 +72,7 @@ export class DiskVault {
         if (!fs.existsSync(this.abs(p))) return [];
         return fs.readdirSync(this.abs(p))
           .map((n) => (p ? `${p}/${n}` : n))
-          .filter((c) => !c.startsWith('.obsidian'))
+          .filter((c) => !c.startsWith('.obsidian') && !c.startsWith('.lan-vault-sync'))
           .map((c) => this.getAbstractFileByPath(c))
           .filter(Boolean);
       },
@@ -79,7 +81,7 @@ export class DiskVault {
   }
   getAllLoadedFiles(): any[] {
     const out: any[] = [];
-    const walk = (dir: string) => { for (const e of fs.readdirSync(this.abs(dir), { withFileTypes: true })) { const rel = dir ? `${dir}/${e.name}` : e.name; if (rel.startsWith('.obsidian')) continue; if (e.isDirectory()) { out.push(this.folder(rel)); walk(rel); } else if (this.files.has(rel)) out.push(this.files.get(rel)); } };
+    const walk = (dir: string) => { for (const e of fs.readdirSync(this.abs(dir), { withFileTypes: true })) { const rel = dir ? `${dir}/${e.name}` : e.name; if ((rel.startsWith('.obsidian') || rel.startsWith('.lan-vault-sync'))) continue; if (e.isDirectory()) { out.push(this.folder(rel)); walk(rel); } else if (this.files.has(rel)) out.push(this.files.get(rel)); } };
     walk('');
     return out;
   }
@@ -128,10 +130,10 @@ export interface Node { vault: DiskVault; coord: SyncCoordinator; settings: LANS
 
 export function tmpRoot(tag: string) { return fs.mkdtempSync(path.join(os.tmpdir(), `lvs-${tag}-`)); }
 
-export async function startNode(root: string, deviceId: string, port: number, peers: number[], extra: Partial<LANSyncSettings> = {}): Promise<Node> {
+export async function startNode(root: string, deviceId: string, port: number, peers: number[], extra: Partial<LANSyncSettings> = {}, options: Record<string, unknown> = {}): Promise<Node> {
   const vault = new DiskVault(root);
   const settings: LANSyncSettings = { ...DEFAULT_SETTINGS, ignoredPaths: [...DEFAULT_SETTINGS.ignoredPaths], deviceId, deviceName: deviceId, port, manualPeers: peers.map((p) => `127.0.0.1:${p}`), syncIntervalMs: 0, syncKey: 'TEST-KEY', ...extra };
-  const coord = new SyncCoordinator(vault as any, settings);
+  const coord = new SyncCoordinator(vault as any, settings, options as any);
   const events: string[] = [];
   coord.onSyncEvent((m) => events.push(m));
   await coord.start();

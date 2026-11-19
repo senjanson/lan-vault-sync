@@ -459,3 +459,36 @@
 .sync-log-diff-same {
   color: var(--text-muted);
 }
+
+/* Recovery center */
+.lan-sync-recovery-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+
+.lan-sync-recovery-bar input {
+  flex: 1;
+  min-width: 0;
+}
+
+.lan-sync-recovery-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 6px;
+}
+
+.lan-sync-recovery-entry {
+  margin: 6px 0;
+}
+
+.lan-sync-recovery-actions,
+.lan-sync-held-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}

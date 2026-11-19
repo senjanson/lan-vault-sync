@@ -34,6 +34,8 @@ const hashOf = (data: string | Uint8Array) => {
   const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
   return computeFileHash(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
 };
+/** Lets a test delete most of a vault without the bulk-deletion hold. */
+const noHold = { deleteLimits: { incomingShare: 2, inferredMax: 1e9 } };
 const names = (root: string) => fs.readdirSync(root).filter((f) => !f.startsWith('.')).sort();
 const raw = (n: Node, port: number) => connectRaw(port, { deviceId: 'peer', vaultId: (n.coord as any).vaultId }, 'TEST-KEY');
 const tree = (files: FileMeta[], folders: string[] = [], deleted: any[] = []) => encodeFileMetaSync({ files, folders, deleted });
@@ -134,7 +136,7 @@ describe('e2e folders deleted on a peer', { timeout: 30000 }, () => {
     const files = ['d5/a.md', 'd5/b.png', 'd6/n.md', 'd6/img/x.png', 'd6/img/y.png'];
     seed(rb, { ...Object.fromEntries(files.map((f) => [f, f.endsWith('.md') ? 'text\n' : Buffer.from([7])])), 'd7/mine.md': 'mine\n', 'keep/k.md': 'k\n' });
     const pb = ports();
-    const B = track(await startNode(rb, 'bbbb', pb, []));
+    const B = track(await startNode(rb, 'bbbb', pb, [], {}, noHold));
     const peer = await raw(B, pb);
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
@@ -144,7 +146,8 @@ describe('e2e folders deleted on a peer', { timeout: 30000 }, () => {
       await sleep(300);
       for (const file of files) {
         vi.setSystemTime(Date.now() + 40_000);
-        peer.send(encodeFileDelete({ path: file }));
+        // Protocol 3: a deletion names the content it removes.
+        peer.send(encodeFileDelete({ path: file, hash: await hashOf(file.endsWith('.md') ? 'text\n' : new Uint8Array([7])) }));
         await sleep(300);
       }
       // (The clock only moves when set, so no until() here.)
@@ -189,7 +192,7 @@ const listing = (root: string) => {
   const walk = (d: string) => {
     for (const e of fs.readdirSync(path.join(root, d), { withFileTypes: true })) {
       const rel = d ? `${d}/${e.name}` : e.name;
-      if (rel.startsWith('.obsidian')) continue;
+      if ((rel.startsWith('.obsidian') || rel.startsWith('.lan-vault-sync'))) continue;
       out.push(e.isDirectory() ? `${rel}/` : rel);
       if (e.isDirectory()) walk(rel);
     }
@@ -234,9 +237,9 @@ describe('e2e large folder deleted on a slow device', { timeout: 90000 }, () => 
     const ra = tmpRoot('a'), rb = tmpRoot('b'), rp = tmpRoot('p');
     seed(ra, files);
     const pa = ports();
-    const A = track(await startNode(ra, 'aaaa', pa, []));
-    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
-    const P = track(await startNode(rp, 'pppp', pa + 2, [pa, pa + 1]));
+    const A = track(await startNode(ra, 'aaaa', pa, [], {}, noHold));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa], {}, noHold));
+    const P = track(await startNode(rp, 'pppp', pa + 2, [pa, pa + 1], {}, noHold));
     for (const n of [A, B, P]) folderEventsOnMkdir(n);
     await until(() => [B, P].every((n) => n.vault.exists('f/d3/s1/img/p1.png') && n.vault.text('f/d3/s1/n5.md') === 'note 3 1 5\n'), 20000);
     await sleep(1500);
@@ -333,19 +336,21 @@ describe('e2e file system work per file in bulk changes', { timeout: 60000 }, ()
     seed(rb, bulk());
     const pa = ports();
     const A = track(await startNode(ra, 'aaaa', pa, []));
-    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+    const B = track(await startNode(rb, 'bbbb', pa + 1, [pa], {}, noHold));
     await sleep(1500);
     const counter = countAdapterCalls(B);
     await A.vault.deleteFolder('bulk');
     await until(() => !B.vault.exists('bulk'), 15000);
     await sleep(1500);
     expect(B.vault.exists('bulk')).toBe(false);
-    // Each file is backed up first (a read, its folders, the copy and its
-    // details). The records of deletions are written once, not per file.
+    // Each file's old version is kept first (a read and the copy; the
+    // folders are made once). The records of deletions are written once.
     // Was 1365 calls (803 lookups) and the same single write.
     expect(counter.calls.get('exists') ?? 0).toBeLessThan(10);
     expect(counter.total()).toBeLessThan(80 * 8);
-    expect(fs.readdirSync(path.join(rb, '.obsidian/plugins/lan-vault-sync/conflicts'))).toHaveLength(80);
+    await B.coord.versionStore!.flush();
+    const kept = await B.coord.versionStore!.list();
+    expect(new Set(kept.filter((e) => e.path.startsWith('bulk/')).map((e) => e.path)).size).toBe(80);
   });
 
   it('takes in a peer\'s new files in a few calls per file', async () => {

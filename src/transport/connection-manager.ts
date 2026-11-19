@@ -18,6 +18,8 @@ import {
   encodeAuth,
   encodePing,
   encodePong,
+  decodePing,
+  decodePong,
 } from './protocol';
 import {
   ackMessage,
@@ -33,7 +35,7 @@ import {
   MessageType,
   LANSyncSettings,
 } from '../types';
-import { PROTOCOL_VERSION, WS_PING_INTERVAL_MS } from '../constants';
+import { PROTOCOL_VERSION, SEND_BUFFER_LIMIT, SEND_PACE_POLL_MS, WS_PING_INTERVAL_MS } from '../constants';
 import { SecureChannel } from './secure-channel';
 import { logger } from '../logger';
 import { supportsIncomingConnections } from '../utils/runtime';
@@ -50,10 +52,16 @@ interface PeerConnection {
   pingTimer?: ReturnType<typeof setInterval>;
   /** Pings sent since the peer last sent anything. */
   missedPings: number;
+  /** Largest file the peer takes, in bytes, as it said; none for no limit. */
+  maxReceiveBytes?: number;
+  /** Peer's clock minus ours, in ms, estimated from pings (protocol 3). */
+  clockOffsetMs?: number;
   /** Encrypts and decrypts this connection's messages. */
   channel: SecureChannel;
   /** Sends in order: encryption is asynchronous. */
   sendChain: Promise<void>;
+  /** Bytes given to _send that are still being encrypted (see bufferedAmount). */
+  sealingBytes?: number;
   /** Per-peer message queue to serialize async message handling */
   messageQueue: Promise<void>;
 }
@@ -149,6 +157,22 @@ export class ConnectionManager {
   }
 
   /** Called when a device fails the sync key check. */
+  private onDuplicateDeviceCb: ((deviceName: string) => void) | null = null;
+
+  /**
+   * Another device uses this device's ID (its plugin settings were copied
+   * with the vault, say). The two cannot sync with each other, and peers
+   * would take them for one device; the user has to give one a new ID.
+   */
+  onDuplicateDevice(cb: (deviceName: string) => void): void {
+    this.onDuplicateDeviceCb = cb;
+  }
+
+  /** Set this run's instance ID (see DeviceInfo.instance). */
+  setInstance(instance: string): void {
+    this.localInfo.instance = instance;
+  }
+
   onAuthFailed(cb: (failure: AuthFailure) => void): void {
     this.onAuthFailedCb = cb;
   }
@@ -254,11 +278,12 @@ export class ConnectionManager {
             vaultId: payload.vaultId,
             lastSeen: Date.now(),
             acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
+            maxReceiveBytes: typeof payload.maxReceiveBytes === 'number' && payload.maxReceiveBytes > 0 ? payload.maxReceiveBytes : undefined,
           },
           channel: await SecureChannel.derive(key, nonce, payload.nonce, true),
         };
       }, client);
-      ws.send(encodeHandshake({ ...this.localInfo, nonce, protocolVersion: PROTOCOL_VERSION }));
+      ws.send(encodeHandshake({ ...this.localInfo, nonce, protocolVersion: PROTOCOL_VERSION, maxReceiveBytes: this.receiveLimitBytes() }));
     });
 
     client.connect();
@@ -320,12 +345,75 @@ export class ConnectionManager {
   private _send(peer: PeerConnection, data: Uint8Array): void {
     if (peer.ws.readyState !== SOCKET_OPEN) return;
     const sealed = peer.channel.seal(data);
+    peer.sealingBytes = (peer.sealingBytes ?? 0) + data.byteLength;
     peer.sendChain = peer.sendChain
       .then(async () => {
-        const frame = await sealed;
+        const frame = await sealed.finally(() => {
+          peer.sealingBytes = (peer.sealingBytes ?? 0) - data.byteLength;
+        });
         if (peer.ws.readyState === SOCKET_OPEN) peer.ws.send(frame);
       })
       .catch((err) => logger.error(`Failed to send to ${peer.deviceId}:`, err));
+  }
+
+  /**
+   * Bytes waiting to go to this peer: still being encrypted, or given to the
+   * socket and not yet on the network. Both the ws library and the browser
+   * WebSocket (used on phones) report the latter as bufferedAmount.
+   */
+  bufferedAmount(deviceId: string): number {
+    const peer = this.peers.get(deviceId);
+    return peer ? this._waiting(peer) : 0;
+  }
+
+  private _waiting(peer: PeerConnection): number {
+    const socket = (peer.ws as { bufferedAmount?: number }).bufferedAmount;
+    return (peer.sealingBytes ?? 0) + (typeof socket === 'number' ? socket : 0);
+  }
+
+  /**
+   * Send messages one at a time, each only once less than `limit` bytes wait
+   * to go to the peer, so a large file's chunks are not all held in memory
+   * (plain and encrypted) while a slow device takes them. Frames are taken
+   * from `frames` only when they can go, so they can be built as needed.
+   * Resolves false when the peer disconnects (or its connection is replaced)
+   * before everything was sent; the rest is not taken.
+   */
+  async sendToPaced(
+    deviceId: string,
+    frames: Iterable<Uint8Array> | AsyncIterable<Uint8Array>,
+    limit = SEND_BUFFER_LIMIT,
+  ): Promise<boolean> {
+    const peer = this.peers.get(deviceId);
+    if (!peer) return false;
+    const live = () => !this.stopped && this.peers.get(deviceId) === peer && peer.ws.readyState === SOCKET_OPEN;
+    const pause = () => new Promise((resolve) => setTimeout(resolve, SEND_PACE_POLL_MS));
+    for await (const frame of frames) {
+      // A frame that would go over the limit waits until there is room; one
+      // larger than the limit still goes once nothing else waits.
+      while (live() && this._waiting(peer) > 0 && this._waiting(peer) + frame.byteLength > limit) await pause();
+      if (!live()) return false;
+      this._send(peer, frame);
+      // Wait here too, so the next frame is not built before it can go.
+      while (live() && this._waiting(peer) >= limit) await pause();
+    }
+    return live();
+  }
+
+  /** Largest file to take from a peer, in bytes; 0 for no limit (see maxReceiveMB). */
+  receiveLimitBytes(): number {
+    const mb = this.settings.maxReceiveMB;
+    return typeof mb === 'number' && Number.isFinite(mb) && mb > 0 ? Math.floor(mb * 1024 * 1024) : 0;
+  }
+
+  /** Largest file a peer takes, in bytes, as it said in its handshake; 0 for no limit. */
+  peerReceiveLimit(deviceId: string): number {
+    return this.peers.get(deviceId)?.maxReceiveBytes ?? 0;
+  }
+
+  /** The peer's clock minus ours in ms, once a ping has been answered. */
+  getClockOffset(deviceId: string): number | undefined {
+    return this.peers.get(deviceId)?.clockOffsetMs;
   }
 
   getConnectedPeerIds(): string[] {
@@ -408,7 +496,7 @@ export class ConnectionManager {
         // Prove we know the key, then wait for the peer to do the same.
         const serverNonce = randomNonce();
         const proof = await authProof(key, ackMessage(payload.nonce, serverNonce, this.settings.deviceId));
-        ws.send(encodeHandshakeAck({ ...this.localInfo, nonce: serverNonce, proof, protocolVersion: PROTOCOL_VERSION }));
+        ws.send(encodeHandshakeAck({ ...this.localInfo, nonce: serverNonce, proof, protocolVersion: PROTOCOL_VERSION, maxReceiveBytes: this.receiveLimitBytes() }));
         pending = {
           clientNonce: payload.nonce,
           serverNonce,
@@ -420,6 +508,7 @@ export class ConnectionManager {
             vaultId: payload.vaultId,
             lastSeen: Date.now(),
             acceptsIncomingConnections: this._peerAcceptsIncomingConnections(payload),
+            maxReceiveBytes: typeof payload.maxReceiveBytes === 'number' && payload.maxReceiveBytes > 0 ? payload.maxReceiveBytes : undefined,
           },
         };
         return 'continue';
@@ -587,6 +676,7 @@ export class ConnectionManager {
       direction,
       client,
       missedPings: 0,
+      maxReceiveBytes: device.maxReceiveBytes,
       channel,
       sendChain: Promise.resolve(),
       messageQueue: Promise.resolve(),
@@ -631,10 +721,19 @@ export class ConnectionManager {
     const p = this.peers.get(deviceId);
     if (!p || p.ws !== ws) return;
     if (msg.type === MessageType.PING) {
-      this._send(p, encodePong());
+      this._send(p, encodePong(decodePing(msg.payload) ?? 0));
       return;
     }
-    if (msg.type === MessageType.PONG || msg.type === MessageType.HANDSHAKE_ACK) return;
+    if (msg.type === MessageType.PONG) {
+      const pong = decodePong(msg.payload);
+      if (pong && pong.pingTime > 0) {
+        const now = Date.now();
+        // The peer read its clock about halfway through the round trip.
+        p.clockOffsetMs = Math.round(pong.peerTime - (pong.pingTime + now) / 2);
+      }
+      return;
+    }
+    if (msg.type === MessageType.HANDSHAKE_ACK) return;
 
     // Serialize message handling per peer to prevent race conditions.
     // Each message waits for the previous one to finish before starting.
@@ -724,7 +823,11 @@ export class ConnectionManager {
   }
 
   private _isValidPeer(payload: HandshakePayload): boolean {
-    if (!payload.deviceId || payload.deviceId === this.settings.deviceId) {
+    if (!payload.deviceId) return false;
+    if (payload.deviceId === this.settings.deviceId) {
+      if (payload.instance && this.localInfo.instance && payload.instance !== this.localInfo.instance) {
+        this.onDuplicateDeviceCb?.(payload.deviceName ?? "");
+      }
       return false;
     }
     if (payload.vaultId !== this.vaultId) {

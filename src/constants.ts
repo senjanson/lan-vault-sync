@@ -77,6 +77,21 @@ export const CHUNKED_FILE_THRESHOLD = 8 * 1024 * 1024; // 8 MB
 export const CHUNK_SIZE = 1024 * 1024; // 1 MB per FILE_CHUNK message
 /** Largest binary file accepted from a peer. */
 export const MAX_SYNC_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
+/**
+ * A large file's chunks are handed to the socket only while less than this
+ * waits to be sent to that peer. Queueing them all at once kept the whole
+ * file in memory twice (plain and encrypted) until a slow phone took it.
+ */
+export const SEND_BUFFER_LIMIT = 4 * 1024 * 1024; // 4 MB
+/** How often a paced send looks again at what the socket still has to send. */
+export const SEND_PACE_POLL_MS = 20;
+/**
+ * Where a large file's chunks are written as they arrive, until the whole
+ * file is there and matches its hash. Starts with a dot, so it is not synced.
+ */
+export const INCOMING_DIR = ".lan-vault-sync/incoming";
+/** Default limit for files received on a phone, in MB (desktops have none). */
+export const PHONE_MAX_RECEIVE_MB = 200;
 
 export const WS_PING_INTERVAL_MS = 10000;
 
@@ -84,8 +99,10 @@ export const WS_PING_INTERVAL_MS = 10000;
  * Version of the sync protocol. Devices only connect when theirs match.
  * 1: plain messages (plugin 0.3 and older, which send no version).
  * 2: encrypted messages, CRDT digests in the file list.
+ * 3: deletions say what was deleted; files say which version they replace;
+ *    pings carry the clock (plugin 0.5).
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export const SYNC_LOG_VIEW_TYPE = "lan-vault-sync-log-view";
 export const MAX_SYNC_LOG_ENTRIES = 500;

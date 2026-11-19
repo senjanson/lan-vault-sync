@@ -1,6 +1,7 @@
 import { REVIVED_FILE, TOMBSTONE_FILE, TOMBSTONE_TTL_MS } from '../constants';
 import { logger } from '../logger';
 import { ensureParentDirectory } from '../utils/path-utils';
+import { readJsonWithBackup, writeAtomic } from '../utils/atomic-write';
 import type { Revival, Tombstone } from '../types';
 
 /**
@@ -44,16 +45,25 @@ export class TombstoneStore {
   private dirReady = false;
   /** How long the last write of the records took, in ms. */
   private lastWriteMs = 0;
+  /** Told when a records file was damaged and read from its backup. */
+  private onBackupUsed: ((path: string, why: string) => void) | undefined;
 
   constructor(private adapter: any, private now: () => number = Date.now) {}
+
+  setOnBackupUsed(listener: (path: string, why: string) => void): void {
+    this.onBackupUsed = listener;
+  }
 
   async load(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
     for (const [file, into] of [[TOMBSTONE_FILE, this.entries], [REVIVED_FILE, this.revivals]] as const) {
       try {
-        if (!this.adapter || !(await this.adapter.exists(file))) continue;
-        const list = JSON.parse(await this.adapter.read(file)) as Tombstone[];
+        if (!this.adapter) continue;
+        // A damaged file is read from its backup: losing the records would
+        // let peers send deleted files back.
+        const list = await readJsonWithBackup<Tombstone[]>(this.adapter, file, (p, why) => this.onBackupUsed?.(p, why));
+        if (!Array.isArray(list)) continue;
         for (const t of list) {
           if (t && typeof t.path === 'string' && typeof t.deletedAt === 'number') {
             if (into === this.entries) this._set(t);
@@ -89,7 +99,7 @@ export class TombstoneStore {
     return out;
   }
 
-  add(path: string, hash?: string, deletedAt = this.now(), movedTo?: string): void {
+  add(path: string, hash?: string, deletedAt = this.now(), movedTo?: string, by?: string): void {
     const existing = this.entries.get(path);
     if (existing && existing.deletedAt >= deletedAt) return;
     // Deleted again: it no longer undoes the earlier deletion.
@@ -100,6 +110,7 @@ export class TombstoneStore {
     // again does not undo the rename: peers still need to know where it went.
     const moved = movedTo ?? existing?.movedTo;
     if (moved) entry.movedTo = moved;
+    if (by) entry.by = by;
     this._set(entry);
     this._changed();
   }
@@ -141,12 +152,16 @@ export class TombstoneStore {
   }
 
   /**
-   * Whether a peer's copy is the file this device deleted. A matching hash
-   * proves it; without a hash, a copy last modified before the deletion is
-   * treated as stale. A copy edited after the deletion is kept.
+   * Whether a copy is the file that was deleted. A matching hash proves it.
+   * Without a hash (an old record), only the version the two devices last
+   * shared (`agreed`) is taken for it: a copy that is still that version
+   * was not changed since. Clocks are not used: a device whose clock is
+   * behind made edits that look older than the deletion, and those were
+   * deleted. When in doubt the copy is kept, and comes back.
    */
-  static covers(t: Tombstone, file: { hash: string; mtime: number }): boolean {
-    return t.hash ? t.hash === file.hash : file.mtime <= t.deletedAt;
+  static covers(t: Tombstone, file: { hash: string; mtime: number }, agreed?: string): boolean {
+    if (t.hash) return t.hash === file.hash;
+    return agreed !== undefined && agreed === file.hash;
   }
 
   private _prune(): void {
@@ -214,7 +229,7 @@ export class TombstoneStore {
             this.dirReady = true;
           }
           const started = Date.now();
-          await this.adapter.write(file, JSON.stringify(Array.from(records.values())));
+          await writeAtomic(this.adapter, file, JSON.stringify(Array.from(records.values())));
           if (file === TOMBSTONE_FILE) this.lastWriteMs = Date.now() - started;
         } catch (err) {
           this.dirReady = false;
