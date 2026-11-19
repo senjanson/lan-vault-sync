@@ -4,7 +4,7 @@
 
 English | [中文](README-zh.md)
 
-![Obsidian](https://img.shields.io/badge/Obsidian-1.4.0%2B-7C3AED?logo=obsidian&logoColor=white)
+![Obsidian](https://img.shields.io/badge/Obsidian-1.7.2%2B-7C3AED?logo=obsidian&logoColor=white)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -46,7 +46,7 @@ Write a note on your computer and it shows up on your phone on the same Wi-Fi a 
 
 ## Installation
 
-### From Community plugins (coming soon)
+### From Community plugins
 
 1. Open **Settings → Community plugins → Browse**.
 2. Search for **LAN Vault Sync**, click **Install**, then **Enable**.

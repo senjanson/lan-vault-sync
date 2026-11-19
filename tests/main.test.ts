@@ -65,7 +65,7 @@ function createPlugin(layoutReady: Array<() => void> | null = null): LANSyncPlug
           return {};
         },
       },
-      workspace: { onLayoutReady, on: () => ({}) },
+      workspace: { onLayoutReady, on: () => ({}), getLeavesOfType: () => [] },
     },
     loadData: async () => ({}),
     saveData: async () => undefined,

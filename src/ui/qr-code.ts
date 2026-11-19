@@ -40,6 +40,5 @@ export async function renderQRCode(
   const svgEl = container.appendChild(document.importNode(parsed, true)) as unknown as SVGElement;
   svgEl.setAttribute('width', '200');
   svgEl.setAttribute('height', '200');
-  svgEl.style.display = 'block';
-  svgEl.style.margin = '0 auto';
+  svgEl.setCssStyles({ display: 'block', margin: '0 auto' });
 }

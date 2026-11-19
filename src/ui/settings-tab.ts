@@ -309,7 +309,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
     const progressBarInner = progressBarOuter.createDiv({
       cls: "lan-sync-progress-bar-inner",
     });
-    progressBarInner.style.width = "0%";
+    progressBarInner.setCssStyles({ width: "0%" });
 
     const progressLabel = syncContainer.createDiv({
       cls: "lan-sync-progress-label",
@@ -330,14 +330,14 @@ export class LANSyncSettingTab extends PluginSettingTab {
             isSyncing = true;
             btn.setDisabled(true);
             btn.setButtonText(t("set.syncing"));
-            progressBarInner.style.width = "0%";
+            progressBarInner.setCssStyles({ width: "0%" });
             progressBarInner.removeClass("lan-sync-progress-complete");
             progressLabel.setText(t("set.starting"));
 
             try {
               await this.plugin.manualFullSync(
                 (percent: number, message: string) => {
-                  progressBarInner.style.width = `${percent}%`;
+                  progressBarInner.setCssStyles({ width: `${percent}%` });
                   progressLabel.setText(`${Math.round(percent)}% — ${message}`);
                   if (percent >= 100) {
                     progressBarInner.addClass("lan-sync-progress-complete");
@@ -347,7 +347,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
               new Notice(t("set.syncDone"));
             } catch (err) {
               progressLabel.setText(t("set.syncFailedLabel"));
-              progressBarInner.style.width = "100%";
+              progressBarInner.setCssStyles({ width: "100%" });
               progressBarInner.addClass("lan-sync-progress-error");
               new Notice(t("set.syncFailed"));
             } finally {

@@ -4,7 +4,7 @@
 
 [English](README.md) | 中文
 
-![Obsidian](https://img.shields.io/badge/Obsidian-1.4.0%2B-7C3AED?logo=obsidian&logoColor=white)
+![Obsidian](https://img.shields.io/badge/Obsidian-1.7.2%2B-7C3AED?logo=obsidian&logoColor=white)
 ![平台](https://img.shields.io/badge/平台-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-blue)
 ![许可证](https://img.shields.io/badge/许可证-MIT-green)
 
@@ -46,7 +46,7 @@
 
 ## 安装
 
-### 从社区插件市场安装（即将上线）
+### 从社区插件市场安装
 
 1. 打开 **设置 → 第三方插件 → 浏览**。
 2. 搜索 **LAN Vault Sync**，点击 **安装**，再点击 **启用**。

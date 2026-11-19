@@ -1,7 +1,6 @@
 import esbuild from "esbuild";
 import process from "process";
-import builtins from "builtin-modules";
-import { createRequire } from "module";
+import { builtinModules, createRequire } from "module";
 import { dirname, join } from "path";
 
 const _require = createRequire(import.meta.url);
@@ -48,7 +47,7 @@ const context = await esbuild.context({
     "@lezer/common",
     "@lezer/highlight",
     "@lezer/lr",
-    ...builtins,
+    ...builtinModules,
   ],
   format: "cjs",
   target: "es2020",

@@ -54,8 +54,6 @@ export default class LANSyncPlugin extends Plugin {
   settings: LANSyncSettings = DEFAULT_SETTINGS;
   private coordinator: SyncCoordinator | null = null;
   private statusBar: StatusBar | null = null;
-  private syncView: SyncView | null = null;
-  private syncLogView: SyncLogView | null = null;
   private backupService: ConflictBackupService | null = null;
   syncLogService: SyncLogService | null = null;
   /**
@@ -113,14 +111,13 @@ export default class LANSyncPlugin extends Plugin {
 
     // Register view
     this.registerView(SYNC_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
-      this.syncView = new SyncView(leaf, () => this.getSyncStatus(), {
+      return new SyncView(leaf, () => this.getSyncStatus(), {
         resolveHeld: async (id, choice) => {
           return (await this.coordinator?.resolveHeldDeletions(id, choice)) ?? false;
         },
         dismissAlert: (key) => this.coordinator?.health.dismiss(key),
         exportDiagnostics: () => this.exportDiagnostics(),
       });
-      return this.syncView;
     });
 
     // Register sync log view
@@ -137,10 +134,7 @@ export default class LANSyncPlugin extends Plugin {
       vault.on("rename", (_file: TAbstractFile, oldPath: string) => this.coordinator?.health.notePathGone(oldPath)),
     );
 
-    this.registerView(SYNC_LOG_VIEW_TYPE, (leaf: WorkspaceLeaf) => {
-      this.syncLogView = new SyncLogView(leaf, this.syncLogService!);
-      return this.syncLogView;
-    });
+    this.registerView(SYNC_LOG_VIEW_TYPE, (leaf: WorkspaceLeaf) => new SyncLogView(leaf, this.syncLogService!));
 
     // Status bar
     this.statusBar = new StatusBar(this);
@@ -482,7 +476,7 @@ export default class LANSyncPlugin extends Plugin {
         const count = fresh.reduce((n, h) => n + h.paths.length, 0);
         heldNotices.push({ ids: fresh.map((h) => h.id), notice: new Notice(t("notice.held", { count }), 0) });
       }
-      this.syncView?.refresh();
+      for (const view of this.openSyncViews()) view.refresh();
     });
 
     this.coordinator.onStateChange(() => this.showStatus());
@@ -531,7 +525,7 @@ export default class LANSyncPlugin extends Plugin {
     this.coordinator.onUnsyncableFile((path, reason) => this.notifyUnsyncable(path, reason));
 
     this.coordinator.onSyncEvent((msg: string) => {
-      this.syncView?.addLog(msg);
+      for (const view of this.openSyncViews()) view.addLog(msg);
     });
 
     await this.coordinator.start();
@@ -611,7 +605,7 @@ export default class LANSyncPlugin extends Plugin {
   private showStatus(): void {
     const status = this.getSyncStatus();
     this.statusBar?.update(status.state, status.devices.length, status.unreachable, status.summary);
-    this.syncView?.refresh();
+    for (const view of this.openSyncViews()) view.refresh();
     this.notifyUnreachable(status.unreachable);
   }
 
@@ -660,8 +654,16 @@ export default class LANSyncPlugin extends Plugin {
     }
 
     if (leaf) {
-      workspace.revealLeaf(leaf);
+      await workspace.revealLeaf(leaf);
     }
+  }
+
+  /** The sync panels open in the workspace. */
+  private openSyncViews(): SyncView[] {
+    return this.app.workspace
+      .getLeavesOfType(SYNC_VIEW_TYPE)
+      .map((leaf) => leaf.view)
+      .filter((view): view is SyncView => view instanceof SyncView);
   }
 
   async activateSyncLogView(): Promise<void> {
@@ -677,7 +679,7 @@ export default class LANSyncPlugin extends Plugin {
     }
 
     if (leaf) {
-      workspace.revealLeaf(leaf);
+      await workspace.revealLeaf(leaf);
     }
   }
 

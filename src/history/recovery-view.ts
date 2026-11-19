@@ -366,5 +366,5 @@ export async function openRecoveryCenter(plugin: Plugin): Promise<void> {
     leaf = workspace.getLeaf("tab");
     await leaf.setViewState({ type: RECOVERY_VIEW_TYPE, active: true });
   }
-  workspace.revealLeaf(leaf);
+  await workspace.revealLeaf(leaf);
 }
