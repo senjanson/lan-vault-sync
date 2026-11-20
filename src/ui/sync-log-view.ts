@@ -8,7 +8,7 @@ import { t, formatDate, formatTime } from "../i18n";
 export class SyncLogView extends ItemView {
   private filterType: SyncLogEntryType | "all" = "all";
   private searchQuery = "";
-  private renderTimer: ReturnType<typeof setTimeout> | null = null;
+  private renderTimer: number | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -19,7 +19,7 @@ export class SyncLogView extends ItemView {
     // again for each one made the change itself slow on a phone.
     this.syncLogService.onChange(() => {
       if (this.renderTimer) return;
-      this.renderTimer = setTimeout(() => {
+      this.renderTimer = window.setTimeout(() => {
         this.renderTimer = null;
         this.render();
       }, 250);

@@ -80,13 +80,13 @@ export class SyncCoordinator {
   private discovery: DiscoveryService;
   private stateMachine: SyncStateMachine;
   private filter: FileFilter;
-  private fullSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private fullSyncTimer: number | null = null;
   /** A file list exchange asked for sooner than the next periodic one. */
-  private treeSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private treeSyncTimer: number | null = null;
   /** Hashes of all files read at start; see _primeKnownHashes. */
   private primed: Promise<void> = Promise.resolve();
   private hashCache: FileHashCache = new Map();
-  private persistTimer: ReturnType<typeof setInterval> | null = null;
+  private persistTimer: number | null = null;
   private pendingInitialBootstrapPeers = new Set<string>();
   /** Tracks file paths where we are the conflict "loser" and must NOT seed
    *  the CRDT doc from disk.  Stored per winning peer so an unrelated
@@ -193,7 +193,7 @@ export class SyncCoordinator {
   readonly health: HealthMonitor;
   /** Old versions kept before a change (plan stage 2); null where the vault cannot hold it. */
   readonly versionStore: VersionStore | null;
-  private historyTimer: ReturnType<typeof setInterval> | null = null;
+  private historyTimer: number | null = null;
   /** Steps that remove or replace content (see ApplyGate). */
   private gate: ApplyGate;
   /** Bulk deletions waiting for the user (see DeleteBreaker). */
@@ -215,14 +215,14 @@ export class SyncCoordinator {
   constructor(
     private vault: Vault,
     private settings: LANSyncSettings,
-    options?: {
+    options: {
       backupService?: ConflictBackupService;
       syncLogService?: SyncLogService;
       workspace?: Workspace;
       eventLog?: EventLog;
       versionStore?: VersionStore | null;
       /** Moves a file to the user's trash (Obsidian's fileManager.trashFile). */
-      trash?: (file: TAbstractFile) => Promise<void>;
+      trash: (file: TAbstractFile) => Promise<void>;
       /** Overrides the bulk-deletion limits (tests). */
       deleteLimits?: Partial<DeleteLimits>;
       health?: HealthOptions;
@@ -268,7 +268,7 @@ export class SyncCoordinator {
       vault,
       keeper: this.versionStore ?? new BackupKeeper(this.backupService),
       log: this.eventLog,
-      trash: options?.trash,
+      trash: options.trash,
       // Something changed since the decision: decide again from fresh lists.
       onPreconditionFailed: () => this._scheduleTreeSync(),
       onKeepFailed: (path, op) => this._emitEvent("event.keep-failed", { op, path }),
@@ -414,7 +414,7 @@ export class SyncCoordinator {
     if (!this.settings.enabled) return;
     void this.eventLog.prune().catch(() => undefined);
     void this._pruneHistory();
-    if (!this.historyTimer) this.historyTimer = setInterval(() => void this._pruneHistory(), 6 * 60 * 60 * 1000);
+    if (!this.historyTimer) this.historyTimer = window.setInterval(() => void this._pruneHistory(), 6 * 60 * 60 * 1000);
     this.startError = null;
 
     try {
@@ -451,7 +451,7 @@ export class SyncCoordinator {
 
       // Notes are saved as they change (see YjsDocManager._commit); this
       // catches a save that failed, and saves the indexes.
-      this.persistTimer = setInterval(() => void this.persist(), 60000);
+      this.persistTimer = window.setInterval(() => void this.persist(), 60000);
 
       this.stateMachine.transition("watching");
       this._emitEvent("event.started");
@@ -468,23 +468,23 @@ export class SyncCoordinator {
 
   async stop(): Promise<void> {
     this.running = false;
-    for (const t of this.echoRechecks.values()) clearTimeout(t);
+    for (const t of this.echoRechecks.values()) window.clearTimeout(t);
     this.echoRechecks.clear();
     if (this.fullSyncTimer) {
-      clearInterval(this.fullSyncTimer);
+      window.clearInterval(this.fullSyncTimer);
       this.fullSyncTimer = null;
     }
     if (this.persistTimer) {
-      clearInterval(this.persistTimer);
+      window.clearInterval(this.persistTimer);
       this.persistTimer = null;
     }
     if (this.historyTimer) {
-      clearInterval(this.historyTimer);
+      window.clearInterval(this.historyTimer);
       this.historyTimer = null;
     }
     await this.versionStore?.flush().catch(() => undefined);
     if (this.treeSyncTimer) {
-      clearTimeout(this.treeSyncTimer);
+      window.clearTimeout(this.treeSyncTimer);
       this.treeSyncTimer = null;
     }
 
@@ -546,11 +546,11 @@ export class SyncCoordinator {
   /** Change how often the file lists are compared, without a restart. */
   setSyncInterval(ms: number): void {
     if (this.fullSyncTimer) {
-      clearInterval(this.fullSyncTimer);
+      window.clearInterval(this.fullSyncTimer);
       this.fullSyncTimer = null;
     }
     if (this.running && ms > 0) {
-      this.fullSyncTimer = setInterval(() => this._periodicFullSync(), ms);
+      this.fullSyncTimer = window.setInterval(() => this._periodicFullSync(), ms);
     }
   }
 
@@ -1112,7 +1112,7 @@ export class SyncCoordinator {
           // swapping in a placeholder). Read it again before taking that as
           // the user emptying the note (plan 4.6).
           if (content === "" && !fromEditor && (this.docManager.getWrittenContent(path) ?? "") !== "") {
-            await new Promise((r) => setTimeout(r, EMPTY_REREAD_MS));
+            await new Promise((r) => window.setTimeout(r, EMPTY_REREAD_MS));
             const again = await (this.vault as any).adapter?.read?.(path).catch(() => null);
             if (typeof again === "string" && again !== "") {
               logger.warn(`Read ${path} as empty, then with text again: the empty read was not taken as an edit`);
@@ -2032,7 +2032,7 @@ export class SyncCoordinator {
       onProgress(peerPercent, t("progress.sent", { i: i + 1, n: totalPeers }));
 
       if (i < peers.length - 1) {
-        await new Promise<void>((r) => setTimeout(r, 500));
+        await new Promise<void>((r) => window.setTimeout(r, 500));
       }
     }
 
@@ -2053,7 +2053,7 @@ export class SyncCoordinator {
       Date.now() - lastEventTime < idleThreshold &&
       Date.now() - startWait < maxWait
     ) {
-      await new Promise<void>((r) => setTimeout(r, 500));
+      await new Promise<void>((r) => window.setTimeout(r, 500));
       const elapsed = Date.now() - startWait;
       const waitPercent = Math.min(95, 78 + (elapsed / maxWait) * 17);
       onProgress(waitPercent, t("progress.processing"));
@@ -2089,7 +2089,7 @@ export class SyncCoordinator {
    */
   private _scheduleTreeSync(): void {
     if (this.treeSyncTimer || !this.running) return;
-    this.treeSyncTimer = setTimeout(() => {
+    this.treeSyncTimer = window.setTimeout(() => {
       this.treeSyncTimer = null;
       if (this.running) void this._periodicFullSync().catch((err) => logger.warn("File list exchange failed:", err));
     }, SyncCoordinator.TREE_SYNC_DELAY_MS);
@@ -2310,7 +2310,7 @@ export class SyncCoordinator {
       };
       markAll(folder);
       try {
-        await this.vault.delete(folder, true);
+        await this.gate.remove(folder);
         this.eventLog.record({ op: "delete", path, rule: "empty-folder", msg: "folder deleted on a peer, empty here" });
         this._emitEvent("event.folder-deleted", { path });
       } catch (err) {
@@ -2999,8 +2999,8 @@ export class SyncCoordinator {
     if (!adapter?.exists) return null;
     const swap = (p: string) => [...p].map((c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase())).join("");
     try {
-      const configDir: string = (this.vault as any).configDir ?? ".obsidian";
-      if (swap(configDir) !== configDir && (await adapter.exists(configDir))) {
+      const configDir: string | undefined = this.vault.configDir;
+      if (configDir && swap(configDir) !== configDir && (await adapter.exists(configDir))) {
         return await adapter.exists(swap(configDir));
       }
       for (const file of this.vault.getFiles()) {
@@ -3083,7 +3083,7 @@ export class SyncCoordinator {
     if (!kept) return false;
     if (file.path !== oldPath) return false;
     this.watcher.markRemoteWrite(oldPath, "delete");
-    await this.vault.delete(file);
+    await this.gate.remove(file);
     this.gate.applied("rename", oldPath, ctx, { hash: snap.hash, size: snap.bytes.byteLength }, undefined, kept.hash ?? kept.id, `followed to ${newPath}`);
     return true;
   }
@@ -3285,15 +3285,15 @@ export class SyncCoordinator {
   }
 
   /** Pending re-reads of a file whose change looked like an earlier write of ours. */
-  private echoRechecks = new Map<string, ReturnType<typeof setTimeout>>();
+  private echoRechecks = new Map<string, number>();
   private static readonly ECHO_RECHECK_MS = 1500;
 
   private _recheckEcho(path: string): void {
     const old = this.echoRechecks.get(path);
-    if (old) clearTimeout(old);
+    if (old) window.clearTimeout(old);
     this.echoRechecks.set(
       path,
-      setTimeout(() => {
+      window.setTimeout(() => {
         this.echoRechecks.delete(path);
         if (!this.running) return;
         void this._enqueueLocalFileChange({ type: "modify", path, isTextFile: true, timestamp: Date.now(), recheck: true });

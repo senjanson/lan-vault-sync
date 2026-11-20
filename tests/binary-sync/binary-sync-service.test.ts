@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { TFile } from 'obsidian';
 import { BinaryFileSyncService } from '../../src/binary-sync/binary-sync-service';
+import { ApplyGate, BackupKeeper } from '../../src/sync/apply-gate';
+import { EventLog } from '../../src/diagnostics/event-log';
+
+/** A gate that deletes straight from the fake vault, as the coordinator's would to the trash. */
+function setTrashingGate(service: BinaryFileSyncService, vault: FakeVault, backupService: unknown): void {
+  service.setGate(new ApplyGate({ vault: vault as any, keeper: new BackupKeeper(backupService as any), log: new EventLog(null), trash: (f) => vault.delete(f as TFile) }));
+}
 
 class FakeVault {
   adapter = {
@@ -98,6 +105,7 @@ describe('BinaryFileSyncService conflict backups', () => {
       { broadcast: vi.fn(), sendTo: vi.fn() } as any,
       { backupBinaryFile } as any,
     );
+    setTrashingGate(service, vault, { backupBinaryFile });
 
     await (service as any)._deleteFile('assets/file.bin', { ctx: { rule: 'test' } });
 
@@ -227,6 +235,7 @@ describe('BinaryFileSyncService deletions', () => {
       { broadcast: vi.fn(), sendTo, getConnectedPeerIds: () => ['a', 'b', 'c'] } as any,
       { backupBinaryFile } as any,
     );
+    setTrashingGate(service, vault, { backupBinaryFile });
     const deleted = vi.fn();
     service.onRemoteFileDeleted(deleted);
     const { encodeFileDelete, decodeMessage } = await import('../../src/transport/protocol');

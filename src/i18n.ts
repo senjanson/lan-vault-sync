@@ -361,7 +361,7 @@ let forced: Lang | null = null;
 
 function detect(): Lang {
   try {
-    const stored = globalThis.localStorage?.getItem("language") ?? "";
+    const stored = window.localStorage?.getItem("language") ?? "";
     return stored.toLowerCase().startsWith("zh") ? "zh" : "en";
   } catch {
     return "en";

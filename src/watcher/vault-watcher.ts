@@ -23,7 +23,7 @@ export class VaultWatcher {
   private changeCb: ((event: FileChangeEvent) => void) | null = null;
   private folderCb: ((event: FolderChangeEvent) => void) | null = null;
   private remoteWritePaths = new Map<string, number>();
-  private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private debounceTimers = new Map<string, number>();
   private pendingModifyEvents = new Map<
     string,
     Pick<FileChangeEvent, "oldPath" | "content" | "source" | "savedToDisk">
@@ -61,7 +61,7 @@ export class VaultWatcher {
     const expiresAt = Date.now() + 2000;
     this.remoteWritePaths.set(key, expiresAt);
     // Auto-clear after a generous window to ensure all editor/vault events fire
-    setTimeout(() => {
+    window.setTimeout(() => {
       if (this.remoteWritePaths.get(key) === expiresAt) {
         this.remoteWritePaths.delete(key);
       }
@@ -89,7 +89,7 @@ export class VaultWatcher {
     const timer = this.debounceTimers.get(filePath);
     if (!timer) return null;
 
-    clearTimeout(timer);
+    window.clearTimeout(timer);
     this.debounceTimers.delete(filePath);
     const pending = this.pendingModifyEvents.get(filePath);
     this.pendingModifyEvents.delete(filePath);
@@ -130,7 +130,7 @@ export class VaultWatcher {
     }
     this.workspaceRefs = [];
     for (const timer of this.debounceTimers.values()) {
-      clearTimeout(timer);
+      window.clearTimeout(timer);
     }
     this.debounceTimers.clear();
     this.pendingModifyEvents.clear();
@@ -255,7 +255,7 @@ export class VaultWatcher {
     source: FileChangeEvent["source"] = "vault",
   ): void {
     const existing = this.debounceTimers.get(path);
-    if (existing) clearTimeout(existing);
+    if (existing) window.clearTimeout(existing);
 
     const pending = this.pendingModifyEvents.get(path);
     const nextContent =
@@ -271,7 +271,7 @@ export class VaultWatcher {
 
     this.debounceTimers.set(
       path,
-      setTimeout(() => {
+      window.setTimeout(() => {
         this.debounceTimers.delete(path);
         const event = this.pendingModifyEvents.get(path);
         this.pendingModifyEvents.delete(path);

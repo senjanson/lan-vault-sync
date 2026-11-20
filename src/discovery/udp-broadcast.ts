@@ -1,28 +1,37 @@
 import { DeviceInfo } from '../types';
 import { DISCOVERY_PORT, DISCOVERY_INTERVAL_MS } from '../constants';
 import { logger } from '../logger';
-import { getDynamicRequire } from '../utils/runtime';
+import { Platform } from 'obsidian';
+import type { NodeWindow } from '../utils/runtime';
 import { getIPv4BroadcastAddresses } from '../utils/network';
 
 /** Reaches every network, but leaves through one interface only; see broadcast. */
 const LIMITED_BROADCAST = '255.255.255.255';
 
+interface UdpSocket {
+  bind(port: number, callback: () => void): void;
+  close(): void;
+  send(
+    msg: Uint8Array,
+    offset: number,
+    length: number,
+    port: number,
+    address: string,
+    callback: (err: Error | null) => void,
+  ): void;
+  setBroadcast(enabled: boolean): void;
+  on(event: 'error', listener: (err: Error) => void): void;
+  on(event: 'message', listener: (msg: Uint8Array, rinfo: { address: string }) => void): void;
+}
+
+/** Node's dgram module, as far as discovery uses it. */
+interface DgramModule {
+  createSocket(options: { type: 'udp4'; reuseAddr: boolean }): UdpSocket;
+}
+
 export class UdpBroadcast {
-  private socket: {
-    bind(port: number, callback: () => void): void;
-    close(): void;
-    send(
-      msg: Uint8Array,
-      offset: number,
-      length: number,
-      port: number,
-      address: string,
-      callback: (err: Error | null) => void,
-    ): void;
-    setBroadcast(enabled: boolean): void;
-    on(event: string, listener: (...args: any[]) => void): void;
-  } | null = null;
-  private broadcastTimer: ReturnType<typeof setInterval> | null = null;
+  private socket: UdpSocket | null = null;
+  private broadcastTimer: number | null = null;
   private onDeviceSeenCb: ((device: DeviceInfo) => void) | null = null;
   /** Addresses whose last send failed, so a failure is logged once. */
   private failing = new Set<string>();
@@ -38,15 +47,14 @@ export class UdpBroadcast {
   start(): Promise<void> {
     return new Promise((resolve) => {
       try {
-        const require = getDynamicRequire();
-        if (!require) {
+        const dgram = Platform.isDesktopApp
+          ? ((window as NodeWindow).require?.('dgram') as DgramModule | undefined)
+          : undefined;
+        if (!dgram) {
           resolve();
           return;
         }
 
-        const dgram = require('dgram') as {
-          createSocket(options: { type: 'udp4'; reuseAddr: boolean }): typeof this.socket;
-        };
         const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
         this.socket = socket;
         let settled = false;
@@ -95,7 +103,7 @@ export class UdpBroadcast {
 
   stop(): void {
     if (this.broadcastTimer) {
-      clearInterval(this.broadcastTimer);
+      window.clearInterval(this.broadcastTimer);
       this.broadcastTimer = null;
     }
     if (this.socket) {
@@ -120,7 +128,7 @@ export class UdpBroadcast {
     };
 
     broadcast();
-    this.broadcastTimer = setInterval(broadcast, DISCOVERY_INTERVAL_MS);
+    this.broadcastTimer = window.setInterval(broadcast, DISCOVERY_INTERVAL_MS);
   }
 
   /**

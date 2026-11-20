@@ -1,12 +1,16 @@
-import type { WebSocket as WsWebSocket } from 'ws';
-import type { IncomingMessage } from 'http';
+import type { WebSocket as WsWebSocket, WebSocketServer } from 'ws';
 import { logger } from '../logger';
 import { supportsIncomingConnections } from '../utils/runtime';
 import { RawSocket, SocketLike } from './socket';
+import { loadWs } from './ws-lib';
+
+/** The parts of Node's IncomingMessage the server reads. */
+interface IncomingRequest {
+  socket: { remoteAddress?: string };
+}
 
 export class WSServer {
-  // Use 'any' for the runtime type since WebSocketServer is loaded via conditional require
-  private wss: any = null;
+  private wss: WebSocketServer | null = null;
   private onConnectionCb: ((ws: SocketLike, ip: string, raw?: RawSocket) => void) | null = null;
 
   constructor(private port: number) {}
@@ -15,30 +19,26 @@ export class WSServer {
     this.onConnectionCb = cb;
   }
 
-  start(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (!supportsIncomingConnections()) {
-        resolve();
-        return;
-      }
+  async start(): Promise<void> {
+    if (!supportsIncomingConnections()) return;
 
-      // Conditional require so ws module code only runs on desktop (Node/Electron).
-      // esbuild still bundles ws (it sees the require('ws') call), but the __commonJS
-      // lazy wrapper delays evaluation until this line actually executes.
-      const { WebSocketServer } = require('ws');
-      this.wss = new WebSocketServer({ port: this.port, host: '0.0.0.0' });
+    // Loaded here, so the ws library only runs on desktop (Node/Electron).
+    const { WebSocketServer } = await loadWs();
+    await new Promise<void>((resolve, reject) => {
+      const wss = new WebSocketServer({ port: this.port, host: '0.0.0.0' });
+      this.wss = wss;
 
-      this.wss.on('listening', () => {
+      wss.on('listening', () => {
         logger.info(`WebSocket server listening on port ${this.port}`);
         resolve();
       });
 
-      this.wss.on('error', (err: Error) => {
+      wss.on('error', (err: Error) => {
         logger.error('WS Server error:', err);
         reject(err);
       });
 
-      this.wss.on('connection', (ws: WsWebSocket, req: IncomingMessage) => {
+      wss.on('connection', (ws: WsWebSocket, req: IncomingRequest) => {
         const ip = req.socket.remoteAddress || 'unknown';
         logger.info(`Incoming WS connection from ${ip}`);
         this.onConnectionCb?.(ws as unknown as SocketLike, ip, req.socket as unknown as RawSocket);

@@ -8,7 +8,7 @@ import type { VersionStore } from "../history/version-store";
 
 export class SyncLogService {
   private entries: SyncLogEntry[] = [];
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveTimer: number | null = null;
   private onChangeCb: (() => void) | null = null;
   private sequence = 0;
   private lastLocalSendTime = new Map<string, number>();
@@ -188,7 +188,7 @@ export class SyncLogService {
 
   async flush(): Promise<void> {
     if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
     await this.saveToDisk();
@@ -207,7 +207,7 @@ export class SyncLogService {
    */
   private _scheduleSave(): void {
     if (this.saveTimer) return;
-    this.saveTimer = setTimeout(async () => {
+    this.saveTimer = window.setTimeout(async () => {
       this.saveTimer = null;
       await this.saveToDisk();
     }, Math.min(10000, Math.max(2000, this.lastWriteMs * 10)));

@@ -39,7 +39,7 @@ export class TombstoneStore {
   private revivals = new Map<string, Revival>();
   private loaded = false;
   private saveChain: Promise<void> = Promise.resolve();
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveTimer: number | null = null;
   private entriesDirty = false;
   private revivalsDirty = false;
   private dirReady = false;
@@ -209,7 +209,7 @@ export class TombstoneStore {
 
   private _scheduleSave(): void {
     if (!this.adapter || this.saveTimer || (!this.entriesDirty && !this.revivalsDirty)) return;
-    this.saveTimer = setTimeout(() => {
+    this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       void this._write();
     }, Math.min(MAX_SAVE_DELAY_MS, Math.max(SAVE_DELAY_MS, this.lastWriteMs * 10)));
@@ -245,7 +245,7 @@ export class TombstoneStore {
   /** Write pending changes now. */
   async flush(): Promise<void> {
     if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
     if (!this.adapter) return;

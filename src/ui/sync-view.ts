@@ -33,7 +33,7 @@ const RENDER_DELAY_MS = 250;
 
 export class SyncView extends ItemView {
   private logs: string[] = [];
-  private renderTimer: ReturnType<typeof setTimeout> | null = null;
+  private renderTimer: number | null = null;
 
   /**
    * The status is read when the view renders rather than kept from events:
@@ -76,7 +76,7 @@ export class SyncView extends ItemView {
     // A bulk change logs an event per file; the view is drawn again at most
     // a few times a second, not once for each.
     if (this.renderTimer) return;
-    this.renderTimer = setTimeout(() => {
+    this.renderTimer = window.setTimeout(() => {
       this.renderTimer = null;
       this.render();
     }, RENDER_DELAY_MS);

@@ -132,8 +132,8 @@ export function tmpRoot(tag: string) { return fs.mkdtempSync(path.join(os.tmpdir
 
 export async function startNode(root: string, deviceId: string, port: number, peers: number[], extra: Partial<LANSyncSettings> = {}, options: Record<string, unknown> = {}): Promise<Node> {
   const vault = new DiskVault(root);
-  const settings: LANSyncSettings = { ...DEFAULT_SETTINGS, ignoredPaths: [...DEFAULT_SETTINGS.ignoredPaths], deviceId, deviceName: deviceId, port, manualPeers: peers.map((p) => `127.0.0.1:${p}`), syncIntervalMs: 0, syncKey: 'TEST-KEY', ...extra };
-  const coord = new SyncCoordinator(vault as any, settings, options as any);
+  const settings: LANSyncSettings = { ...DEFAULT_SETTINGS, ignoredPaths: ['.obsidian/', ...DEFAULT_SETTINGS.ignoredPaths], deviceId, deviceName: deviceId, port, manualPeers: peers.map((p) => `127.0.0.1:${p}`), syncIntervalMs: 0, syncKey: 'TEST-KEY', ...extra };
+  const coord = new SyncCoordinator(vault as any, settings, { trash: (f: any) => vault.delete(f, true), ...options } as any);
   const events: string[] = [];
   coord.onSyncEvent((m) => events.push(m));
   await coord.start();

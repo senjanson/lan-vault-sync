@@ -71,7 +71,7 @@ describe('SyncCoordinator text conflict safety', () => {
       deviceId: 'device-a',
       deviceName: 'Device A',
       manualPeers: [],
-    });
+    }, { trash: (f: any) => (vault as any).delete(f, true) });
   });
 
   it('flushes pending local text before applying a remote Yjs update', async () => {
@@ -499,7 +499,7 @@ describe('SyncCoordinator open editor writes', () => {
     const coordinator = new SyncCoordinator(
       vault as any,
       { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] },
-      { workspace: workspace as any },
+      { workspace: workspace as any, trash: (f: any) => (vault as any).delete(f, true) },
     );
     const docManager = (coordinator as any).docManager;
     await docManager.applyLocalChange('note.md', 'L1\nL2\n');
@@ -526,7 +526,7 @@ describe('SyncCoordinator events', () => {
   it('shows sync events in the user\'s language and keeps the log in English', async () => {
     const { setLanguage } = await import('../../src/i18n');
     const vault = new FakeVault();
-    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] });
+    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] }, { trash: (f: any) => (vault as any).delete(f, true) });
     const shown: string[] = [];
     coordinator.onSyncEvent((m) => shown.push(m));
     (coordinator as any).connectionManager = {
@@ -553,7 +553,7 @@ describe('SyncCoordinator events', () => {
 
 describe('SyncCoordinator held deletions', () => {
   it('tells whether a held group was still waiting', async () => {
-    const coordinator = new SyncCoordinator(new FakeVault() as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] });
+    const coordinator = new SyncCoordinator(new FakeVault() as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] }, { trash: async () => undefined });
     expect(await coordinator.resolveHeldDeletions('held-9', 'keep')).toBe(false);
   });
 });
@@ -563,7 +563,7 @@ describe('SyncCoordinator held deletions from a relaying device', () => {
     const vault = new FakeVault();
     for (let i = 0; i < 4; i++) vault.setText(`f${i}.md`, 'x');
     const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [] },
-      { deleteLimits: { incomingMin: 1, incomingShare: 0.1 } } as any);
+      { deleteLimits: { incomingMin: 1, incomingShare: 0.1 }, trash: (f: any) => (vault as any).delete(f, true) } as any);
     (coordinator as any).connectionManager = { getConnectedPeers: () => [{ deviceId: 'relay-1', deviceName: 'Mac' }] };
     for (let i = 0; i < 4; i++) {
       const record = { path: `f${i}.md`, deletedAt: 1, hash: 'h', by: 'phone-1 (Phone)' };

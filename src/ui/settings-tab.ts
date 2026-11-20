@@ -284,7 +284,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       )
       .addTextArea((text) =>
         text
-          .setPlaceholder(".obsidian/\n.trash/")
+          .setPlaceholder(`${this.app.vault.configDir}/\n.trash/`)
           .setValue(this.plugin.settings.ignoredPaths.join("\n"))
           .onChange(async (value) => {
             this.plugin.settings.ignoredPaths = value

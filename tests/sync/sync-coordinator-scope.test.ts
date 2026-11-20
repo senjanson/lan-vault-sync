@@ -138,7 +138,7 @@ function setup(
   const coordinator = new SyncCoordinator(
     vault as any,
     { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'Device A', manualPeers: [], syncFolder },
-    { eventLog: new EventLog(null), deleteLimits: { inferredMin: 1000, inferredMax: 1000 } },
+    { eventLog: new EventLog(null), deleteLimits: { inferredMin: 1000, inferredMax: 1000 }, trash: (f: any) => (vault as any).delete(f, true) },
   );
   const c = coordinator as any;
   const sendTo = vi.fn();
@@ -513,7 +513,7 @@ describe('SyncCoordinator changing the folder setting', () => {
 describe('SyncCoordinator wiring for folders', () => {
   it('exchanges file lists after a message across a folder edge was dropped', async () => {
     const vault = new FakeVault();
-    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'A', manualPeers: [] }, { eventLog: new EventLog(null) });
+    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'A', manualPeers: [] }, { eventLog: new EventLog(null), trash: (f: any) => (vault as any).delete(f, true) });
     const c = coordinator as any;
     const scheduled = vi.spyOn(c, '_scheduleTreeSync');
     c.connectionManager.onScopeSplitCb?.('peer-1', ['Work/a.md', 'Personal/a.md']);
@@ -522,7 +522,7 @@ describe('SyncCoordinator wiring for folders', () => {
 
   it('saves the panel\'s device list when sync stops', async () => {
     const vault = new FakeVault();
-    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'A', manualPeers: [] }, { eventLog: new EventLog(null) });
+    const coordinator = new SyncCoordinator(vault as any, { ...DEFAULT_SETTINGS, deviceId: 'device-a', deviceName: 'A', manualPeers: [] }, { eventLog: new EventLog(null), trash: (f: any) => (vault as any).delete(f, true) });
     const flushPeers = vi.fn().mockRejectedValue(new Error('disk full'));
     (coordinator as any).health.flushPeers = flushPeers;
     await coordinator.stop();

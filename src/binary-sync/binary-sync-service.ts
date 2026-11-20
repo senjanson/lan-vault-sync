@@ -124,7 +124,13 @@ export class BinaryFileSyncService {
     private isAllowedPath: (path: string) => boolean = isSafeSyncPath,
     private isTextPath: (path: string) => boolean = () => false,
   ) {
-    this.gate = new ApplyGate({ vault, keeper: new BackupKeeper(backupService), log: new EventLog(null) });
+    // Replaced by the coordinator's gate (setGate), which has the trash.
+    this.gate = new ApplyGate({
+      vault,
+      keeper: new BackupKeeper(backupService),
+      log: new EventLog(null),
+      trash: () => Promise.reject(new Error("No trash to delete into: setGate was not called")),
+    });
     this.incomingCleaned = this._cleanIncoming();
   }
 

@@ -71,3 +71,16 @@ export class FuzzySuggestModal<T> extends SuggestModal<T> {
     return this.getItems().filter((i) => this.getItemText(i).toLowerCase().includes(q));
   }
 }
+
+/** The desktop app, as the tests run in Node. */
+export const Platform = {
+  isDesktop: true,
+  isDesktopApp: true,
+  isMobile: false,
+  isMobileApp: false,
+  isIosApp: false,
+  isAndroidApp: false,
+  isMacOS: process.platform === 'darwin',
+  isWin: process.platform === 'win32',
+  isLinux: process.platform === 'linux',
+};

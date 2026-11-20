@@ -14,7 +14,8 @@ import { computeFileHash } from '../binary-sync/file-hash';
  * Files with the former names are still read and migrated on save.
  */
 /** Saved alongside the states: path -> [state file, digest of its doc]. */
-const DIGEST_INDEX = `${CRDT_STATE_DIR}/digests.json`;
+/** Read when used: CRDT_STATE_DIR is set as the plugin loads. */
+const digestIndex = (): string => `${CRDT_STATE_DIR}/digests.json`;
 
 /**
  * A short fingerprint of a doc's history: its state vector and delete set,
@@ -106,8 +107,8 @@ export class StatePersistence {
     if (!this.digests || !this.digestsDirty) return;
     this.digestsDirty = false;
     try {
-      await ensureParentDirectory(this.adapter, DIGEST_INDEX);
-      await writeAtomic(this.adapter, DIGEST_INDEX, JSON.stringify(Object.fromEntries(this.digests)));
+      await ensureParentDirectory(this.adapter, digestIndex());
+      await writeAtomic(this.adapter, digestIndex(), JSON.stringify(Object.fromEntries(this.digests)));
     } catch (err) {
       this.digestsDirty = true;
       logger.error('Failed to save CRDT digests:', err);
@@ -129,7 +130,7 @@ export class StatePersistence {
         try {
           const saved = await readJsonWithBackup<Record<string, [string, string]>>(
             this.adapter,
-            DIGEST_INDEX,
+            digestIndex(),
             (p, why) => this.onBackupUsed?.(p, why),
           );
           if (saved && typeof saved === 'object') {

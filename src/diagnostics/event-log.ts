@@ -86,7 +86,7 @@ function dayOf(ts: number): string {
 export class EventLog {
   private buffer: LogRecord[] = [];
   private seq = 0;
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private timer: number | null = null;
   private writing: Promise<void> = Promise.resolve();
   private dirReady = false;
   private listeners = new Set<(r: LogRecord) => void>();
@@ -132,7 +132,7 @@ export class EventLog {
     if (!this.adapter) return rec;
     this.buffer.push(rec);
     if (!this.timer) {
-      this.timer = setTimeout(() => {
+      this.timer = window.setTimeout(() => {
         this.timer = null;
         void this.flush();
       }, this.flushMs);
@@ -153,7 +153,7 @@ export class EventLog {
   /** Writes everything buffered. Safe to call often. */
   flush(): Promise<void> {
     if (this.timer) {
-      clearTimeout(this.timer);
+      window.clearTimeout(this.timer);
       this.timer = null;
     }
     this.writing = this.writing.then(() => this._write());

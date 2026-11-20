@@ -141,7 +141,7 @@ export function blobPath(hash: string): string {
 
 export class VersionStore implements VersionKeeper {
   private buffer: VersionEntry[] = [];
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private timer: number | null = null;
   /** Index writes and rewrites run one after another, so prune loses no line. */
   private writing: Promise<void> = Promise.resolve();
   /** The index write waiting to start, which a flush joins; see flush. */
@@ -278,7 +278,7 @@ export class VersionStore implements VersionKeeper {
   private enqueue(entry: VersionEntry): void {
     this.buffer.push(entry);
     if (!this.timer) {
-      this.timer = setTimeout(() => {
+      this.timer = window.setTimeout(() => {
         this.timer = null;
         void this.flush();
       }, this.flushMs);
@@ -294,7 +294,7 @@ export class VersionStore implements VersionKeeper {
    */
   flush(): Promise<void> {
     if (this.timer) {
-      clearTimeout(this.timer);
+      window.clearTimeout(this.timer);
       this.timer = null;
     }
     if (this.nextWrite) return this.nextWrite;

@@ -7,7 +7,9 @@ import {
   WS_PORT_MIN,
   WS_PORT_MAX,
   FILE_INDEX_FILE,
+  setConfigDir,
 } from "./constants";
+import { copyLegacyState } from "./utils/legacy-state";
 import { setDebugEnabled, setLogSink } from "./logger";
 import { parsePeerAddress } from "./discovery/manual-peers";
 import { SyncCoordinator } from "./sync/sync-coordinator";
@@ -66,11 +68,14 @@ export default class LANSyncPlugin extends Plugin {
   private recoveryCenter: { storeChanged(): void } | null = null;
   /** Addresses the user was told cannot be reached, until they connect. */
   private unreachableNotified = new Set<string>();
-  private startTimer: ReturnType<typeof setTimeout> | null = null;
-  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private startTimer: number | null = null;
+  private restartTimer: number | null = null;
   private unloaded = false;
 
   async onload(): Promise<void> {
+    // Sync state lives in the plugin's folder of the vault's config folder.
+    setConfigDir(this.app.vault.configDir);
+    await copyLegacyState(this.app.vault.adapter);
     await this.loadSettings();
 
     // Ensure device has a unique ID
@@ -228,7 +233,7 @@ export default class LANSyncPlugin extends Plugin {
       // as newly created, which would be taken for local changes.
       this.app.workspace.onLayoutReady(() => {
         if (this.unloaded) return;
-        this.startTimer = setTimeout(() => {
+        this.startTimer = window.setTimeout(() => {
           this.startTimer = null;
           void this.startSync();
         }, 2000);
@@ -240,11 +245,11 @@ export default class LANSyncPlugin extends Plugin {
     this.unloaded = true;
     setLogSink(null);
     if (this.restartTimer) {
-      clearTimeout(this.restartTimer);
+      window.clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
     if (this.startTimer) {
-      clearTimeout(this.startTimer);
+      window.clearTimeout(this.startTimer);
       this.startTimer = null;
     }
     await this.stopSync();
@@ -252,7 +257,10 @@ export default class LANSyncPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = (await this.loadData()) as Partial<LANSyncSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+    // A new install leaves out the config folder too, whatever it is named.
+    if (!saved?.ignoredPaths) this.settings.ignoredPaths = [`${this.app.vault.configDir}/`, ...DEFAULT_SETTINGS.ignoredPaths];
     // Unused since 0.5: every conflict keeps both versions.
     delete (this.settings as unknown as Record<string, unknown>).conflictStrategy;
   }
@@ -384,7 +392,7 @@ export default class LANSyncPlugin extends Plugin {
 
   /** Files reported as impossible to sync, waiting to be told in one notice. */
   private unsyncable: Array<{ path: string; reason: string }> = [];
-  private unsyncableTimer: ReturnType<typeof setTimeout> | null = null;
+  private unsyncableTimer: number | null = null;
 
   /**
    * Tell the user about files that cannot be synced (each is reported once
@@ -394,7 +402,7 @@ export default class LANSyncPlugin extends Plugin {
   private notifyUnsyncable(path: string, reason: string): void {
     this.unsyncable.push({ path, reason });
     if (this.unsyncableTimer) return;
-    this.unsyncableTimer = setTimeout(() => {
+    this.unsyncableTimer = window.setTimeout(() => {
       this.unsyncableTimer = null;
       const [first, ...rest] = this.unsyncable;
       this.unsyncable = [];
@@ -426,8 +434,8 @@ export default class LANSyncPlugin extends Plugin {
    * reconnect.
    */
   restartSyncSoon(): void {
-    if (this.restartTimer) clearTimeout(this.restartTimer);
-    this.restartTimer = setTimeout(() => {
+    if (this.restartTimer) window.clearTimeout(this.restartTimer);
+    this.restartTimer = window.setTimeout(() => {
       this.restartTimer = null;
       if (this.coordinator && !this.unloaded) void this.startSync();
     }, 1500);
@@ -512,10 +520,10 @@ export default class LANSyncPlugin extends Plugin {
       if (a.kind === "bulk-held") return;
       new Notice(alertText(a), 10000);
     });
-    let healthTimer: ReturnType<typeof setTimeout> | null = null;
+    let healthTimer: number | null = null;
     this.coordinator.health.onChange(() => {
       if (healthTimer) return;
-      healthTimer = setTimeout(() => {
+      healthTimer = window.setTimeout(() => {
         healthTimer = null;
         this.showStatus();
       }, 500);
@@ -573,7 +581,7 @@ export default class LANSyncPlugin extends Plugin {
       const status = this.getSyncStatus();
       const text = buildDiagnostics({
         pluginVersion: this.manifest.version,
-        platform: Platform.isMobile ? (Platform.isIosApp ? "ios" : "android") : ((globalThis as any).process?.platform ?? "desktop"),
+        platform: Platform.isMobile ? (Platform.isIosApp ? "ios" : "android") : Platform.isMacOS ? "darwin" : Platform.isWin ? "win32" : Platform.isLinux ? "linux" : "desktop",
         settings: this.settings,
         state: status.state,
         peers: status.devices.map((d) => ({ deviceId: d.deviceId, deviceName: d.deviceName, ip: d.ip, port: d.port })),
