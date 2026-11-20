@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import net from 'node:net';
 (globalThis as any).require = createRequire(import.meta.url);
 import { TFile, TFolder } from 'obsidian';
 import { SyncCoordinator } from '../../src/sync/sync-coordinator';
@@ -209,9 +210,60 @@ export async function until(done: () => boolean, ms = 8000): Promise<void> {
   while (!done() && Date.now() < end) await sleep(50);
 }
 
-let nextPort = 42000 + Math.floor(Math.random() * 15000);
-/** Reserve a block of three consecutive ports for one scenario. */
-export const ports = () => { nextPort += 3; return nextPort; };
+/*
+ * Ports for the test devices. Test files run at once, each in its own
+ * worker: every worker takes its ports from a range of its own (by
+ * VITEST_POOL_ID, which no two workers running at once share), so two files
+ * never listen on one port. Started at random, the ranges of two files
+ * could overlap, and a device then failed to start (EADDRINUSE) or reached
+ * a device of another test. All are below 49152, where the system takes the
+ * ports of outgoing connections from. Two test runs at once on one machine
+ * are kept apart by the id of the process that started the workers; runs
+ * whose ids fall in the same lane can still meet.
+ */
+const PORT_FIRST = 20000;
+/** Ports for one test file; the largest takes about 250. */
+const PORTS_PER_WORKER = 600;
+const WORKER_SLOTS = 16;
+const RUN_LANES = 3;
+const workerSlot = (Math.max(1, Number(process.env.VITEST_POOL_ID) || 1) - 1) % WORKER_SLOTS;
+const runLane = process.ppid % RUN_LANES;
+const firstPort = PORT_FIRST + (runLane * WORKER_SLOTS + workerSlot) * PORTS_PER_WORKER;
+
+/** Whether nothing on this machine listens on the port, on any address (the plugin's server takes all). */
+function isFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.listen(port, '0.0.0.0', () => server.close(() => resolve(true)));
+  });
+}
+
+// Other programs on the machine listen on ports of their own in this range
+// (a proxy on a dozen of them, say): those are found once, as the file
+// loads, and left out.
+const takenPorts = new Set<number>();
+for (let from = firstPort; from < firstPort + PORTS_PER_WORKER; from += 50) {
+  const batch = Array.from({ length: 50 }, (_, i) => from + i);
+  const free = await Promise.all(batch.map(isFree));
+  batch.forEach((port, i) => { if (!free[i]) takenPorts.add(port); });
+}
+
+let nextPort = firstPort;
+/** Reserve consecutive free ports for one scenario (three unless told); returns the first. */
+export const ports = (count = 3) => {
+  for (;;) {
+    const port = nextPort;
+    if (port + count > firstPort + PORTS_PER_WORKER) throw new Error(`This test file took more than ${PORTS_PER_WORKER} ports; raise PORTS_PER_WORKER`);
+    let taken = -1;
+    for (let p = port; p < port + count; p++) if (takenPorts.has(p)) taken = p;
+    if (taken < 0) {
+      nextPort = port + count;
+      return port;
+    }
+    nextPort = taken + 1;
+  }
+};
 
 export function seed(root: string, files: Record<string, string | Buffer>) {
   for (const [p, c] of Object.entries(files)) {

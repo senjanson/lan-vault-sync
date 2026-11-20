@@ -1,4 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// No UDP discovery: nodes of other test files running at once on this
+// machine (and real devices on the network) would find these and connect.
+vi.mock('../../src/discovery/udp-broadcast', () => ({
+  UdpBroadcast: class {
+    onDeviceSeen() {}
+    async start() {}
+    stop() {}
+  },
+}));
+
 import { count, Node, ports, sleep, startNode, tmpRoot, until } from './harness';
 
 let nodes: Node[] = [];
@@ -10,13 +21,9 @@ afterEach(async () => {
   servers = [];
 });
 
-/**
- * Start a node without UDP discovery, so nodes of other test files on this
- * machine do not find it; discovery is simulated through `seen`.
- */
+/** Start a node; discovery is simulated through `seen` (there is no UDP discovery, see the mock above). */
 async function node(tag: string, deviceId: string, port: number, peers: number[], extra = {}) {
   const n = await startNode(tmpRoot(tag), deviceId, port, peers, extra);
-  (n.coord as any).discovery.udp?.stop();
   nodes.push(n);
   return n;
 }
