@@ -126,6 +126,67 @@ export class DiskVault {
   async mv(a: string, b: string) { fs.mkdirSync(path.dirname(this.abs(b)), { recursive: true }); return this.rename(this.files.get(a)!, b); }
 }
 
+/**
+ * Obsidian's workspace, as far as the plugin uses it: editors for open
+ * notes, and their "editor-change" events. Pass it to startNode as
+ * `{ workspace }`, then call attach(node.vault).
+ */
+export class MockWorkspace {
+  handlers = new Set<Handler>();
+  editors: MockEditor[] = [];
+  vault!: DiskVault;
+  /** Only "editor-change" is listened to; handlers get (editor, info). */
+  on(_ev: string, h: Handler) { this.handlers.add(h); return { h }; }
+  offref(ref: any) { this.handlers.delete(ref.h); }
+  trigger(...a: any[]) { for (const h of this.handlers) h(...a); }
+  getLeavesOfType() {
+    return this.editors.filter((e) => e.alive()).map((e) => ({ view: { file: { path: e.file.path }, editor: e } }));
+  }
+  /** An editor follows its note through renames and is closed when the note is deleted. */
+  attach(vault: DiskVault) {
+    this.vault = vault;
+    vault.on('delete', (f: any) => { for (const e of this.editors) if (e.file.path === f.path) e.closed = true; });
+    vault.on('rename', (f: any, old: string) => { for (const e of this.editors) if (!e.closed && e.file.path === old) e.file = f; });
+    return this;
+  }
+  open(p: string) {
+    const e = new MockEditor(this, this.vault.files.get(p)!);
+    this.editors.push(e);
+    return e;
+  }
+}
+
+/**
+ * An open note's editor. Every change fires "editor-change" (the plugin's
+ * own transactions too, as in Obsidian), and the text is saved to the file
+ * 2 s after the first unsaved change, as Obsidian does.
+ */
+export class MockEditor {
+  value: string;
+  closed = false;
+  timer: ReturnType<typeof setTimeout> | null = null;
+  constructor(private ws: MockWorkspace, public file: TFile) { this.value = ws.vault.text(file.path) ?? ''; }
+  alive() { return !this.closed && this.ws.vault.files.has(this.file.path); }
+  getValue() { return this.value; }
+  offsetToPos(o: number) { return o; }
+  transaction({ changes }: { changes: Array<{ from: number; to?: number; text: string }> }) {
+    for (const c of [...changes].sort((a, b) => b.from - a.from)) this.value = this.value.slice(0, c.from) + c.text + this.value.slice(c.to ?? c.from);
+    this.changed();
+  }
+  /** The user types: the editor's text becomes fn(text). */
+  type(fn: (v: string) => string) { if (!this.alive()) return; this.value = fn(this.value); this.changed(); }
+  private changed() {
+    if (!this.alive()) return;
+    this.ws.trigger(this, { file: this.file });
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      const f = this.ws.vault.files.get(this.file.path);
+      if (this.alive() && f && this.ws.vault.text(this.file.path) !== this.value) void this.ws.vault.modify(f, this.value);
+    }, 2000);
+  }
+}
+
 export interface Node { vault: DiskVault; coord: SyncCoordinator; settings: LANSyncSettings; events: string[]; }
 
 export function tmpRoot(tag: string) { return fs.mkdtempSync(path.join(os.tmpdir(), `lvs-${tag}-`)); }

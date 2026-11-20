@@ -712,16 +712,33 @@ export class SyncCoordinator {
       (path, hash) => this.tombstones.get(path)?.hash === hash,
     );
     // A note's text may hold edits that are not on disk yet, e.g. merged
-    // in from a renamed copy; such a note is not the copy a peer deletes.
+    // in from a renamed copy, or typed in an editor that has not saved it;
+    // such a note is not the copy a peer deletes. Typing still waiting to
+    // be taken in (see VaultWatcher) is taken in first, so it counts.
     this.binarySync.setHoldsOtherContent(async (path, hash) => {
-      if (!this.filter.isTextFile(path) || !(await this.docManager.hasDocState(path))) return false;
+      if (!this.filter.isTextFile(path)) return false;
+      await this._flushPendingLocalTextChange(path);
+      if (!(await this.docManager.hasDocState(path))) return false;
       return (await this._hashText(await this.docManager.getContent(path))) !== hash;
     });
     this.binarySync.setCanCreate(async (path) => !(await this._refuseCaseClash(path)));
     // A peer's live deletion of a note deletes our copy only when the peer
     // had seen all of its edits, and none is waiting to go into it here.
     this.binarySync.setNoteDeletePrecondition(async (path, del, diskHash) => {
-      if (!del.sv || !(await this.docManager.hasDocState(path))) return undefined;
+      // Typed here and not taken in yet: Obsidian saves an editor's text to
+      // the file only seconds later, so neither the file nor the doc holds
+      // it. Taken in now, it is an edit the peer had not seen, and the note
+      // stays (the edit wins over the deletion; the peer gets it back).
+      const tookEdit = await this._flushPendingLocalTextChange(path);
+      if (!del.sv || !(await this.docManager.hasDocState(path))) {
+        // Without a history to compare, the file's bytes decide; but the
+        // edit just taken in is in the doc only, not in those bytes.
+        if (tookEdit && (await this.docManager.hasDocState(path))) {
+          const docHash = await this._hashText(await this.docManager.getContent(path));
+          if (docHash !== del.hash) return false;
+        }
+        return undefined;
+      }
       let covered: boolean;
       try {
         covered = await this.docManager.isCoveredBy(path, base64ToBytes(del.sv));
@@ -738,6 +755,10 @@ export class SyncCoordinator {
       return diskHash === docHash || (written !== undefined && diskHash === (await this._hashText(written)));
     });
     this.binarySync.setDeleteAdmission((deviceId, del) => this._admitDelete(deviceId, del.path, { del }));
+    // An attachment version no peer is known to have (none listed it or
+    // sent it): made or changed here. A peer's version sent with no base
+    // does not replace it (see BinaryFileSyncService._receiveFileNow).
+    this.binarySync.setOwnVersionCheck((path, hash) => !this.filter.isTextFile(path) && !this.agreed.sharedWithSomeone(path, hash));
     this.binarySync.onRemoteFileStored(async (path, hash, content, fromDeviceId, info) => {
       this.knownHashes.set(path, hash);
       this.syncedHashes.set(path, hash);
@@ -1104,6 +1125,13 @@ export class SyncCoordinator {
       case "modify": {
         if (isTextFile) {
           const fromEditor = typeof event.content === "string";
+          // An editor's change for a note that is gone (deleted here or for
+          // a peer while the change waited out its debounce): taken in, it
+          // made the note again on every peer, though not here.
+          if (fromEditor && !(this.vault.getAbstractFileByPath(path) instanceof TFile)) {
+            logger.debug(`Dropped an editor change for ${path}: the note is gone`);
+            break;
+          }
           let content = fromEditor
             ? (event.content as string)
             : await this._readTextFile(path);
@@ -1137,12 +1165,14 @@ export class SyncCoordinator {
           }
         } else {
           this._reviveIfDeleted(path);
-          // Sent as a change of the version peers are thought to have.
-          const sentHash = await this.binarySync.broadcastFileChange(path, this._syncedBase(path));
-          if (sentHash) {
-            this.knownHashes.set(path, sentHash);
-            this.syncedHashes.set(path, sentHash);
-          }
+          // Sent as a change of the version peers are thought to have. A
+          // modification that leaves the file as that version is not sent:
+          // it is our own write of a peer's version (VaultWatcher lets
+          // these events through, so a change made right after one is sent).
+          const sentHash = await this.binarySync.broadcastFileChange(path, this._syncedBase(path), undefined, type === "modify");
+          if (!sentHash) break;
+          this.knownHashes.set(path, sentHash);
+          this.syncedHashes.set(path, sentHash);
         }
         this.syncLogService?.addEntry("local-send", path, {
           hasSnapshot: false,
@@ -1196,9 +1226,13 @@ export class SyncCoordinator {
         }
         this.binarySync.broadcastFileRename(oldPath, path);
         // An attachment's change (or a text file's that is not plain UTF-8)
-        // is sent as the whole file, under its new name.
+        // is sent as the whole file, under its new name. An attachment's,
+        // as a change of the version peers have just renamed: under its new
+        // name, a peer does not know that version as one it shares, and
+        // keeps its copy of a change sent with no base.
         if (event.editedBeforeRename && !editBefore) {
-          await this.binarySync.broadcastFileChange(path);
+          const sentHash = await this.binarySync.broadcastFileChange(path, isTextFile ? undefined : this._syncedBase(path));
+          if (sentHash && !isTextFile) this.syncedHashes.set(path, sentHash);
         }
         break;
       }
@@ -1652,6 +1686,19 @@ export class SyncCoordinator {
         );
         this.connectionManager.sendTo(deviceId, msg);
         this._emitEvent("event.requesting-text", { path: file.path });
+        // Our doc already holds the peer's text (the file went with no
+        // event seen, say): the peer's answer changes nothing in it, so
+        // nothing would write the file, and the two devices stayed apart
+        // until the note was edited again. Written from the doc instead,
+        // through the usual checks (deleted or moved on here, case clash).
+        if (
+          (await this.docManager.hasDocState(file.path)) &&
+          (await this._hashText(await this.docManager.getContent(file.path))) === file.hash &&
+          !this.vault.getAbstractFileByPath(file.path)
+        ) {
+          const cause: OpContext = { peer: this._peerLabel(deviceId), rule: "remote-only" };
+          await this._writeFileFromRemote(file.path, await this.docManager.getContent(file.path), undefined, cause);
+        }
       } else {
         this.binarySync.requestFile(deviceId, file.path, null, file);
         this._emitEvent("event.requesting", { path: file.path });
@@ -1968,6 +2015,9 @@ export class SyncCoordinator {
 
     // Prefer the editor's content: it may not have been saved to disk yet.
     const fromEditor = typeof pending.content === "string";
+    // The note is gone: its editor's change has nothing to go into (see
+    // _handleLocalFileChange).
+    if (fromEditor && !(this.vault.getAbstractFileByPath(filePath) instanceof TFile)) return false;
     const content = fromEditor
       ? (pending.content as string)
       : await this._readTextFile(filePath);
@@ -2390,7 +2440,11 @@ export class SyncCoordinator {
     const adapter = (this.vault as any).adapter;
     if (!adapter) return;
     const index: Record<string, string> = {};
-    for (const [path, hash] of this.knownHashes) index[path] = hash;
+    // Only files that are here: one listed and gone at the next start is
+    // taken for a file deleted while sync was off, and deleted on peers.
+    for (const [path, hash] of this.knownHashes) {
+      if (this.vault.getAbstractFileByPath(path) instanceof TFile) index[path] = hash;
+    }
     // Folders too, to tell one removed while sync was off (see
     // _inferFolderDeletions). An older version reads them as files whose
     // hash no file has, which it never takes for deleted.
@@ -2890,6 +2944,11 @@ export class SyncCoordinator {
     this.knownHashes.delete(oldPath);
     this.lastRunFiles.delete(oldPath);
     if (hash) this.knownHashes.set(newPath, hash);
+    // The version peers have moves with the file: a change made after the
+    // rename replaces it there (sent with no base, a peer keeps its copy).
+    const synced = this.syncedHashes.get(oldPath);
+    this.syncedHashes.delete(oldPath);
+    if (synced) this.syncedHashes.set(newPath, synced);
   }
 
   /**

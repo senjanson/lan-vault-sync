@@ -23,6 +23,8 @@ export class VaultWatcher {
   private changeCb: ((event: FileChangeEvent) => void) | null = null;
   private folderCb: ((event: FolderChangeEvent) => void) | null = null;
   private remoteWritePaths = new Map<string, number>();
+  /** Paths whose remote write's own create or modify event has been seen. */
+  private remoteWriteSeen = new Set<string>();
   private debounceTimers = new Map<string, number>();
   private pendingModifyEvents = new Map<
     string,
@@ -60,10 +62,12 @@ export class VaultWatcher {
     const key = `${kind}\0${filePath}`;
     const expiresAt = Date.now() + 2000;
     this.remoteWritePaths.set(key, expiresAt);
+    if (kind === "write") this.remoteWriteSeen.delete(filePath);
     // Auto-clear after a generous window to ensure all editor/vault events fire
     window.setTimeout(() => {
       if (this.remoteWritePaths.get(key) === expiresAt) {
         this.remoteWritePaths.delete(key);
+        if (kind === "write") this.remoteWriteSeen.delete(filePath);
       }
     }, 2000);
   }
@@ -176,9 +180,15 @@ export class VaultWatcher {
 
     // Skip events caused by our own remote writes. Text modifications are
     // let through: the coordinator recognises its own writes by content, so
-    // a real edit made right after a remote write is not lost.
+    // a real edit made right after a remote write is not lost. So is an
+    // attachment's modification once the write's own event has been seen:
+    // it is the user's, and was held back until the next file list
+    // exchange. (The coordinator also checks it by content: a file that is
+    // still the version peers have is not sent.)
     const isTextModify = type === "modify" && this.filter.isTextFile(path);
-    if (!isTextModify && this._isRemoteWrite(path, type)) {
+    const afterOwnEvent = type === "modify" && this.remoteWriteSeen.has(path);
+    if (!isTextModify && !afterOwnEvent && this._isRemoteWrite(path, type)) {
+      if (type === "create" || type === "modify") this.remoteWriteSeen.add(path);
       logger.debug(`Skipping remote write event: ${path}`);
       // An edit still waiting under the old name now belongs to the new one.
       if (type === "rename" && oldPath) this._movePendingModify(oldPath, path);
@@ -186,8 +196,14 @@ export class VaultWatcher {
     }
 
     // Deleted here: a file made again under this name, even at once and
-    // with the same content, is the user's, not our remote write.
-    if (type === "delete") this.remoteWritePaths.delete(`write\0${path}`);
+    // with the same content, is the user's, not our remote write. A change
+    // still waiting out its debounce is dropped with the file: taken in
+    // after the deletion, it made the note again on every peer.
+    if (type === "delete") {
+      this.remoteWritePaths.delete(`write\0${path}`);
+      this.remoteWriteSeen.delete(path);
+      this.takePendingModify(path);
+    }
 
     // Debounce modify events
     if (type === "modify") {

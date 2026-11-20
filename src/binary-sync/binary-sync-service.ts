@@ -88,6 +88,7 @@ export class BinaryFileSyncService {
   private onRemoteFileStoredCb:
     | ((path: string, hash: string, content: Uint8Array, fromDeviceId?: string, info?: FileVersionInfo) => void | Promise<void>)
     | null = null;
+  private isOwnVersionCb: ((path: string, hash: string) => boolean) | null = null;
   private onRemoteFileWrittenCb:
     | ((path: string, kind?: "write" | "delete" | "rename", content?: Uint8Array) => void)
     | null = null;
@@ -179,6 +180,14 @@ export class BinaryFileSyncService {
     this.canCreateCb = cb;
   }
 
+  /**
+   * Tells whether this version of a file here is one no peer is known to
+   * have (made or changed on this device); see _receiveFileNow.
+   */
+  setOwnVersionCheck(cb: (path: string, hash: string) => boolean): void {
+    this.isOwnVersionCb = cb;
+  }
+
   /** Called once a peer's file is in place here, with its bytes. */
   onRemoteFileStored(
     cb: (path: string, hash: string, content: Uint8Array, fromDeviceId?: string, info?: FileVersionInfo) => void | Promise<void>,
@@ -264,12 +273,16 @@ export class BinaryFileSyncService {
    * Send a file create/update to all peers. `base` is the version peers are
    * thought to have (the one this change replaces). Returns the new hash.
    */
-  async broadcastFileChange(path: string, base?: string, madeAt?: number): Promise<string | undefined> {
+  async broadcastFileChange(path: string, base?: string, madeAt?: number, unlessBase = false): Promise<string | undefined> {
     const file = this.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return undefined;
 
     const content = new Uint8Array(await this.vault.readBinary(file));
     const hash = await computeFileHash(toExactArrayBuffer(content));
+    // `unlessBase`: the file is still the version peers have (e.g. a peer's
+    // version this device just wrote, seen by its modify event); nothing
+    // is sent, and undefined returned.
+    if (unlessBase && base === hash) return undefined;
     const info: FileVersionInfo = { hash, madeAt: madeAt ?? file.stat.mtime };
     if (base && base !== hash) info.base = base;
     const out: OutgoingFile = { content, mtime: file.stat.mtime, info };
@@ -782,6 +795,17 @@ export class BinaryFileSyncService {
       // Sent as a change of a version we no longer have: changed here too.
       if (!expected && info.base && currentHash && currentHash !== info.base) {
         this.gate.preconditionFailed("overwrite", path, ctx, info.base, actual, "the peer changed a version this device had already changed");
+        return;
+      }
+      // Sent with no version it replaces, and not asked for, while our copy
+      // is a version no peer is known to have: the sender knows no version
+      // the two share (one both devices made under the same name, or one it
+      // had sent us before we changed it), and ours was made or changed
+      // here. Replaced, it was left in the version store only; the file
+      // lists settle it, keeping the losing version as a visible conflict
+      // copy (see SyncCoordinator._settleBinaryConflict).
+      if (!expected && !info.base && currentHash && this.isOwnVersionCb?.(path, currentHash)) {
+        this.gate.preconditionFailed("overwrite", path, ctx, undefined, actual, "changed here, and the peer did not say which version it replaces");
         return;
       }
       if (!existing && this.canCreateCb && !(await this.canCreateCb(path))) return;
