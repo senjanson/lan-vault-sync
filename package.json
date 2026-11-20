@@ -1,6 +1,6 @@
 {
   "name": "obsidian-lan-vault-sync",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Obsidian plugin for real-time LAN vault synchronization using Yjs CRDT",
   "main": "main.js",
   "scripts": {
