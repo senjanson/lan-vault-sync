@@ -279,6 +279,32 @@ describe('e2e syncing one folder', { timeout: 60000 }, () => {
     expect(C.coord.health.alerts().filter((a) => a.kind === 'file-mismatch')).toEqual([]);
   });
 
+  it('warns, and makes no empty folder, when the folder has another case here', async () => {
+    // On a disk where names differ by case (Linux), "work" next to "Work" is
+    // a second folder: made empty from the peer's folder list, it hid the
+    // mismatch, and the files in Work never reached the peer.
+    const ra = tmpRoot('a'), rc = tmpRoot('c');
+    seed(ra, homeFiles);
+    seed(rc, { 'Private/local.md': 'company only\n' });
+    fs.mkdirSync(path.join(rc, 'work'));
+    const pa = ports();
+    const A = track(await startNode(ra, 'aaaa', pa, []));
+    const C = track(await startNode(rc, 'cccc', pa + 1, [pa], { syncFolder: 'work' }));
+    await until(() => C.coord.getConnectedDevices().includes('aaaa'));
+    await settle(A, C);
+
+    expect(listFolders(ra).filter((f) => f.toLowerCase() === 'work')).toEqual(['Work']);
+    const missing = A.coord.health.alerts().filter((a) => a.kind === 'scope-missing');
+    expect(missing.map((a) => a.params?.folder)).toEqual(['work']);
+    expect(listFiles(rc)).toEqual(['Private/local.md']);
+
+    // Once a file of the folder arrives, the folder is there and the alert goes.
+    await C.vault.write('work/new.md', 'from c\n');
+    await until(() => A.vault.text('work/new.md') === 'from c\n');
+    await settle(A, C);
+    expect(A.coord.health.alerts().filter((a) => a.kind === 'scope-missing')).toEqual([]);
+  });
+
   it('deletes nothing when the folder setting is cleared or set', async () => {
     const ra = tmpRoot('a'), rc = tmpRoot('c');
     seed(ra, homeFiles);
