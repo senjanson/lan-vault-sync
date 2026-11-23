@@ -21,6 +21,24 @@ const SAVE_DELAY_MS = 1000;
  */
 const MAX_SAVE_DELAY_MS = 3000;
 
+/** At most this many older versions are listed with a deletion; see Tombstone.older. */
+const MAX_OLDER_HASHES = 8;
+
+/**
+ * The older versions to list with a deletion of `hash`: strings only (a
+ * peer's record may hold anything), not the deleted version itself, each
+ * once, the latest ones when there are too many.
+ */
+export function olderHashes(older: readonly unknown[] | undefined, hash?: string): string[] {
+  if (!Array.isArray(older)) return [];
+  const out: string[] = [];
+  for (const h of older) {
+    if (typeof h !== 'string' || !h || h === hash || out.includes(h)) continue;
+    out.push(h);
+  }
+  return out.slice(-MAX_OLDER_HASHES);
+}
+
 /**
  * Remembers files deleted (or renamed away) on this device, so a peer that
  * was offline at the time is told to delete its copy instead of sending the
@@ -100,7 +118,7 @@ export class TombstoneStore {
     return out;
   }
 
-  add(path: string, hash?: string, deletedAt = this.now(), movedTo?: string, by?: string): void {
+  add(path: string, hash?: string, deletedAt = this.now(), movedTo?: string, by?: string, older?: readonly string[]): void {
     const existing = this.entries.get(path);
     if (existing && existing.deletedAt >= deletedAt) return;
     // Deleted again: it no longer undoes the earlier deletion.
@@ -112,6 +130,8 @@ export class TombstoneStore {
     const moved = movedTo ?? existing?.movedTo;
     if (moved) entry.movedTo = moved;
     if (by) entry.by = by;
+    const kept = olderHashes(older, hash);
+    if (kept.length > 0) entry.older = kept;
     this._set(entry);
     this._changed();
   }
@@ -169,6 +189,9 @@ export class TombstoneStore {
    */
   static covers(t: Tombstone, file: { hash: string; mtime: number }, agreed?: string, attachment = false): boolean {
     if (t.hash === file.hash) return true;
+    // An older copy of the attachment, deleted with it on a device that had
+    // it (see Tombstone.older): the same old version, gone there too.
+    if (attachment && Array.isArray(t.older) && t.older.includes(file.hash)) return true;
     if (t.hash && !attachment) return false;
     return agreed !== undefined && agreed === file.hash;
   }

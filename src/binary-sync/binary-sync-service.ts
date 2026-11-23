@@ -25,6 +25,7 @@ import {
 import { computeFileHash } from "./file-hash";
 import { isPlainUtf8 } from "../utils/utf8";
 import { logger } from "../logger";
+import { olderHashes } from "../sync/tombstones";
 import {
   CHUNK_SIZE,
   CHUNKED_FILE_THRESHOLD,
@@ -94,7 +95,7 @@ export class BinaryFileSyncService {
     | ((path: string, kind?: "write" | "delete" | "rename", content?: Uint8Array) => void)
     | null = null;
   private onRemoteFileDeletedCb:
-    | ((path: string, movedTo?: string, record?: Tombstone, by?: string) => Promise<void> | void)
+    | ((path: string, movedTo?: string, record?: Tombstone, by?: string, deletedHash?: string) => Promise<void> | void)
     | null = null;
   private onRemoteFileRenamedCb:
     | ((oldPath: string, newPath: string) => Promise<void> | void)
@@ -221,7 +222,7 @@ export class BinaryFileSyncService {
   }
 
   /** `by`: the device that made the deletion, as "deviceId (name)". */
-  onRemoteFileDeleted(cb: (path: string, movedTo?: string, record?: Tombstone, by?: string) => Promise<void> | void): void {
+  onRemoteFileDeleted(cb: (path: string, movedTo?: string, record?: Tombstone, by?: string, deletedHash?: string) => Promise<void> | void): void {
     this.onRemoteFileDeletedCb = cb;
   }
 
@@ -898,7 +899,8 @@ export class BinaryFileSyncService {
       if (ok) checkDoc = false;
     }
     if (ok === undefined) {
-      ok = !!del.hash && (del.hash === snap.hash || !!this.isOlderCopyCb?.(deviceId, del.path, snap.hash));
+      const older = !this.isTextPath(del.path) && Array.isArray(del.older) && del.older.includes(snap.hash);
+      ok = !!del.hash && (del.hash === snap.hash || older || !!this.isOlderCopyCb?.(deviceId, del.path, snap.hash));
     }
     if (!ok) {
       this.gate.preconditionFailed(
@@ -916,6 +918,7 @@ export class BinaryFileSyncService {
     const record: Tombstone | undefined = typeof del.deletedAt === "number"
       ? { path: del.path, deletedAt: del.deletedAt, hash: del.hash }
       : undefined;
+    if (record && Array.isArray(del.older)) record.older = del.older;
     const deleted = await this._deleteFile(del.path, { expectHash: snap.hash, checkDoc, record, ctx });
     // Passed on to the other peers, as edits are (see SyncCoordinator):
     // a device connected only through this one would otherwise get a
@@ -923,7 +926,12 @@ export class BinaryFileSyncService {
     // and keep the old one as a conflict copy. Only when this message
     // deleted the file here, so the message does not go round.
     if (deleted && !this.vault.getAbstractFileByPath(del.path)) {
-      const msg = encodeFileDelete(del);
+      // An older copy deleted here goes with the message (see
+      // Tombstone.older): a peer with the same copy deletes it too.
+      const older = !this.isTextPath(del.path) && del.hash && snap.hash !== del.hash
+        ? olderHashes([...(Array.isArray(del.older) ? del.older : []), snap.hash], del.hash)
+        : undefined;
+      const msg = encodeFileDelete(older ? { ...del, older } : del);
       for (const peerId of this.connectionManager.getConnectedPeerIds()) {
         if (peerId !== deviceId) this.connectionManager.sendTo(peerId, msg);
       }
@@ -1012,7 +1020,7 @@ export class BinaryFileSyncService {
       this.onRemoteFileWrittenCb?.(path, "delete");
       await this.gate.remove(file);
       this.gate.applied(movedTo ? "rename" : "delete", path, ctx, before, undefined, version, movedTo ? `moved to ${movedTo}` : undefined);
-      await this.onRemoteFileDeletedCb?.(path, movedTo, record, ctx.peer);
+      await this.onRemoteFileDeletedCb?.(path, movedTo, record, ctx.peer, before?.hash);
       logger.debug(`Deleted file: ${path}`);
       return true;
     } catch (err) {

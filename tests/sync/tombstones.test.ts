@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TombstoneStore } from '../../src/sync/tombstones';
+import { TombstoneStore, olderHashes } from '../../src/sync/tombstones';
 import { TOMBSTONE_FILE, TOMBSTONE_TTL_MS } from '../../src/constants';
 
 function memoryAdapter() {
@@ -53,6 +53,27 @@ describe('TombstoneStore', () => {
     // A note's record with a hash is only matched by it.
     expect(TombstoneStore.covers(t, { hash: 'v1', mtime: 1 }, 'v1')).toBe(false);
     expect(TombstoneStore.covers(t, { hash: 'v2', mtime: 1 }, undefined, true)).toBe(true);
+  });
+
+  it('takes an older copy deleted with an attachment elsewhere for that deletion, with no version in common', () => {
+    const t = { path: 'p.png', deletedAt: 10, hash: 'v2', older: ['v1'] };
+    expect(TombstoneStore.covers(t, { hash: 'v1', mtime: 1 }, undefined, true)).toBe(true);
+    // Another version is still kept.
+    expect(TombstoneStore.covers(t, { hash: 'v3', mtime: 1 }, undefined, true)).toBe(false);
+    // Only for attachments: a note's history decides.
+    expect(TombstoneStore.covers(t, { hash: 'v1', mtime: 1 }, undefined, false)).toBe(false);
+    // A peer's record holding something else is ignored.
+    expect(TombstoneStore.covers({ path: 'p.png', deletedAt: 10, hash: 'v2', older: 'v1' as unknown as string[] }, { hash: 'v1', mtime: 1 }, undefined, true)).toBe(false);
+  });
+
+  it('keeps the older copies listed with a deletion, each once and without the deleted version', () => {
+    const store = new TombstoneStore(null, () => 100);
+    store.add('p.png', 'v2', 50, undefined, undefined, ['v1', 'v1', 'v2', 7 as unknown as string, 'v0']);
+    expect(store.get('p.png')?.older).toEqual(['v1', 'v0']);
+    store.add('q.png', 'v2', 50);
+    expect(store.get('q.png')?.older).toBeUndefined();
+    expect(olderHashes(Array.from({ length: 12 }, (_, i) => `h${i}`)).length).toBe(8);
+    expect(olderHashes(undefined)).toEqual([]);
   });
 
   it('keeps where a renamed file went when its old name is removed again', () => {

@@ -258,6 +258,53 @@ describe('BinaryFileSyncService deletions', () => {
   });
 });
 
+describe('BinaryFileSyncService older copies deleted with an attachment', () => {
+  async function setup(olderCopy = false) {
+    const vault = new FakeVault();
+    vault.setBinary('p.png', [1, 1]);
+    const backupBinaryFile = vi.fn(async () => ({ backupId: 'b', contentPath: 'x' }));
+    const sendTo = vi.fn();
+    const service = new BinaryFileSyncService(
+      vault as any,
+      { broadcast: vi.fn(), sendTo, getConnectedPeerIds: () => ['a', 'c'] } as any,
+      { backupBinaryFile } as any,
+    );
+    setTrashingGate(service, vault, { backupBinaryFile });
+    service.setOlderCopyCheck(() => olderCopy);
+    const deleted = vi.fn();
+    service.onRemoteFileDeleted(deleted);
+    const protocol = await import('../../src/transport/protocol');
+    const { MessageType } = await import('../../src/types');
+    const { computeFileHash } = await import('../../src/binary-sync/file-hash');
+    const v1 = await computeFileHash(new Uint8Array([1, 1]).buffer);
+    const send = (del: object) => service.handleMessage('a', MessageType.FILE_DELETE, protocol.decodeMessage(protocol.encodeFileDelete(del as any)).payload);
+    const relayed = () => sendTo.mock.calls.map((c) => protocol.decodeMessage(c[1]).payload).map((b: Uint8Array) => JSON.parse(new TextDecoder().decode(b)));
+    return { vault, deleted, send, relayed, v1 };
+  }
+
+  it('deletes a copy the deletion lists as an older version, and keeps it listed in the record', async () => {
+    const { vault, deleted, send, v1 } = await setup();
+    await send({ path: 'p.png', deletedAt: 5, hash: 'v2', older: [v1] });
+    expect(vault.getAbstractFileByPath('p.png')).toBeNull();
+    expect(deleted).toHaveBeenCalledWith('p.png', undefined, { path: 'p.png', deletedAt: 5, hash: 'v2', older: [v1] }, expect.anything(), v1);
+  });
+
+  it('keeps a copy that is neither the deleted version nor one listed with it', async () => {
+    const { vault, send } = await setup();
+    await send({ path: 'p.png', deletedAt: 5, hash: 'v2', older: ['v0'] });
+    expect(vault.getAbstractFileByPath('p.png')).not.toBeNull();
+  });
+
+  it('passes on the older copy it deleted with the deletion', async () => {
+    const { vault, send, relayed, v1 } = await setup(true);
+    await send({ path: 'p.png', deletedAt: 5, hash: 'v2' });
+    expect(vault.getAbstractFileByPath('p.png')).toBeNull();
+    const out = relayed();
+    expect(out.length).toBe(1);
+    expect(out[0]).toMatchObject({ path: 'p.png', hash: 'v2', older: [v1] });
+  });
+});
+
 describe('BinaryFileSyncService sending a file that moves meanwhile', () => {
   it('skips a file renamed by another peer while it is read, instead of failing the file list exchange', async () => {
     const vault = new FakeVault();

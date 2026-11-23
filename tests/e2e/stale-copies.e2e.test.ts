@@ -258,3 +258,56 @@ describe('e2e records behind the deletion of old copies', { timeout: 60000 }, ()
     }
   });
 });
+
+/**
+ * Three devices that all connect to each other. Two of them got an
+ * attachment and went away before they had listed their files to each
+ * other; the third changed it and deleted it meanwhile. Each returning
+ * device deletes its old copy (it last had that version with the device
+ * that deleted it), but neither knew the other's copy was that same old
+ * version: one sent its copy to the other, which took it for a file it
+ * lacked, and the copy kept being deleted and fetched back, or came back
+ * for good.
+ */
+describe('e2e old copies of a changed and deleted attachment, two devices away', { timeout: 90000 }, () => {
+  for (const gap of [0, 1000, 3000]) {
+    it(`stays deleted when the two come back ${gap} ms apart`, async () => {
+      const ra = tmpRoot('a'), rb = tmpRoot('b'), rc = tmpRoot('c');
+      const p = ports();
+      const A = track(await startNode(ra, 'aaaa', p, [p + 1, p + 2]));
+      let B = track(await startNode(rb, 'bbbb', p + 1, [p, p + 2]));
+      let C = track(await startNode(rc, 'cccc', p + 2, [p, p + 1]));
+      await until(() => [A, B, C].every((n) => n.coord.getConnectedDevices().length === 2), 10000);
+      await sleep(1500);
+      // Added once all are connected, so B and C only get it sent, and go
+      // away before they list their files to each other.
+      await A.vault.writeBin('p.png', V1);
+      await until(() => is(B, V1) && is(C, V1), 10000);
+      await sleep(1000);
+      for (const n of [B, C]) {
+        await n.coord.stop();
+        nodes = nodes.filter((x) => x !== n);
+      }
+      await A.vault.writeBin('p.png', V2);
+      await sleep(1200);
+      await A.vault.rm('p.png');
+      await sleep(1000);
+      B = track(await startNode(rb, 'bbbb', p + 1, [p, p + 2]));
+      await sleep(gap);
+      C = track(await startNode(rc, 'cccc', p + 2, [p, p + 1]));
+      const seen: string[] = [];
+      for (let round = 0; round < 6; round++) {
+        await sleep(1500);
+        for (const n of [A, B, C]) await exchange(n);
+        seen.push([A, B, C].map((n) => (n.vault.exists('p.png') ? 'Y' : '-')).join(''));
+      }
+      expect(seen.slice(-3)).toEqual(['---', '---', '---']);
+      // Each returning device kept its old copy once, before deleting it.
+      for (const n of [B, C]) {
+        await n.coord.versionStore!.flush();
+        const kept = (await n.coord.versionStore!.list({ path: 'p.png' })).filter((e) => e.op === 'remote-file-delete');
+        expect(kept.length).toBe(1);
+      }
+    });
+  }
+});

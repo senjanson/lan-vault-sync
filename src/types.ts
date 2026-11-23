@@ -224,6 +224,14 @@ export interface Tombstone {
   /** Set when the file was renamed or moved: its new path. */
   movedTo?: string;
   /**
+   * Older versions of an attachment that went with the deletion: a device
+   * that still had a version from before the file was changed and deleted
+   * elsewhere deletes that copy too (see TombstoneStore.covers), and lists
+   * its hash here. Another device holding the same old copy then knows it
+   * is gone, instead of sending it back as a file this device lacks.
+   */
+  older?: string[];
+  /**
    * The device that made the deletion, as "deviceId (name)", when it was
    * not the device that holds this record: kept as the record is passed on,
    * so that a held deletion names who deleted the files.
@@ -305,6 +313,11 @@ export interface FileDeletePayload {
    * note. A receiver whose note holds edits beyond it keeps the note.
    */
   sv?: string;
+  /**
+   * Older versions of an attachment that went with the deletion; see
+   * Tombstone.older. A copy that is one of them is deleted too.
+   */
+  older?: string[];
 }
 
 export interface FileRenamePayload {

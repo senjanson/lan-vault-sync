@@ -786,18 +786,25 @@ export class SyncCoordinator {
       if (this.filter.isTextFile(path)) await this._storedTextAsBytes(path, hash, content, fromDeviceId);
     });
 
-    this.binarySync.onRemoteFileDeleted(async (path, movedTo, record, by) => {
+    this.binarySync.onRemoteFileDeleted(async (path, movedTo, record, by, deletedHash) => {
       // Remember the deletion too, for peers that are offline right now.
       // A peer's record of a deletion made while we were away is kept as it
       // is: when the file was deleted, and where it went if it was moved. A
       // record made now would count as a deletion later than renames made
       // meanwhile, and is taken as one by tree syncs running alongside.
+      // An attachment's copy older than the version deleted elsewhere went
+      // too: listed with the record (see Tombstone.older), so that a device
+      // with the same old copy deletes it rather than sending it back here.
+      const attachment = !this.filter.isTextFile(path);
       if (record) {
         const hash = record.hash ?? this.knownHashes.get(path);
+        const older = attachment ? [...(Array.isArray(record.older) ? record.older : []), ...(deletedHash ? [deletedHash] : [])] : undefined;
         this.tombstones.clear(path);
-        this.tombstones.add(path, hash, record.deletedAt, record.movedTo, by);
+        this.tombstones.add(path, hash, record.deletedAt, record.movedTo, by, older);
       } else {
-        this.tombstones.add(path, this.knownHashes.get(path), undefined, movedTo, by);
+        const hash = this.knownHashes.get(path);
+        const older = attachment && deletedHash && deletedHash !== hash ? [deletedHash] : undefined;
+        this.tombstones.add(path, hash, undefined, movedTo, by, older);
       }
       this.knownHashes.delete(path);
       this.remoteWrittenText.delete(path);
