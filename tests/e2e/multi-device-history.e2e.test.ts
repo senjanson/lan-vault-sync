@@ -33,8 +33,7 @@ const copies = (root: string) => notes(root).filter((f) => f.includes('(conflict
 
 /** Four ports, one per device. */
 function fourPorts() {
-  const p = ports();
-  ports();
+  const p = ports(4);
   return { pa: p, pb: p + 1, pc: p + 2, pd: p + 3 };
 }
 

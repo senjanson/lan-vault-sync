@@ -8,7 +8,7 @@ import { t, formatDate, formatTime } from "../i18n";
 export class SyncLogView extends ItemView {
   private filterType: SyncLogEntryType | "all" = "all";
   private searchQuery = "";
-  private renderTimer: ReturnType<typeof setTimeout> | null = null;
+  private renderTimer: number | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -19,7 +19,7 @@ export class SyncLogView extends ItemView {
     // again for each one made the change itself slow on a phone.
     this.syncLogService.onChange(() => {
       if (this.renderTimer) return;
-      this.renderTimer = setTimeout(() => {
+      this.renderTimer = window.setTimeout(() => {
         this.renderTimer = null;
         this.render();
       }, 250);
@@ -172,7 +172,7 @@ export class SyncLogView extends ItemView {
       setIcon(restoreBtn, "undo");
       restoreBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        this._restoreEntry(entry);
+        void this._restoreEntry(entry);
       });
 
       const copyBtn = actions.createEl("button", {
@@ -182,7 +182,7 @@ export class SyncLogView extends ItemView {
       setIcon(copyBtn, "copy");
       copyBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        this._copyEntryContent(entry);
+        void this._copyEntryContent(entry);
       });
     } else {
       const viewBtn = actions.createEl("button", {
@@ -202,7 +202,7 @@ export class SyncLogView extends ItemView {
       setIcon(copyPathBtn, "copy");
       copyPathBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        navigator.clipboard.writeText(entry.path);
+        void navigator.clipboard.writeText(entry.path);
         new Notice(t("log.pathCopied"));
       });
     }
@@ -211,7 +211,7 @@ export class SyncLogView extends ItemView {
   private _openFile(path: string): void {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (file instanceof TFile) {
-      this.app.workspace.getLeaf(false).openFile(file);
+      void this.app.workspace.getLeaf(false).openFile(file);
     } else {
       new Notice(t("log.fileMissing", { path }));
     }

@@ -63,7 +63,7 @@ export class YjsDocManager {
 
   constructor(private vault: Vault) {
     this.pool = new DocPool();
-    this.persistence = new StatePersistence(vault, (vault as any).adapter);
+    this.persistence = new StatePersistence(vault, vault.adapter);
 
     // Evict inside the path's queue, so no operation on that doc is running
     // and later ones wait for the saved state.
@@ -167,7 +167,7 @@ export class YjsDocManager {
     if (this.evictedSeeded.delete(filePath)) this.seeded.add(doc);
     this.docPaths.set(doc, filePath);
 
-    doc.on('update', (update: Uint8Array, origin: any) => {
+    doc.on('update', (update: Uint8Array, origin: unknown) => {
       this.unchanged.delete(doc);
       this.dirty.add(doc);
       // Where the note is now: a doc keeps its updates' path across renames,

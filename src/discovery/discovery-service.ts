@@ -1,4 +1,4 @@
-import { DeviceInfo, LANSyncSettings } from '../types';
+import { DeviceInfo } from '../types';
 import { DEVICE_TIMEOUT_MS } from '../constants';
 import { UdpBroadcast } from './udp-broadcast';
 import { ManualPeers, parsePeerAddress } from './manual-peers';
@@ -8,7 +8,7 @@ export class DiscoveryService {
   private devices = new Map<string, DeviceInfo>();
   private udp: UdpBroadcast | null = null;
   private manual: ManualPeers;
-  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private cleanupTimer: number | null = null;
 
   private onFoundCb: ((device: DeviceInfo) => void) | null = null;
   private onLostCb: ((device: DeviceInfo) => void) | null = null;
@@ -44,13 +44,13 @@ export class DiscoveryService {
     }
 
     // Start cleanup timer
-    this.cleanupTimer = setInterval(() => this._cleanupStale(), DEVICE_TIMEOUT_MS);
+    this.cleanupTimer = window.setInterval(() => this._cleanupStale(), DEVICE_TIMEOUT_MS);
   }
 
   stop(): void {
     this.udp?.stop();
     if (this.cleanupTimer) {
-      clearInterval(this.cleanupTimer);
+      window.clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }
   }

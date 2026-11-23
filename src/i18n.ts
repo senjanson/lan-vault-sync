@@ -1,8 +1,10 @@
 /**
  * UI text in English and Chinese. The language follows Obsidian's own
- * language setting (stored in localStorage under "language"); anything that
- * is not Chinese falls back to English.
+ * language setting (getLanguage()); anything that is not Chinese falls back
+ * to English.
  */
+
+import { getLanguage } from "obsidian";
 
 const en = {
   // Shared
@@ -361,8 +363,7 @@ let forced: Lang | null = null;
 
 function detect(): Lang {
   try {
-    const stored = globalThis.localStorage?.getItem("language") ?? "";
-    return stored.toLowerCase().startsWith("zh") ? "zh" : "en";
+    return getLanguage().toLowerCase().startsWith("zh") ? "zh" : "en";
   } catch {
     return "en";
   }
@@ -382,12 +383,12 @@ export function addStrings(lang: Lang, strings: Record<string, string>): void {
   Object.assign(tables[lang], strings);
 }
 
-export function t(key: I18nKey | string, vars?: Record<string, string | number>): string {
+export function t(key: I18nKey | (string & {}), vars?: Record<string, string | number>): string {
   return tIn(currentLanguage(), key, vars);
 }
 
 /** A string in the given language, whatever the user's: e.g. English for the log. */
-export function tIn(lang: Lang, key: I18nKey | string, vars?: Record<string, string | number>): string {
+export function tIn(lang: Lang, key: I18nKey | (string & {}), vars?: Record<string, string | number>): string {
   const text = tables[lang][key] ?? tables.en[key] ?? key;
   if (!vars) return text;
   return text.replace(/\{(\w+)\}/g, (m, name: string) =>

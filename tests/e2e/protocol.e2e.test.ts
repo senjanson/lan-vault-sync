@@ -1,4 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// No UDP discovery: nodes of other test files running at once on this
+// machine (and real devices on the network) would find these and connect.
+vi.mock('../../src/discovery/udp-broadcast', () => ({
+  UdpBroadcast: class {
+    onDeviceSeen() {}
+    async start() {}
+    stop() {}
+  },
+}));
+
 import { encodeYjsSync } from '../../src/transport/protocol';
 import { MessageType } from '../../src/types';
 import { connectRaw, count, Node, ports, seed, sleep, startNode, tmpRoot, until } from './harness';

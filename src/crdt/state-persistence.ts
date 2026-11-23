@@ -1,4 +1,4 @@
-import { Vault } from 'obsidian';
+import { DataAdapter, Vault } from 'obsidian';
 import * as Y from 'yjs';
 import { CRDT_STATE_DIR } from '../constants';
 import { logger } from '../logger';
@@ -14,7 +14,8 @@ import { computeFileHash } from '../binary-sync/file-hash';
  * Files with the former names are still read and migrated on save.
  */
 /** Saved alongside the states: path -> [state file, digest of its doc]. */
-const DIGEST_INDEX = `${CRDT_STATE_DIR}/digests.json`;
+/** Read when used: CRDT_STATE_DIR is set as the plugin loads. */
+const digestIndex = (): string => `${CRDT_STATE_DIR}/digests.json`;
 
 /**
  * A short fingerprint of a doc's history: its state vector and delete set,
@@ -90,7 +91,7 @@ export class StatePersistence {
   /** Told when the digest index was damaged and read from its backup. */
   private onBackupUsed: ((path: string, why: string) => void) | undefined;
 
-  constructor(private vault: Vault, private adapter: any) {}
+  constructor(private vault: Vault, private adapter: DataAdapter) {}
 
   setOnBackupUsed(listener: (path: string, why: string) => void): void {
     this.onBackupUsed = listener;
@@ -106,8 +107,8 @@ export class StatePersistence {
     if (!this.digests || !this.digestsDirty) return;
     this.digestsDirty = false;
     try {
-      await ensureParentDirectory(this.adapter, DIGEST_INDEX);
-      await writeAtomic(this.adapter, DIGEST_INDEX, JSON.stringify(Object.fromEntries(this.digests)));
+      await ensureParentDirectory(this.adapter, digestIndex());
+      await writeAtomic(this.adapter, digestIndex(), JSON.stringify(Object.fromEntries(this.digests)));
     } catch (err) {
       this.digestsDirty = true;
       logger.error('Failed to save CRDT digests:', err);
@@ -129,7 +130,7 @@ export class StatePersistence {
         try {
           const saved = await readJsonWithBackup<Record<string, [string, string]>>(
             this.adapter,
-            DIGEST_INDEX,
+            digestIndex(),
             (p, why) => this.onBackupUsed?.(p, why),
           );
           if (saved && typeof saved === 'object') {
@@ -177,7 +178,7 @@ export class StatePersistence {
     const known = this.stateFiles.get(filePath);
     if (known) return known;
     const bytes = new TextEncoder().encode(filePath);
-    const hash = await computeFileHash(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+    const hash = await computeFileHash(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
     const stateFile = `${CRDT_STATE_DIR}/${hash}.ystate`;
     if (this.stateFiles.size >= 5000) this.stateFiles.clear();
     this.stateFiles.set(filePath, stateFile);

@@ -40,11 +40,11 @@ export class SyncLogModal extends Modal {
     });
     contentTab.addEventListener("click", () => {
       this.activeTab = "content";
-      this.renderBody();
+      void this.renderBody();
     });
     diffTab.addEventListener("click", () => {
       this.activeTab = "diff";
-      this.renderBody();
+      void this.renderBody();
     });
 
     // Body
@@ -62,23 +62,27 @@ export class SyncLogModal extends Modal {
       text: t("log.restore"),
       cls: "mod-cta",
     });
-    restoreBtn.addEventListener("click", async () => {
-      const success = await this.syncLogService.restoreFromSnapshot(this.entry);
-      new Notice(
-        success ? t("log.restored", { path: this.entry.path }) : t("log.restoreFailed", { path: this.entry.path }),
-      );
-      if (success) this.close();
+    restoreBtn.addEventListener("click", () => {
+      void (async () => {
+        const success = await this.syncLogService.restoreFromSnapshot(this.entry);
+        new Notice(
+          success ? t("log.restored", { path: this.entry.path }) : t("log.restoreFailed", { path: this.entry.path }),
+        );
+        if (success) this.close();
+      })();
     });
 
     const copyBtn = actions.createEl("button", { text: t("log.copyContent") });
-    copyBtn.addEventListener("click", async () => {
-      const content = await this.syncLogService.readSnapshotContent(this.entry);
-      if (content !== null) {
-        await navigator.clipboard.writeText(content);
-        new Notice(t("common.copied"));
-      } else {
-        new Notice(t("log.unreadable"));
-      }
+    copyBtn.addEventListener("click", () => {
+      void (async () => {
+        const content = await this.syncLogService.readSnapshotContent(this.entry);
+        if (content !== null) {
+          await navigator.clipboard.writeText(content);
+          new Notice(t("common.copied"));
+        } else {
+          new Notice(t("log.unreadable"));
+        }
+      })();
     });
 
     const closeBtn = actions.createEl("button", { text: t("common.close") });
@@ -156,7 +160,7 @@ function computeLineDiff(oldText: string, newText: string): DiffLine[] {
 
   // Build LCS lengths table
   const dp: number[][] = Array.from({ length: n + 1 }, () =>
-    new Array(m + 1).fill(0),
+    new Array<number>(m + 1).fill(0),
   );
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {

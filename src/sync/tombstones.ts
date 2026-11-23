@@ -1,3 +1,4 @@
+import type { DataAdapter } from 'obsidian';
 import { REVIVED_FILE, TOMBSTONE_FILE, TOMBSTONE_TTL_MS } from '../constants';
 import { logger } from '../logger';
 import { ensureParentDirectory } from '../utils/path-utils';
@@ -39,7 +40,7 @@ export class TombstoneStore {
   private revivals = new Map<string, Revival>();
   private loaded = false;
   private saveChain: Promise<void> = Promise.resolve();
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveTimer: number | null = null;
   private entriesDirty = false;
   private revivalsDirty = false;
   private dirReady = false;
@@ -48,7 +49,7 @@ export class TombstoneStore {
   /** Told when a records file was damaged and read from its backup. */
   private onBackupUsed: ((path: string, why: string) => void) | undefined;
 
-  constructor(private adapter: any, private now: () => number = Date.now) {}
+  constructor(private adapter: DataAdapter, private now: () => number = Date.now) {}
 
   setOnBackupUsed(listener: (path: string, why: string) => void): void {
     this.onBackupUsed = listener;
@@ -152,15 +153,23 @@ export class TombstoneStore {
   }
 
   /**
-   * Whether a copy is the file that was deleted. A matching hash proves it.
-   * Without a hash (an old record), only the version the two devices last
-   * shared (`agreed`) is taken for it: a copy that is still that version
-   * was not changed since. Clocks are not used: a device whose clock is
-   * behind made edits that look older than the deletion, and those were
-   * deleted. When in doubt the copy is kept, and comes back.
+   * Whether a copy is the file that was deleted, or an older version of it.
+   * A matching hash proves the first. Otherwise the version the two devices
+   * last had in common (`agreed`, see AgreedVersions.confirmed) decides: a
+   * copy that is still that version was not changed since, and the deleting
+   * side had that version before the deletion (a device that has a file
+   * holds no record of its deletion), so the deletion came after it. For an
+   * attachment this holds whatever the record says was deleted: changed
+   * elsewhere and then deleted, the old copy goes too, instead of coming
+   * back. A note's record with a hash is only matched by it (the note's
+   * history decides; see BinaryFileSyncService.setNoteDeletePrecondition).
+   * Clocks are not used: a device whose clock is behind made edits that
+   * look older than the deletion, and those were deleted. When in doubt the
+   * copy is kept, and comes back.
    */
-  static covers(t: Tombstone, file: { hash: string; mtime: number }, agreed?: string): boolean {
-    if (t.hash) return t.hash === file.hash;
+  static covers(t: Tombstone, file: { hash: string; mtime: number }, agreed?: string, attachment = false): boolean {
+    if (t.hash === file.hash) return true;
+    if (t.hash && !attachment) return false;
     return agreed !== undefined && agreed === file.hash;
   }
 
@@ -209,7 +218,7 @@ export class TombstoneStore {
 
   private _scheduleSave(): void {
     if (!this.adapter || this.saveTimer || (!this.entriesDirty && !this.revivalsDirty)) return;
-    this.saveTimer = setTimeout(() => {
+    this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       void this._write();
     }, Math.min(MAX_SAVE_DELAY_MS, Math.max(SAVE_DELAY_MS, this.lastWriteMs * 10)));
@@ -245,7 +254,7 @@ export class TombstoneStore {
   /** Write pending changes now. */
   async flush(): Promise<void> {
     if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
     if (!this.adapter) return;

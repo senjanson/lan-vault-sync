@@ -88,6 +88,8 @@ export class BinaryFileSyncService {
   private onRemoteFileStoredCb:
     | ((path: string, hash: string, content: Uint8Array, fromDeviceId?: string, info?: FileVersionInfo) => void | Promise<void>)
     | null = null;
+  private isOwnVersionCb: ((path: string, hash: string) => boolean) | null = null;
+  private isOlderCopyCb: ((deviceId: string, path: string, hash: string) => boolean) | null = null;
   private onRemoteFileWrittenCb:
     | ((path: string, kind?: "write" | "delete" | "rename", content?: Uint8Array) => void)
     | null = null;
@@ -124,7 +126,13 @@ export class BinaryFileSyncService {
     private isAllowedPath: (path: string) => boolean = isSafeSyncPath,
     private isTextPath: (path: string) => boolean = () => false,
   ) {
-    this.gate = new ApplyGate({ vault, keeper: new BackupKeeper(backupService), log: new EventLog(null) });
+    // Replaced by the coordinator's gate (setGate), which has the trash.
+    this.gate = new ApplyGate({
+      vault,
+      keeper: new BackupKeeper(backupService),
+      log: new EventLog(null),
+      trash: () => Promise.reject(new Error("No trash to delete into: setGate was not called")),
+    });
     this.incomingCleaned = this._cleanIncoming();
   }
 
@@ -171,6 +179,23 @@ export class BinaryFileSyncService {
   /** Tells whether a peer's new file may be created at this path here. */
   setCanCreate(cb: (path: string) => Promise<boolean>): void {
     this.canCreateCb = cb;
+  }
+
+  /**
+   * Tells whether this version of a file here is one no peer is known to
+   * have (made or changed on this device); see _receiveFileNow.
+   */
+  setOwnVersionCheck(cb: (path: string, hash: string) => boolean): void {
+    this.isOwnVersionCb = cb;
+  }
+
+  /**
+   * Tells whether our copy (this hash) is an older version of a file the
+   * peer deleted or moved: one it had before, unchanged here since. Such a
+   * copy goes with the file; see applyIncomingDelete.
+   */
+  setOlderCopyCheck(cb: (deviceId: string, path: string, hash: string) => boolean): void {
+    this.isOlderCopyCb = cb;
   }
 
   /** Called once a peer's file is in place here, with its bytes. */
@@ -258,12 +283,16 @@ export class BinaryFileSyncService {
    * Send a file create/update to all peers. `base` is the version peers are
    * thought to have (the one this change replaces). Returns the new hash.
    */
-  async broadcastFileChange(path: string, base?: string, madeAt?: number): Promise<string | undefined> {
+  async broadcastFileChange(path: string, base?: string, madeAt?: number, unlessBase = false): Promise<string | undefined> {
     const file = this.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return undefined;
 
     const content = new Uint8Array(await this.vault.readBinary(file));
     const hash = await computeFileHash(toExactArrayBuffer(content));
+    // `unlessBase`: the file is still the version peers have (e.g. a peer's
+    // version this device just wrote, seen by its modify event); nothing
+    // is sent, and undefined returned.
+    if (unlessBase && base === hash) return undefined;
     const info: FileVersionInfo = { hash, madeAt: madeAt ?? file.stat.mtime };
     if (base && base !== hash) info.base = base;
     const out: OutgoingFile = { content, mtime: file.stat.mtime, info };
@@ -431,7 +460,16 @@ export class BinaryFileSyncService {
   ): Promise<OutgoingFile | null> {
     const file = this.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return null;
-    const content = new Uint8Array(await this.vault.readBinary(file));
+    let content: Uint8Array;
+    try {
+      content = new Uint8Array(await this.vault.readBinary(file));
+    } catch (err) {
+      // Renamed or deleted while it was read, e.g. for another peer whose
+      // messages are handled alongside: nothing to send under this name.
+      // Thrown, it ended the whole file list exchange that sent it.
+      if (this.vault.getAbstractFileByPath(path) !== file) return null;
+      throw err;
+    }
     const hash = await computeFileHash(toExactArrayBuffer(content));
     const madeAt = seenMtime === undefined || seenMtime === file.stat.mtime ? opts.madeAt : undefined;
     const info: FileVersionInfo = { hash, madeAt: madeAt ?? file.stat.mtime };
@@ -778,6 +816,17 @@ export class BinaryFileSyncService {
         this.gate.preconditionFailed("overwrite", path, ctx, info.base, actual, "the peer changed a version this device had already changed");
         return;
       }
+      // Sent with no version it replaces, and not asked for, while our copy
+      // is a version no peer is known to have: the sender knows no version
+      // the two share (one both devices made under the same name, or one it
+      // had sent us before we changed it), and ours was made or changed
+      // here. Replaced, it was left in the version store only; the file
+      // lists settle it, keeping the losing version as a visible conflict
+      // copy (see SyncCoordinator._settleBinaryConflict).
+      if (!expected && !info.base && currentHash && this.isOwnVersionCb?.(path, currentHash)) {
+        this.gate.preconditionFailed("overwrite", path, ctx, undefined, actual, "changed here, and the peer did not say which version it replaces");
+        return;
+      }
       if (!existing && this.canCreateCb && !(await this.canCreateCb(path))) return;
       if (expected) this.expected.delete(path);
       // Mark remote write BEFORE modifying vault to prevent echo-back
@@ -792,7 +841,7 @@ export class BinaryFileSyncService {
         await this.vault.modifyBinary(existing, toExactArrayBuffer(content), mtimeOption(info.madeAt ?? mtime));
         this.gate.applied("overwrite", path, ctx, actual ?? undefined, { hash, size: content.byteLength }, kept.hash ?? kept.id);
       } else {
-        await ensureVaultParentFolder(this.vault as any, path, (folder) => this.onRemoteFolderMadeCb?.(folder));
+        await ensureVaultParentFolder(this.vault, path, (folder) => this.onRemoteFolderMadeCb?.(folder));
         await this.vault.createBinary(path, toExactArrayBuffer(content), mtimeOption(info.madeAt ?? mtime));
       }
       await this.onRemoteFileStoredCb?.(path, hash, content, fromDeviceId, info);
@@ -805,9 +854,11 @@ export class BinaryFileSyncService {
 
   /**
    * Apply a peer's live deletion. Our copy goes only when it is the one the
-   * peer deleted: the same bytes, or for a note, nothing the peer had not
-   * seen (see setNoteDeletePrecondition). Otherwise it is kept, and the file
-   * lists are compared again, where the peer gets it back.
+   * peer deleted: the same bytes, an older version of an attachment that
+   * the peer had too before it changed and deleted it (see
+   * setOlderCopyCheck), or for a note, nothing the peer had not seen (see
+   * setNoteDeletePrecondition). Otherwise it is kept, and the file lists
+   * are compared again, where the peer gets it back.
    */
   async applyIncomingDelete(deviceId: string, del: FileDeletePayload, admit = true): Promise<boolean> {
     const ctx: OpContext = {
@@ -815,12 +866,21 @@ export class BinaryFileSyncService {
       rule: del.movedTo ? "live-rename" : "live-delete",
     };
     if (del.movedTo) {
+      let expectHash = del.hash;
       if (del.hash) {
         const file = this.vault.getAbstractFileByPath(del.path);
         if (!(file instanceof TFile)) return false;
-        if ((await computeFileHash(await this.vault.readBinary(file))) !== del.hash) return false;
+        const hash = await computeFileHash(await this.vault.readBinary(file));
+        if (hash !== del.hash) {
+          // An older version of the file the peer moved on goes too: the
+          // file is under its new name. Asked like any deletion (the
+          // breaker lets moves through: the file lives on).
+          if (!this.isOlderCopyCb?.(deviceId, del.path, hash)) return false;
+          if (admit && this.admitDeleteCb && !this.admitDeleteCb(deviceId, del)) return false;
+          expectHash = hash;
+        }
       }
-      return this._deleteFile(del.path, { expectHash: del.hash, checkDoc: !!del.hash, movedTo: del.movedTo, ctx });
+      return this._deleteFile(del.path, { expectHash, checkDoc: !!del.hash, movedTo: del.movedTo, ctx });
     }
     // The same deletion comes from each peer: wait for one already under
     // way, which leaves nothing for this one to do.
@@ -837,7 +897,9 @@ export class BinaryFileSyncService {
       // beyond the disk is what the peer deleted.
       if (ok) checkDoc = false;
     }
-    if (ok === undefined) ok = !!del.hash && del.hash === snap.hash;
+    if (ok === undefined) {
+      ok = !!del.hash && (del.hash === snap.hash || !!this.isOlderCopyCb?.(deviceId, del.path, snap.hash));
+    }
     if (!ok) {
       this.gate.preconditionFailed(
         "delete",
@@ -1005,7 +1067,7 @@ export class BinaryFileSyncService {
     try {
       this.onRemoteFileWrittenCb?.(oldPath, "rename");
       this.onRemoteFileWrittenCb?.(newPath, "rename");
-      await ensureVaultParentFolder(this.vault as any, newPath, (folder) => this.onRemoteFolderMadeCb?.(folder));
+      await ensureVaultParentFolder(this.vault, newPath, (folder) => this.onRemoteFolderMadeCb?.(folder));
       if (!(file instanceof TFile)) await this.vault.rename(file, newPath);
       else await this.renameInVault(file, newPath);
     } catch (err) {

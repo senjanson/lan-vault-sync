@@ -59,7 +59,7 @@ interface PeerConnection {
   ws: SocketLike;
   direction: 'inbound' | 'outbound';
   client?: WSClient;
-  pingTimer?: ReturnType<typeof setInterval>;
+  pingTimer?: number;
   /** Pings sent since the peer last sent anything. */
   missedPings: number;
   /** Largest file the peer takes, in bytes, as it said; none for no limit. */
@@ -255,7 +255,7 @@ export class ConnectionManager {
   stop(): void {
     this.stopped = true;
     for (const [, peer] of this.peers) {
-      if (peer.pingTimer) clearInterval(peer.pingTimer);
+      if (peer.pingTimer) window.clearInterval(peer.pingTimer);
       peer.ws.close();
     }
     this.peers.clear();
@@ -498,7 +498,7 @@ export class ConnectionManager {
     const peer = this.peers.get(deviceId);
     if (!peer) return false;
     const live = () => !this.stopped && this.peers.get(deviceId) === peer && peer.ws.readyState === SOCKET_OPEN;
-    const pause = () => new Promise((resolve) => setTimeout(resolve, SEND_PACE_POLL_MS));
+    const pause = () => new Promise((resolve) => window.setTimeout(resolve, SEND_PACE_POLL_MS));
     for await (const frame of frames) {
       if (!this._mayGo(peer, frame)) {
         if (!live()) return false;
@@ -763,10 +763,10 @@ export class ConnectionManager {
     let rejected = false;
     let chain: Promise<void> = Promise.resolve();
 
-    const timeout = setTimeout(() => {
+    const timeout = window.setTimeout(() => {
       if (deviceId === null) ws.close();
     }, HANDSHAKE_TIMEOUT_MS);
-    addSocketCloseListener(ws, () => clearTimeout(timeout));
+    addSocketCloseListener(ws, () => window.clearTimeout(timeout));
 
     addSocketMessageListener(ws, (raw) => {
       if (deviceId !== null) {
@@ -800,7 +800,7 @@ export class ConnectionManager {
               ws.close();
               return;
             }
-            clearTimeout(timeout);
+            window.clearTimeout(timeout);
             if (this._setupWs(ws, step.device, step.channel, direction, client)) {
               deviceId = step.device.deviceId;
               channel = step.channel;
@@ -844,7 +844,7 @@ export class ConnectionManager {
         if (client) this._retireClient(client);
         return false;
       }
-      if (existing.pingTimer) clearInterval(existing.pingTimer);
+      if (existing.pingTimer) window.clearInterval(existing.pingTimer);
       this.peers.delete(device.deviceId);
       existing.ws.close();
       if (existing.client) this._retireClient(existing.client);
@@ -873,7 +873,7 @@ export class ConnectionManager {
     };
 
     // Ping keepalive; a peer that stops answering is dropped.
-    peer.pingTimer = setInterval(() => {
+    peer.pingTimer = window.setInterval(() => {
       if (peer.missedPings >= MAX_MISSED_PINGS) {
         logger.warn(`Peer ${device.deviceId} stopped responding; closing the connection`);
         this._removePeer(device.deviceId, ws);
@@ -961,7 +961,7 @@ export class ConnectionManager {
   private _removePeer(deviceId: string, ws: SocketLike): void {
     const peer = this.peers.get(deviceId);
     if (!peer || peer.ws !== ws) return;
-    if (peer.pingTimer) clearInterval(peer.pingTimer);
+    if (peer.pingTimer) window.clearInterval(peer.pingTimer);
     this.peers.delete(deviceId);
     logger.info(`Peer disconnected: ${deviceId}`);
     this.onPeerDisconnectedCb?.(deviceId);

@@ -1,20 +1,11 @@
-type DynamicRequire = (moduleName: string) => unknown;
+import { Platform } from 'obsidian';
 
-export function getDynamicRequire(): DynamicRequire | null {
-  const globalRequire = (globalThis as { require?: DynamicRequire }).require;
-  if (typeof globalRequire === 'function') {
-    return globalRequire;
-  }
+/** The global object of Obsidian's desktop app, where Electron puts Node's require(). */
+export type NodeWindow = Window & { require?: (moduleName: string) => unknown };
 
-  try {
-    return Function('return typeof require === "function" ? require : null;')() as DynamicRequire | null;
-  } catch {
-    return null;
-  }
-}
-
+/** Whether Node.js modules can be loaded: the desktop app, not a phone or tablet. */
 export function canUseNodeRuntime(): boolean {
-  return getDynamicRequire() !== null;
+  return Platform.isDesktopApp && typeof (window as NodeWindow).require === 'function';
 }
 
 export function supportsIncomingConnections(): boolean {

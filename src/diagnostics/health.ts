@@ -225,7 +225,7 @@ export class HealthMonitor {
   private store: AtomicAdapter | null = null;
   /** Reading PEERS_FILE; a save waits for it, so that it never writes over what was there unread. */
   private loading: Promise<void> | null = null;
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveTimer: number | null = null;
   private saveDue = 0;
   private dirty = false;
   private lastSaved = "";
@@ -735,7 +735,7 @@ export class HealthMonitor {
   /** Saves PEERS_FILE now, when something in it changed. */
   async flushPeers(): Promise<void> {
     if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
     await this.savePeers();
@@ -752,9 +752,9 @@ export class HealthMonitor {
     const now = this.now();
     const due = Math.max(now + this.saveDelayMs, soon ? 0 : this.lastSavedAt + this.saveEveryMs);
     if (this.saveTimer && this.saveDue <= due) return;
-    if (this.saveTimer) clearTimeout(this.saveTimer);
+    if (this.saveTimer) window.clearTimeout(this.saveTimer);
     this.saveDue = due;
-    this.saveTimer = setTimeout(() => {
+    this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       void this.savePeers();
     }, due - now);

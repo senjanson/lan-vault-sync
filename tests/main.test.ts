@@ -60,6 +60,7 @@ function createPlugin(layoutReady: Array<() => void> | null = null): LANSyncPlug
   Object.assign(plugin as any, {
     app: {
       vault: {
+        configDir: '.obsidian',
         on(name: string, cb: (...args: any[]) => void) {
           (plugin as any).vaultEvents.push([name, cb]);
           return {};

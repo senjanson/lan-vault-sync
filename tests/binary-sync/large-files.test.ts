@@ -114,7 +114,7 @@ function setup(opts: { append?: boolean; limitBytes?: number } = {}) {
   const sent: Uint8Array[] = [];
   const backupBinaryFile = vi.fn().mockResolvedValue({ backupId: 'b1' });
   const service = new BinaryFileSyncService(vault as any, cm as any, { backupBinaryFile } as any);
-  service.setGate(new ApplyGate({ vault: vault as any, keeper: new BackupKeeper({ backupBinaryFile } as any), log }));
+  service.setGate(new ApplyGate({ vault: vault as any, keeper: new BackupKeeper({ backupBinaryFile } as any), log, trash: (f: any) => (vault as any).delete(f, true) }));
   return { vault, log, cm, sent, service, backupBinaryFile };
 }
 

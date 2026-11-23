@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import net from 'node:net';
 (globalThis as any).require = createRequire(import.meta.url);
 import { TFile, TFolder } from 'obsidian';
 import { SyncCoordinator } from '../../src/sync/sync-coordinator';
@@ -126,14 +127,75 @@ export class DiskVault {
   async mv(a: string, b: string) { fs.mkdirSync(path.dirname(this.abs(b)), { recursive: true }); return this.rename(this.files.get(a)!, b); }
 }
 
+/**
+ * Obsidian's workspace, as far as the plugin uses it: editors for open
+ * notes, and their "editor-change" events. Pass it to startNode as
+ * `{ workspace }`, then call attach(node.vault).
+ */
+export class MockWorkspace {
+  handlers = new Set<Handler>();
+  editors: MockEditor[] = [];
+  vault!: DiskVault;
+  /** Only "editor-change" is listened to; handlers get (editor, info). */
+  on(_ev: string, h: Handler) { this.handlers.add(h); return { h }; }
+  offref(ref: any) { this.handlers.delete(ref.h); }
+  trigger(...a: any[]) { for (const h of this.handlers) h(...a); }
+  getLeavesOfType() {
+    return this.editors.filter((e) => e.alive()).map((e) => ({ view: { file: { path: e.file.path }, editor: e } }));
+  }
+  /** An editor follows its note through renames and is closed when the note is deleted. */
+  attach(vault: DiskVault) {
+    this.vault = vault;
+    vault.on('delete', (f: any) => { for (const e of this.editors) if (e.file.path === f.path) e.closed = true; });
+    vault.on('rename', (f: any, old: string) => { for (const e of this.editors) if (!e.closed && e.file.path === old) e.file = f; });
+    return this;
+  }
+  open(p: string) {
+    const e = new MockEditor(this, this.vault.files.get(p)!);
+    this.editors.push(e);
+    return e;
+  }
+}
+
+/**
+ * An open note's editor. Every change fires "editor-change" (the plugin's
+ * own transactions too, as in Obsidian), and the text is saved to the file
+ * 2 s after the first unsaved change, as Obsidian does.
+ */
+export class MockEditor {
+  value: string;
+  closed = false;
+  timer: ReturnType<typeof setTimeout> | null = null;
+  constructor(private ws: MockWorkspace, public file: TFile) { this.value = ws.vault.text(file.path) ?? ''; }
+  alive() { return !this.closed && this.ws.vault.files.has(this.file.path); }
+  getValue() { return this.value; }
+  offsetToPos(o: number) { return o; }
+  transaction({ changes }: { changes: Array<{ from: number; to?: number; text: string }> }) {
+    for (const c of [...changes].sort((a, b) => b.from - a.from)) this.value = this.value.slice(0, c.from) + c.text + this.value.slice(c.to ?? c.from);
+    this.changed();
+  }
+  /** The user types: the editor's text becomes fn(text). */
+  type(fn: (v: string) => string) { if (!this.alive()) return; this.value = fn(this.value); this.changed(); }
+  private changed() {
+    if (!this.alive()) return;
+    this.ws.trigger(this, { file: this.file });
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      const f = this.ws.vault.files.get(this.file.path);
+      if (this.alive() && f && this.ws.vault.text(this.file.path) !== this.value) void this.ws.vault.modify(f, this.value);
+    }, 2000);
+  }
+}
+
 export interface Node { vault: DiskVault; coord: SyncCoordinator; settings: LANSyncSettings; events: string[]; }
 
 export function tmpRoot(tag: string) { return fs.mkdtempSync(path.join(os.tmpdir(), `lvs-${tag}-`)); }
 
 export async function startNode(root: string, deviceId: string, port: number, peers: number[], extra: Partial<LANSyncSettings> = {}, options: Record<string, unknown> = {}): Promise<Node> {
   const vault = new DiskVault(root);
-  const settings: LANSyncSettings = { ...DEFAULT_SETTINGS, ignoredPaths: [...DEFAULT_SETTINGS.ignoredPaths], deviceId, deviceName: deviceId, port, manualPeers: peers.map((p) => `127.0.0.1:${p}`), syncIntervalMs: 0, syncKey: 'TEST-KEY', ...extra };
-  const coord = new SyncCoordinator(vault as any, settings, options as any);
+  const settings: LANSyncSettings = { ...DEFAULT_SETTINGS, ignoredPaths: ['.obsidian/', ...DEFAULT_SETTINGS.ignoredPaths], deviceId, deviceName: deviceId, port, manualPeers: peers.map((p) => `127.0.0.1:${p}`), syncIntervalMs: 0, syncKey: 'TEST-KEY', ...extra };
+  const coord = new SyncCoordinator(vault as any, settings, { trash: (f: any) => vault.delete(f, true), ...options } as any);
   const events: string[] = [];
   coord.onSyncEvent((m) => events.push(m));
   await coord.start();
@@ -148,9 +210,60 @@ export async function until(done: () => boolean, ms = 8000): Promise<void> {
   while (!done() && Date.now() < end) await sleep(50);
 }
 
-let nextPort = 42000 + Math.floor(Math.random() * 15000);
-/** Reserve a block of three consecutive ports for one scenario. */
-export const ports = () => { nextPort += 3; return nextPort; };
+/*
+ * Ports for the test devices. Test files run at once, each in its own
+ * worker: every worker takes its ports from a range of its own (by
+ * VITEST_POOL_ID, which no two workers running at once share), so two files
+ * never listen on one port. Started at random, the ranges of two files
+ * could overlap, and a device then failed to start (EADDRINUSE) or reached
+ * a device of another test. All are below 49152, where the system takes the
+ * ports of outgoing connections from. Two test runs at once on one machine
+ * are kept apart by the id of the process that started the workers; runs
+ * whose ids fall in the same lane can still meet.
+ */
+const PORT_FIRST = 20000;
+/** Ports for one test file; the largest takes about 250. */
+const PORTS_PER_WORKER = 600;
+const WORKER_SLOTS = 16;
+const RUN_LANES = 3;
+const workerSlot = (Math.max(1, Number(process.env.VITEST_POOL_ID) || 1) - 1) % WORKER_SLOTS;
+const runLane = process.ppid % RUN_LANES;
+const firstPort = PORT_FIRST + (runLane * WORKER_SLOTS + workerSlot) * PORTS_PER_WORKER;
+
+/** Whether nothing on this machine listens on the port, on any address (the plugin's server takes all). */
+function isFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.listen(port, '0.0.0.0', () => server.close(() => resolve(true)));
+  });
+}
+
+// Other programs on the machine listen on ports of their own in this range
+// (a proxy on a dozen of them, say): those are found once, as the file
+// loads, and left out.
+const takenPorts = new Set<number>();
+for (let from = firstPort; from < firstPort + PORTS_PER_WORKER; from += 50) {
+  const batch = Array.from({ length: 50 }, (_, i) => from + i);
+  const free = await Promise.all(batch.map(isFree));
+  batch.forEach((port, i) => { if (!free[i]) takenPorts.add(port); });
+}
+
+let nextPort = firstPort;
+/** Reserve consecutive free ports for one scenario (three unless told); returns the first. */
+export const ports = (count = 3) => {
+  for (;;) {
+    const port = nextPort;
+    if (port + count > firstPort + PORTS_PER_WORKER) throw new Error(`This test file took more than ${PORTS_PER_WORKER} ports; raise PORTS_PER_WORKER`);
+    let taken = -1;
+    for (let p = port; p < port + count; p++) if (takenPorts.has(p)) taken = p;
+    if (taken < 0) {
+      nextPort = port + count;
+      return port;
+    }
+    nextPort = taken + 1;
+  }
+};
 
 export function seed(root: string, files: Record<string, string | Buffer>) {
   for (const [p, c] of Object.entries(files)) {

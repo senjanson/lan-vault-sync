@@ -1,4 +1,3 @@
-import { App } from "obsidian";
 import { canUseNodeRuntime } from "./utils/runtime";
 import { PHONE_MAX_RECEIVE_MB } from "./constants";
 
@@ -43,7 +42,8 @@ export const DEFAULT_SETTINGS: LANSyncSettings = {
   port: 0, // 0 = not yet assigned; will be randomised in onload()
   autoSync: true,
   syncIntervalMs: 30000,
-  ignoredPaths: [".obsidian/", ".trash/"],
+  // The config folder is added as the plugin loads; see loadSettings.
+  ignoredPaths: [".trash/"],
   syncFolder: "",
   manualPeers: [],
   syncKey: "",

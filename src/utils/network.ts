@@ -1,19 +1,28 @@
-import { getDynamicRequire } from './runtime';
+import { Platform } from 'obsidian';
+import type { NodeWindow } from './runtime';
+
+interface OsModule {
+  networkInterfaces(): Record<string, Array<{
+    family: string | number;
+    internal: boolean;
+    address: string;
+    netmask: string;
+  }> | undefined>;
+}
+
+/** Node's os module; null on mobile, where there is none. */
+function loadOs(): OsModule | null {
+  if (!Platform.isDesktopApp) return null;
+  return ((window as NodeWindow).require?.('os') as OsModule | undefined) ?? null;
+}
 
 export function getLocalIPv4Addresses(): string[] {
   try {
-    const require = getDynamicRequire();
-    if (!require) {
+    const os = loadOs();
+    if (!os) {
       return [];
     }
 
-    const os = require('os') as {
-      networkInterfaces(): Record<string, Array<{
-        family: string;
-        internal: boolean;
-        address: string;
-      }> | undefined>;
-    };
     const interfaces = os.networkInterfaces();
     const ips: string[] = [];
 
@@ -38,19 +47,11 @@ export function getLocalIPv4Addresses(): string[] {
  */
 export function getIPv4BroadcastAddresses(): string[] {
   try {
-    const require = getDynamicRequire();
-    if (!require) {
+    const os = loadOs();
+    if (!os) {
       return [];
     }
 
-    const os = require('os') as {
-      networkInterfaces(): Record<string, Array<{
-        family: string | number;
-        internal: boolean;
-        address: string;
-        netmask: string;
-      }> | undefined>;
-    };
     const addresses = new Set<string>();
     for (const list of Object.values(os.networkInterfaces())) {
       for (const iface of list ?? []) {

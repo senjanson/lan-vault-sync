@@ -51,19 +51,39 @@ export const TEXT_EXTENSIONS = new Set([
   "mdwn",
 ]);
 
-export const CRDT_STATE_DIR = ".obsidian/plugins/lan-vault-sync/crdt-state";
-export const CONFLICT_BACKUP_DIR = ".obsidian/plugins/lan-vault-sync/conflicts";
-export const TOMBSTONE_FILE = ".obsidian/plugins/lan-vault-sync/deleted-files.json";
+/*
+ * Where sync keeps its state: the plugin's folder in the vault's config
+ * folder, which the user can rename (Vault.configDir). They are set by
+ * setConfigDir when the plugin loads, before anything reads them.
+ */
+/** The plugin's folder, e.g. .obsidian/plugins/lan-vault-sync. */
+export let PLUGIN_STATE_DIR = "";
+export let CRDT_STATE_DIR = "";
+export let CONFLICT_BACKUP_DIR = "";
+export let TOMBSTONE_FILE = "";
 /** Files put back after they were deleted; see TombstoneStore.revive. */
-export const REVIVED_FILE = ".obsidian/plugins/lan-vault-sync/revived-files.json";
+export let REVIVED_FILE = "";
 /** Files and their hashes as of the last time sync ran. */
-export const FILE_INDEX_FILE = ".obsidian/plugins/lan-vault-sync/synced-files.json";
+export let FILE_INDEX_FILE = "";
 /**
  * Per peer and note, the content this device last had in common with that
  * peer (see FileMeta.agreed), and times learned for notes' versions (see
  * FileMeta.madeAt).
  */
-export const AGREED_HASHES_FILE = ".obsidian/plugins/lan-vault-sync/agreed-files.json";
+export let AGREED_HASHES_FILE = "";
+export let SYNC_LOG_FILE_PATH = "";
+
+/** Points the paths above at the vault's config folder. */
+export function setConfigDir(configDir: string): void {
+  PLUGIN_STATE_DIR = `${configDir}/plugins/${PLUGIN_ID}`;
+  CRDT_STATE_DIR = `${PLUGIN_STATE_DIR}/crdt-state`;
+  CONFLICT_BACKUP_DIR = `${PLUGIN_STATE_DIR}/conflicts`;
+  TOMBSTONE_FILE = `${PLUGIN_STATE_DIR}/deleted-files.json`;
+  REVIVED_FILE = `${PLUGIN_STATE_DIR}/revived-files.json`;
+  FILE_INDEX_FILE = `${PLUGIN_STATE_DIR}/synced-files.json`;
+  AGREED_HASHES_FILE = `${PLUGIN_STATE_DIR}/agreed-files.json`;
+  SYNC_LOG_FILE_PATH = `${PLUGIN_STATE_DIR}/sync-log.json`;
+}
 /** How long a deletion is remembered for peers that were offline. */
 export const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -106,5 +126,3 @@ export const PROTOCOL_VERSION = 3;
 
 export const SYNC_LOG_VIEW_TYPE = "lan-vault-sync-log-view";
 export const MAX_SYNC_LOG_ENTRIES = 500;
-export const SYNC_LOG_FILE_PATH =
-  ".obsidian/plugins/lan-vault-sync/sync-log.json";

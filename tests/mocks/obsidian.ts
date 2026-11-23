@@ -56,6 +56,10 @@ export class Notice {
   hide() {}
 }
 export function setIcon(_el: any, _icon: string) {}
+/** Like Obsidian's: the language it keeps in localStorage, "en" when none is set. */
+export function getLanguage(): string {
+  return (globalThis as any).localStorage?.getItem('language') || 'en';
+}
 export class SuggestModal<T> extends Modal {
   placeholder = '';
   setPlaceholder(text: string) { this.placeholder = text; }
@@ -71,3 +75,16 @@ export class FuzzySuggestModal<T> extends SuggestModal<T> {
     return this.getItems().filter((i) => this.getItemText(i).toLowerCase().includes(q));
   }
 }
+
+/** The desktop app, as the tests run in Node. */
+export const Platform = {
+  isDesktop: true,
+  isDesktopApp: true,
+  isMobile: false,
+  isMobileApp: false,
+  isIosApp: false,
+  isAndroidApp: false,
+  isMacOS: process.platform === 'darwin',
+  isWin: process.platform === 'win32',
+  isLinux: process.platform === 'linux',
+};

@@ -13,7 +13,7 @@
  *
  * The folder starts with a dot, so the sync code never sends it to peers.
  */
-import type { TAbstractFile, TFile } from "obsidian";
+import { TFile, type TAbstractFile } from "obsidian";
 import { computeFileHash } from "../binary-sync/file-hash";
 import { CONFLICT_BACKUP_DIR } from "../constants";
 import { DATA_DIR } from "../diagnostics/event-log";
@@ -141,7 +141,7 @@ export function blobPath(hash: string): string {
 
 export class VersionStore implements VersionKeeper {
   private buffer: VersionEntry[] = [];
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private timer: number | null = null;
   /** Index writes and rewrites run one after another, so prune loses no line. */
   private writing: Promise<void> = Promise.resolve();
   /** The index write waiting to start, which a flush joins; see flush. */
@@ -278,7 +278,7 @@ export class VersionStore implements VersionKeeper {
   private enqueue(entry: VersionEntry): void {
     this.buffer.push(entry);
     if (!this.timer) {
-      this.timer = setTimeout(() => {
+      this.timer = window.setTimeout(() => {
         this.timer = null;
         void this.flush();
       }, this.flushMs);
@@ -294,7 +294,7 @@ export class VersionStore implements VersionKeeper {
    */
   flush(): Promise<void> {
     if (this.timer) {
-      clearTimeout(this.timer);
+      window.clearTimeout(this.timer);
       this.timer = null;
     }
     if (this.nextWrite) return this.nextWrite;
@@ -462,8 +462,8 @@ export class VersionStore implements VersionKeeper {
       if (!data) return false;
       const existing = vault.getAbstractFileByPath(entry.path);
       if (isFolder(existing)) return false;
-      if (existing) {
-        const file = existing as TFile;
+      if (existing instanceof TFile) {
+        const file = existing;
         const current = new Uint8Array(await vault.readBinary(file));
         if ((await computeFileHash(toArrayBuffer(current))) === entry.hash) {
           // Already back (restored twice, or by hand): a deletion of it

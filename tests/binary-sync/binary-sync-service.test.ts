@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { TFile } from 'obsidian';
 import { BinaryFileSyncService } from '../../src/binary-sync/binary-sync-service';
+import { ApplyGate, BackupKeeper } from '../../src/sync/apply-gate';
+import { EventLog } from '../../src/diagnostics/event-log';
+
+/** A gate that deletes straight from the fake vault, as the coordinator's would to the trash. */
+function setTrashingGate(service: BinaryFileSyncService, vault: FakeVault, backupService: unknown): void {
+  service.setGate(new ApplyGate({ vault: vault as any, keeper: new BackupKeeper(backupService as any), log: new EventLog(null), trash: (f) => vault.delete(f as TFile) }));
+}
 
 class FakeVault {
   adapter = {
@@ -98,6 +105,7 @@ describe('BinaryFileSyncService conflict backups', () => {
       { broadcast: vi.fn(), sendTo: vi.fn() } as any,
       { backupBinaryFile } as any,
     );
+    setTrashingGate(service, vault, { backupBinaryFile });
 
     await (service as any)._deleteFile('assets/file.bin', { ctx: { rule: 'test' } });
 
@@ -227,6 +235,7 @@ describe('BinaryFileSyncService deletions', () => {
       { broadcast: vi.fn(), sendTo, getConnectedPeerIds: () => ['a', 'b', 'c'] } as any,
       { backupBinaryFile } as any,
     );
+    setTrashingGate(service, vault, { backupBinaryFile });
     const deleted = vi.fn();
     service.onRemoteFileDeleted(deleted);
     const { encodeFileDelete, decodeMessage } = await import('../../src/transport/protocol');
@@ -246,5 +255,22 @@ describe('BinaryFileSyncService deletions', () => {
     expect(deleted).toHaveBeenCalledTimes(1);
     // Passed on once, by the message that deleted it, to the peers that did not send it.
     expect(sendTo.mock.calls.map((c) => c[0]).sort()).toEqual(['b', 'c']);
+  });
+});
+
+describe('BinaryFileSyncService sending a file that moves meanwhile', () => {
+  it('skips a file renamed by another peer while it is read, instead of failing the file list exchange', async () => {
+    const vault = new FakeVault();
+    const file = vault.setBinary('a/file.bin', [1, 2, 3]);
+    // Another peer's rename lands while the file is being read.
+    vault.readBinary = async (f: TFile) => {
+      await vault.rename(f, 'a/renamed.bin');
+      throw Object.assign(new Error("ENOENT: no such file or directory, open 'a/file.bin'"), { code: 'ENOENT' });
+    };
+    const sendTo = vi.fn();
+    const service = new BinaryFileSyncService(vault as any, { broadcast: vi.fn(), sendTo } as any, {} as any);
+    await expect(service.sendFileToPeer('peer', 'a/file.bin')).resolves.toBeUndefined();
+    expect(sendTo).not.toHaveBeenCalled();
+    expect(file.path).toBe('a/renamed.bin');
   });
 });

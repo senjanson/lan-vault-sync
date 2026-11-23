@@ -181,7 +181,7 @@ export class RecoveryView extends ItemView {
       type: "search",
       placeholder: t("recovery.search"),
       value: this.query,
-    }) as HTMLInputElement;
+    });
     search.oninput = () => {
       this.query = search.value ?? "";
       this.renderList(list);
@@ -225,7 +225,7 @@ export class RecoveryView extends ItemView {
         ops: g.ops.map(opLabel).join(", "),
       }),
     });
-    if (g.batch) head.createEl("div", { text: t("recovery.batch", { batch: g.batch }), cls: "lan-sync-muted" });
+    if (g.batch) head.createDiv({ text: t("recovery.batch", { batch: g.batch }), cls: "lan-sync-muted" });
     // With a search, "Restore all" restores what the group shows: the matches.
     const all = head.createEl("button", { text: t("recovery.restoreAll"), cls: "mod-cta" });
     all.onclick = () => void this.restoreAll(g.entries, all);

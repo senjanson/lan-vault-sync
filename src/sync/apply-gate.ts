@@ -51,7 +51,7 @@ export interface ApplyGateDeps {
   keeper: VersionKeeper;
   log: EventLog;
   /** Moves a file to the trash the user chose (Obsidian's fileManager.trashFile). */
-  trash?: (file: TAbstractFile) => Promise<void>;
+  trash: (file: TAbstractFile) => Promise<void>;
   /** A precondition failed: the file lists should be compared again. */
   onPreconditionFailed?: (path: string) => void;
   /** Keeping the old version failed, and the change was not made. */
@@ -151,10 +151,9 @@ export class ApplyGate {
     return "failed";
   }
 
-  /** Removes a file, through the trash when the app gives one. */
+  /** Removes a file or folder, to the trash the user chose. */
   async remove(file: TAbstractFile): Promise<void> {
-    if (this.deps.trash) await this.deps.trash(file);
-    else await this.deps.vault.delete(file, true);
+    await this.deps.trash(file);
   }
 }
 

@@ -4,7 +4,7 @@
 
 [English](README.md) | 中文
 
-![Obsidian](https://img.shields.io/badge/Obsidian-1.7.2%2B-7C3AED?logo=obsidian&logoColor=white)
+![Obsidian](https://img.shields.io/badge/Obsidian-1.8.7%2B-7C3AED?logo=obsidian&logoColor=white)
 ![平台](https://img.shields.io/badge/平台-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-blue)
 ![许可证](https://img.shields.io/badge/许可证-MIT-green)
 

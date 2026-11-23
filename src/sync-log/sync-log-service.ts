@@ -8,7 +8,7 @@ import type { VersionStore } from "../history/version-store";
 
 export class SyncLogService {
   private entries: SyncLogEntry[] = [];
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveTimer: number | null = null;
   private onChangeCb: (() => void) | null = null;
   private sequence = 0;
   private lastLocalSendTime = new Map<string, number>();
@@ -117,7 +117,7 @@ export class SyncLogService {
           }
           await this.vault.modify(file, content);
         } else {
-          const adapter = (this.vault as any).adapter;
+          const adapter = this.vault.adapter;
           if (adapter) await ensureParentDirectory(adapter, entry.path);
           await this.vault.create(entry.path, content);
         }
@@ -137,7 +137,7 @@ export class SyncLogService {
           if (!kept) return false;
           await this.vault.modifyBinary(file, content);
         } else {
-          const adapter = (this.vault as any).adapter;
+          const adapter = this.vault.adapter;
           if (adapter) await ensureParentDirectory(adapter, entry.path);
           await this.vault.createBinary(entry.path, content);
         }
@@ -151,14 +151,14 @@ export class SyncLogService {
   }
 
   async loadFromDisk(): Promise<void> {
-    const adapter = (this.vault as any).adapter;
+    const adapter = this.vault.adapter;
     if (!adapter?.read) return;
 
     try {
       const raw = await adapter.read(SYNC_LOG_FILE_PATH);
-      const data = JSON.parse(raw);
+      const data: unknown = JSON.parse(raw);
       if (Array.isArray(data)) {
-        this.entries = data;
+        this.entries = data as SyncLogEntry[];
       }
     } catch {
       this.entries = [];
@@ -166,7 +166,7 @@ export class SyncLogService {
   }
 
   async saveToDisk(): Promise<void> {
-    const adapter = (this.vault as any).adapter;
+    const adapter = this.vault.adapter;
     if (!adapter?.write) return;
 
     try {
@@ -188,7 +188,7 @@ export class SyncLogService {
 
   async flush(): Promise<void> {
     if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
     await this.saveToDisk();
@@ -207,9 +207,9 @@ export class SyncLogService {
    */
   private _scheduleSave(): void {
     if (this.saveTimer) return;
-    this.saveTimer = setTimeout(async () => {
+    this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
-      await this.saveToDisk();
+      void this.saveToDisk();
     }, Math.min(10000, Math.max(2000, this.lastWriteMs * 10)));
   }
 }

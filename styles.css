@@ -130,7 +130,8 @@
   background: var(--interactive-accent);
   border-radius: 4px;
   transition: width 0.3s ease;
-  width: 0%;
+  /* Set from the settings tab as the sync goes on. */
+  width: var(--lan-sync-progress, 0%);
 }
 
 .lan-sync-progress-bar-inner.lan-sync-progress-complete {
@@ -160,6 +161,11 @@
   border-radius: 8px;
   margin: 8px 0;
   border: 1px solid var(--background-modifier-border);
+}
+
+.lan-sync-qr-svg {
+  display: block;
+  margin: 0 auto;
 }
 
 .lan-sync-qr-info {
