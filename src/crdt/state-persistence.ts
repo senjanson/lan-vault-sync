@@ -1,4 +1,4 @@
-import { Vault } from 'obsidian';
+import { DataAdapter, Vault } from 'obsidian';
 import * as Y from 'yjs';
 import { CRDT_STATE_DIR } from '../constants';
 import { logger } from '../logger';
@@ -91,7 +91,7 @@ export class StatePersistence {
   /** Told when the digest index was damaged and read from its backup. */
   private onBackupUsed: ((path: string, why: string) => void) | undefined;
 
-  constructor(private vault: Vault, private adapter: any) {}
+  constructor(private vault: Vault, private adapter: DataAdapter) {}
 
   setOnBackupUsed(listener: (path: string, why: string) => void): void {
     this.onBackupUsed = listener;
@@ -178,7 +178,7 @@ export class StatePersistence {
     const known = this.stateFiles.get(filePath);
     if (known) return known;
     const bytes = new TextEncoder().encode(filePath);
-    const hash = await computeFileHash(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+    const hash = await computeFileHash(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
     const stateFile = `${CRDT_STATE_DIR}/${hash}.ystate`;
     if (this.stateFiles.size >= 5000) this.stateFiles.clear();
     this.stateFiles.set(filePath, stateFile);

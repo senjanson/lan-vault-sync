@@ -1,4 +1,4 @@
-import { Vault } from "obsidian";
+import { DataAdapter, Vault } from "obsidian";
 import { CONFLICT_BACKUP_DIR } from "../constants";
 import { logger } from "../logger";
 import { ensureDirectory, ensureParentDirectory, getParentDir } from "../utils/path-utils";
@@ -27,7 +27,7 @@ export class ConflictBackupService {
     reason: string,
     details: Record<string, unknown> = {},
   ): Promise<ConflictBackupResult | null> {
-    const adapter = (this.vault as any).adapter;
+    const adapter = this.vault.adapter;
     if (!adapter?.write) {
       logger.warn(
         `Conflict backup skipped for ${filePath}: adapter.write unavailable`,
@@ -60,7 +60,7 @@ export class ConflictBackupService {
     reason: string,
     details: Record<string, unknown> = {},
   ): Promise<ConflictBackupResult | null> {
-    const adapter = (this.vault as any).adapter;
+    const adapter = this.vault.adapter;
     if (!adapter?.writeBinary || !adapter?.write) {
       logger.warn(
         `Conflict backup skipped for ${filePath}: adapter write methods unavailable`,
@@ -98,7 +98,7 @@ export class ConflictBackupService {
    * made one level at a time and the file written again.
    */
   private async _writeInNewFolders(
-    adapter: any,
+    adapter: DataAdapter,
     snapshot: ConflictBackupResult,
     write: () => Promise<void>,
   ): Promise<void> {
@@ -122,7 +122,7 @@ export class ConflictBackupService {
    * lookup is a round trip to the file system, and a bulk delete from a
    * peer backs up every file, which made such lookups most of its work.
    */
-  private async _makeFolders(adapter: any, snapshot: ConflictBackupResult): Promise<void> {
+  private async _makeFolders(adapter: DataAdapter, snapshot: ConflictBackupResult): Promise<void> {
     try {
       if (!this.rootReady) {
         await ensureDirectory(adapter, CONFLICT_BACKUP_DIR);
@@ -200,7 +200,7 @@ export class ConflictBackupService {
     snapshotId: string,
     filePath: string,
   ): Promise<string | null> {
-    const adapter = (this.vault as any).adapter;
+    const adapter = this.vault.adapter;
     if (!adapter?.read) return null;
 
     const contentPath = `${CONFLICT_BACKUP_DIR}/${snapshotId}/files/${filePath}`;
@@ -215,7 +215,7 @@ export class ConflictBackupService {
     snapshotId: string,
     filePath: string,
   ): Promise<ArrayBuffer | null> {
-    const adapter = (this.vault as any).adapter;
+    const adapter = this.vault.adapter;
     if (!adapter?.readBinary) return null;
 
     const contentPath = `${CONFLICT_BACKUP_DIR}/${snapshotId}/files/${filePath}`;

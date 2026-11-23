@@ -42,6 +42,19 @@ describe('TombstoneStore', () => {
     expect(TombstoneStore.covers({ path: 'a', deletedAt: 10 }, { hash: 'y', mtime: 5 }, 'z')).toBe(false);
   });
 
+  it('takes an attachment still at the version last shared for an older version of the deleted one', () => {
+    const t = { path: 'p.png', deletedAt: 10, hash: 'v2' };
+    // Changed to v2 elsewhere, then deleted: the copy still at v1 goes.
+    expect(TombstoneStore.covers(t, { hash: 'v1', mtime: 1 }, 'v1', true)).toBe(true);
+    // Changed here (v3): kept.
+    expect(TombstoneStore.covers(t, { hash: 'v3', mtime: 1 }, 'v1', true)).toBe(false);
+    // No version known in common: kept.
+    expect(TombstoneStore.covers(t, { hash: 'v1', mtime: 1 }, undefined, true)).toBe(false);
+    // A note's record with a hash is only matched by it.
+    expect(TombstoneStore.covers(t, { hash: 'v1', mtime: 1 }, 'v1')).toBe(false);
+    expect(TombstoneStore.covers(t, { hash: 'v2', mtime: 1 }, undefined, true)).toBe(true);
+  });
+
   it('keeps where a renamed file went when its old name is removed again', () => {
     let now = 100;
     const store = new TombstoneStore(null, () => now);

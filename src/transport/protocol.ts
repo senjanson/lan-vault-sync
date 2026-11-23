@@ -29,7 +29,7 @@ export function decodeMessage(data: Uint8Array): { type: MessageType; payload: U
   if (data.byteLength < 5) {
     throw new Error('Malformed message: incomplete header');
   }
-  const type = data[0] as MessageType;
+  const type: MessageType = data[0];
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const len = view.getUint32(1, false);
   if (data.byteLength < 5 + len) {

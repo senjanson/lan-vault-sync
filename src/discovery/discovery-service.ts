@@ -1,4 +1,4 @@
-import { DeviceInfo, LANSyncSettings } from '../types';
+import { DeviceInfo } from '../types';
 import { DEVICE_TIMEOUT_MS } from '../constants';
 import { UdpBroadcast } from './udp-broadcast';
 import { ManualPeers, parsePeerAddress } from './manual-peers';

@@ -241,7 +241,12 @@ export default class LANSyncPlugin extends Plugin {
     }
   }
 
-  async onunload(): Promise<void> {
+  onunload(): void {
+    void this.shutdown();
+  }
+
+  /** What onunload does; Obsidian does not wait for it. */
+  private async shutdown(): Promise<void> {
     this.unloaded = true;
     setLogSink(null);
     if (this.restartTimer) {
@@ -350,7 +355,7 @@ export default class LANSyncPlugin extends Plugin {
     if (running) await this.stopSync();
     this.settings.deviceId = generateDeviceId();
     await this.saveSettings();
-    const adapter = this.app.vault.adapter as any;
+    const adapter = this.app.vault.adapter;
     for (const f of [FILE_INDEX_FILE, `${FILE_INDEX_FILE}.bak`, `${FILE_INDEX_FILE}.tmp`]) {
       if (await adapter.exists(f).catch(() => false)) await adapter.remove(f).catch(() => undefined);
     }
@@ -574,7 +579,7 @@ export default class LANSyncPlugin extends Plugin {
    * that works. The sync key is masked.
    */
   async exportDiagnostics(): Promise<string | null> {
-    const adapter = this.app.vault.adapter as any;
+    const adapter = this.app.vault.adapter;
     const coordinator = this.coordinator;
     try {
       const log = await (coordinator?.eventLog ?? new EventLog(adapter)).readAll(5000);

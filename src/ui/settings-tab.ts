@@ -139,14 +139,16 @@ export class LANSyncSettingTab extends PluginSettingTab {
       .addText((text) => {
         keyInput = text;
         text.setValue(this.plugin.settings.syncKey);
-        text.inputEl.addEventListener("change", async () => {
-          const ok = await this.plugin.setSyncKey(text.getValue());
-          if (!ok) {
-            new Notice(t("set.syncKeyTooShort"));
-            text.setValue(this.plugin.settings.syncKey);
-          } else {
-            this.display();
-          }
+        text.inputEl.addEventListener("change", () => {
+          void (async () => {
+            const ok = await this.plugin.setSyncKey(text.getValue());
+            if (!ok) {
+              new Notice(t("set.syncKeyTooShort"));
+              text.setValue(this.plugin.settings.syncKey);
+            } else {
+              this.display();
+            }
+          })();
         });
       })
       .addButton((button) =>
@@ -254,11 +256,11 @@ export class LANSyncSettingTab extends PluginSettingTab {
       .addText((text) => {
         peerTextInput = text;
         text.setPlaceholder("192.168.1.100:53712");
-        text.inputEl.addEventListener("keydown", async (e: KeyboardEvent) => {
+        text.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
           if (e.key === "Enter") {
-            await this.addPeerFromInput(text.getValue(), peerContainer, () =>
-              text.setValue(""),
-            );
+            void this.addPeerFromInput(text.getValue(), peerContainer, () => {
+              text.setValue("");
+            });
           }
         });
       })
@@ -267,7 +269,9 @@ export class LANSyncSettingTab extends PluginSettingTab {
           await this.addPeerFromInput(
             peerTextInput.getValue(),
             peerContainer,
-            () => peerTextInput.setValue(""),
+            () => {
+              peerTextInput.setValue("");
+            },
           );
         }),
       );
@@ -309,7 +313,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
     const progressBarInner = progressBarOuter.createDiv({
       cls: "lan-sync-progress-bar-inner",
     });
-    progressBarInner.setCssStyles({ width: "0%" });
+    progressBarInner.setCssProps({ "--lan-sync-progress": "0%" });
 
     const progressLabel = syncContainer.createDiv({
       cls: "lan-sync-progress-label",
@@ -330,14 +334,14 @@ export class LANSyncSettingTab extends PluginSettingTab {
             isSyncing = true;
             btn.setDisabled(true);
             btn.setButtonText(t("set.syncing"));
-            progressBarInner.setCssStyles({ width: "0%" });
+            progressBarInner.setCssProps({ "--lan-sync-progress": "0%" });
             progressBarInner.removeClass("lan-sync-progress-complete");
             progressLabel.setText(t("set.starting"));
 
             try {
               await this.plugin.manualFullSync(
                 (percent: number, message: string) => {
-                  progressBarInner.setCssStyles({ width: `${percent}%` });
+                  progressBarInner.setCssProps({ "--lan-sync-progress": `${percent}%` });
                   progressLabel.setText(`${Math.round(percent)}% — ${message}`);
                   if (percent >= 100) {
                     progressBarInner.addClass("lan-sync-progress-complete");
@@ -345,9 +349,9 @@ export class LANSyncSettingTab extends PluginSettingTab {
                 },
               );
               new Notice(t("set.syncDone"));
-            } catch (err) {
+            } catch {
               progressLabel.setText(t("set.syncFailedLabel"));
-              progressBarInner.setCssStyles({ width: "100%" });
+              progressBarInner.setCssProps({ "--lan-sync-progress": "100%" });
               progressBarInner.addClass("lan-sync-progress-error");
               new Notice(t("set.syncFailed"));
             } finally {
@@ -477,7 +481,7 @@ export class LANSyncSettingTab extends PluginSettingTab {
       .setDesc(t("set.logOpenDesc"))
       .addButton((btn) =>
         btn.setButtonText(t("common.open")).onClick(() => {
-          this.plugin.activateSyncLogView();
+          void this.plugin.activateSyncLogView();
         }),
       );
 
@@ -540,9 +544,11 @@ export class LANSyncSettingTab extends PluginSettingTab {
         text: "✕",
         cls: "lan-sync-peer-remove",
       });
-      removeBtn.addEventListener("click", async () => {
-        await this.plugin.removeManualPeer(peer);
-        this._renderPeerList(container);
+      removeBtn.addEventListener("click", () => {
+        void (async () => {
+          await this.plugin.removeManualPeer(peer);
+          this._renderPeerList(container);
+        })();
       });
     }
   }

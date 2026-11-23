@@ -37,8 +37,8 @@ export async function renderQRCode(
   // review does not allow.
   const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement;
   if (parsed?.nodeName !== 'svg') return;
-  const svgEl = container.appendChild(document.importNode(parsed, true)) as unknown as SVGElement;
+  const svgEl = container.appendChild(container.doc.importNode(parsed, true)) as unknown as SVGElement;
   svgEl.setAttribute('width', '200');
   svgEl.setAttribute('height', '200');
-  svgEl.setCssStyles({ display: 'block', margin: '0 auto' });
+  svgEl.addClass('lan-sync-qr-svg');
 }

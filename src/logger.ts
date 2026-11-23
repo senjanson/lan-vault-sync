@@ -33,7 +33,7 @@ export const logger: SyncLogger = {
     if (debugEnabled) console.debug('[LAN-Vault-Sync]', ...args);
   },
   info(...args: unknown[]) {
-    console.info('[LAN-Vault-Sync]', ...args);
+    console.debug('[LAN-Vault-Sync]', ...args);
   },
   warn(...args: unknown[]) {
     console.warn('[LAN-Vault-Sync]', ...args);

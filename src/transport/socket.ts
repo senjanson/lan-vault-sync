@@ -9,8 +9,8 @@ export interface SocketLike {
   terminate?(): void;
   addEventListener?(event: string, listener: EventListenerOrEventListenerObject): void;
   removeEventListener?(event: string, listener: EventListenerOrEventListenerObject): void;
-  on?(event: string, listener: (...args: any[]) => void): void;
-  removeListener?(event: string, listener: (...args: any[]) => void): void;
+  on?(event: string, listener: (...args: unknown[]) => void): void;
+  removeListener?(event: string, listener: (...args: unknown[]) => void): void;
 }
 
 export const SOCKET_OPEN = 1;
@@ -95,10 +95,10 @@ export async function toUint8Array(data: unknown): Promise<Uint8Array> {
 function addSocketListener(
   socket: SocketLike,
   event: string,
-  listener: (...args: any[]) => void,
+  listener: (...args: unknown[]) => void,
 ): () => void {
   if (socket.addEventListener) {
-    const wrapped = ((...args: any[]) => listener(...args)) as EventListener;
+    const wrapped = ((...args: unknown[]) => listener(...args)) as EventListener;
     socket.addEventListener(event, wrapped);
     return () => socket.removeEventListener?.(event, wrapped);
   }

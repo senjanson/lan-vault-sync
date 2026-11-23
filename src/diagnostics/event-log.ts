@@ -116,7 +116,7 @@ export class EventLog {
       seq: ++this.seq,
       level: input.level ?? (input.op === "error" ? "error" : "info"),
       ...input,
-    } as LogRecord;
+    };
     for (const key of Object.keys(rec) as Array<keyof LogRecord>) {
       if (rec[key] === undefined) delete rec[key];
     }

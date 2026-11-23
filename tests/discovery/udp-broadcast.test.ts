@@ -110,7 +110,7 @@ describe('UdpBroadcast sending', () => {
     let down = true;
     const { udp } = start((address) => down && address === '255.255.255.255');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const info = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
     await udp.start();
     vi.advanceTimersByTime(DISCOVERY_INTERVAL_MS * 5);
     expect(warn).toHaveBeenCalledTimes(1);

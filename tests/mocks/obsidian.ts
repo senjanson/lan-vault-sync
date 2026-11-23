@@ -56,6 +56,10 @@ export class Notice {
   hide() {}
 }
 export function setIcon(_el: any, _icon: string) {}
+/** Like Obsidian's: the language it keeps in localStorage, "en" when none is set. */
+export function getLanguage(): string {
+  return (globalThis as any).localStorage?.getItem('language') || 'en';
+}
 export class SuggestModal<T> extends Modal {
   placeholder = '';
   setPlaceholder(text: string) { this.placeholder = text; }

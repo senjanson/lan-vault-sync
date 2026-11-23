@@ -1,4 +1,3 @@
-import { App } from "obsidian";
 import { canUseNodeRuntime } from "./utils/runtime";
 import { PHONE_MAX_RECEIVE_MB } from "./constants";
 

@@ -257,3 +257,20 @@ describe('BinaryFileSyncService deletions', () => {
     expect(sendTo.mock.calls.map((c) => c[0]).sort()).toEqual(['b', 'c']);
   });
 });
+
+describe('BinaryFileSyncService sending a file that moves meanwhile', () => {
+  it('skips a file renamed by another peer while it is read, instead of failing the file list exchange', async () => {
+    const vault = new FakeVault();
+    const file = vault.setBinary('a/file.bin', [1, 2, 3]);
+    // Another peer's rename lands while the file is being read.
+    vault.readBinary = async (f: TFile) => {
+      await vault.rename(f, 'a/renamed.bin');
+      throw Object.assign(new Error("ENOENT: no such file or directory, open 'a/file.bin'"), { code: 'ENOENT' });
+    };
+    const sendTo = vi.fn();
+    const service = new BinaryFileSyncService(vault as any, { broadcast: vi.fn(), sendTo } as any, {} as any);
+    await expect(service.sendFileToPeer('peer', 'a/file.bin')).resolves.toBeUndefined();
+    expect(sendTo).not.toHaveBeenCalled();
+    expect(file.path).toBe('a/renamed.bin');
+  });
+});

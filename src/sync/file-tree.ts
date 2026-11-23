@@ -1,4 +1,4 @@
-import { Vault, TFile } from 'obsidian';
+import { Vault } from 'obsidian';
 import { FileMeta } from '../types';
 import { FileFilter } from '../watcher/file-filter';
 import { computeFileHash } from '../binary-sync/file-hash';

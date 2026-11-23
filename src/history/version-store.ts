@@ -13,7 +13,7 @@
  *
  * The folder starts with a dot, so the sync code never sends it to peers.
  */
-import type { TAbstractFile, TFile } from "obsidian";
+import { TFile, type TAbstractFile } from "obsidian";
 import { computeFileHash } from "../binary-sync/file-hash";
 import { CONFLICT_BACKUP_DIR } from "../constants";
 import { DATA_DIR } from "../diagnostics/event-log";
@@ -462,8 +462,8 @@ export class VersionStore implements VersionKeeper {
       if (!data) return false;
       const existing = vault.getAbstractFileByPath(entry.path);
       if (isFolder(existing)) return false;
-      if (existing) {
-        const file = existing as TFile;
+      if (existing instanceof TFile) {
+        const file = existing;
         const current = new Uint8Array(await vault.readBinary(file));
         if ((await computeFileHash(toArrayBuffer(current))) === entry.hash) {
           // Already back (restored twice, or by hand): a deletion of it

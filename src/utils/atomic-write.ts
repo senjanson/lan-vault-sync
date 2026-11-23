@@ -54,7 +54,7 @@ export function writeAtomic(
   opts: AtomicWriteOptions = {},
 ): Promise<void> {
   let saves = pending.get(adapter);
-  if (!saves) pending.set(adapter, (saves = new Map()));
+  if (!saves) pending.set(adapter, (saves = new Map<string, Promise<void>>()));
   const before = saves.get(path);
   // A save queued behind another can't trust what the caller knew of the
   // file: the one before may have just made it.
@@ -63,7 +63,7 @@ export function writeAtomic(
   const settled = done.catch(() => undefined);
   saves.set(path, settled);
   void settled.then(() => {
-    if (saves!.get(path) === settled) saves!.delete(path);
+    if (saves.get(path) === settled) saves.delete(path);
   });
   return done;
 }
