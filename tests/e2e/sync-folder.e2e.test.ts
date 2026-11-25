@@ -27,6 +27,22 @@ afterEach(async () => {
   nodes = [];
 });
 
+/**
+ * Whether the disk the test vaults are on tells names apart by case (Linux
+ * does; macOS and Windows do not by default). The test vaults look folders
+ * up on disk, so where "work" finds "Work", they cannot show what Obsidian,
+ * which looks names up as they are written, does.
+ */
+function caseSensitiveDisk(): boolean {
+  const dir = tmpRoot('case');
+  try {
+    fs.mkdirSync(path.join(dir, 'Aa'));
+    return !fs.existsSync(path.join(dir, 'aA'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /** Every file under a vault root, outside the plugin's hidden folders. */
 function listFiles(root: string, dir = ''): string[] {
   const out: string[] = [];
@@ -279,7 +295,7 @@ describe('e2e syncing one folder', { timeout: 60000 }, () => {
     expect(C.coord.health.alerts().filter((a) => a.kind === 'file-mismatch')).toEqual([]);
   });
 
-  it('warns, and makes no empty folder, when the folder has another case here', async () => {
+  it.skipIf(!caseSensitiveDisk())('warns, and makes no empty folder, when the folder has another case here', async () => {
     // On a disk where names differ by case (Linux), "work" next to "Work" is
     // a second folder: made empty from the peer's folder list, it hid the
     // mismatch, and the files in Work never reached the peer.
