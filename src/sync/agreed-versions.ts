@@ -172,7 +172,7 @@ export class AgreedVersions {
   noteSent(deviceId: string, path: string, hash: string): void {
     if (!hash) return;
     let files = this.sent.get(deviceId);
-    if (!files) this.sent.set(deviceId, (files = new Map()));
+    if (!files) this.sent.set(deviceId, (files = new Map<string, string[]>()));
     const hashes = (files.get(path) ?? []).filter((h) => h !== hash);
     hashes.push(hash);
     files.set(path, hashes.slice(-MAX_SENT_PER_FILE));
@@ -392,7 +392,7 @@ export class AgreedVersions {
         const kept = hashes.filter((h): h is string => typeof h === "string" && h !== "").slice(-MAX_SENT_PER_FILE);
         if (kept.length === 0) continue;
         let files = this.sent.get(peer);
-        if (!files) this.sent.set(peer, (files = new Map()));
+        if (!files) this.sent.set(peer, (files = new Map<string, string[]>()));
         files.set(path, kept);
       }
       for (const [path, indexes] of Object.entries(saved.changed ?? {})) {
