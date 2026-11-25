@@ -35,7 +35,7 @@ import { DiscoveryService } from "../discovery/discovery-service";
 import { FileFilter } from "../watcher/file-filter";
 import { SyncStateMachine } from "./sync-state";
 import { buildFileTree, diffFileTrees, FileHashCache, FileTreeSnapshot } from "./file-tree";
-import { TombstoneStore } from "./tombstones";
+import { TombstoneStore, olderHashes } from "./tombstones";
 import { computeFileHash } from "../binary-sync/file-hash";
 import { SyncLogService } from "../sync-log/sync-log-service";
 import {
@@ -771,6 +771,11 @@ export class SyncCoordinator {
     // peer, and not changed since, is older than the peer's deletion of it
     // (see TombstoneStore.covers): changed there and then deleted, it goes.
     this.binarySync.setOlderCopyCheck((deviceId, path, hash) => !this.filter.isTextFile(path) && this.agreed.confirmed(deviceId, path) === hash);
+    // A peer may hold what was sent to it without having recorded it yet
+    // (see AgreedVersions.sent); a deletion of the file lists those versions.
+    this.binarySync.onFileSent((deviceId, path, hash) => {
+      if (!this.filter.isTextFile(path)) this.agreed.noteSent(deviceId, path, hash);
+    });
     this.binarySync.onRemoteFileStored(async (path, hash, content, fromDeviceId, info) => {
       this.knownHashes.set(path, hash);
       this.syncedHashes.set(path, hash);
@@ -795,15 +800,17 @@ export class SyncCoordinator {
       // An attachment's copy older than the version deleted elsewhere went
       // too: listed with the record (see Tombstone.older), so that a device
       // with the same old copy deletes it rather than sending it back here.
+      // So do the versions we sent to peers that they have not confirmed.
       const attachment = !this.filter.isTextFile(path);
+      const sent = attachment ? this.agreed.sentVersions(path) : [];
       if (record) {
         const hash = record.hash ?? this.knownHashes.get(path);
-        const older = attachment ? [...(Array.isArray(record.older) ? record.older : []), ...(deletedHash ? [deletedHash] : [])] : undefined;
+        const older = attachment ? [...sent, ...(Array.isArray(record.older) ? record.older : []), ...(deletedHash ? [deletedHash] : [])] : undefined;
         this.tombstones.clear(path);
         this.tombstones.add(path, hash, record.deletedAt, record.movedTo, by, older);
       } else {
         const hash = this.knownHashes.get(path);
-        const older = attachment && deletedHash && deletedHash !== hash ? [deletedHash] : undefined;
+        const older = attachment ? [...sent, ...(deletedHash && deletedHash !== hash ? [deletedHash] : [])] : undefined;
         this.tombstones.add(path, hash, undefined, movedTo, by, older);
       }
       this.knownHashes.delete(path);
@@ -1119,6 +1126,10 @@ export class SyncCoordinator {
     const record: Tombstone = hash
       ? { path, hash, deletedAt: event.timestamp }
       : { path, deletedAt: event.timestamp };
+    // Taken now: a file list exchange before the deletion is recorded
+    // forgets what was sent of a file no longer here.
+    const older = this._sentOlder(path, hash);
+    if (older) record.older = older;
     const pending = this.pendingLocalDeletes.get(path);
     if (pending) {
       pending.count++;
@@ -1130,6 +1141,17 @@ export class SyncCoordinator {
       const p = this.pendingLocalDeletes.get(path);
       if (p && --p.count <= 0) this.pendingLocalDeletes.delete(path);
     };
+  }
+
+  /**
+   * For a deletion of an attachment here: the versions sent to peers and
+   * not confirmed by them, besides the one deleted (and `also`); none for a
+   * note, whose history decides.
+   */
+  private _sentOlder(path: string, hash: string | undefined, also: readonly string[] = []): string[] | undefined {
+    if (this.filter.isTextFile(path)) return undefined;
+    const older = olderHashes([...also, ...this.agreed.sentVersions(path)], hash);
+    return older.length > 0 ? older : undefined;
   }
 
   /** Deleted here, with the deletion still waiting to be recorded. */
@@ -1206,7 +1228,11 @@ export class SyncCoordinator {
 
       case "delete": {
         const deletedHash = this.knownHashes.get(path);
-        this.tombstones.add(path, deletedHash);
+        // Versions of an attachment a peer may still hold from us, with no
+        // record of having them (see AgreedVersions.sent): such a copy is
+        // older than this deletion, and goes too (see TombstoneStore.covers).
+        const older = this._sentOlder(path, deletedHash, this.pendingLocalDeletes.get(path)?.record.older);
+        this.tombstones.add(path, deletedHash, undefined, undefined, undefined, older);
         const deletedAt = this.tombstones.get(path)?.deletedAt;
         // What the peers' copies must still be for this deletion to remove
         // them: the content, and for a note everything its history held.
@@ -1223,7 +1249,7 @@ export class SyncCoordinator {
           await this.docManager.removeDoc(path);
           this._clearConflictLoserGuard(path);
         }
-        this.binarySync.broadcastFileDelete(path, deletedAt, { hash: deletedHash, sv, source: "event" });
+        this.binarySync.broadcastFileDelete(path, deletedAt, { hash: deletedHash, sv, source: "event", ...(older ? { older } : {}) });
         this.syncLogService?.addEntry("local-send", path, {
           hasSnapshot: false,
           details: { isText: isTextFile, reason: "delete" },

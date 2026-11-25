@@ -16,6 +16,8 @@ interface SavedAgreedHashes {
   times: Record<string, [string, number]>;
   /** Per file: the peers (by index in `peers`) whose record it changed from; see AgreedVersions.confirmed. */
   changed?: Record<string, number[]>;
+  /** [peer index in `peers`, path, hashes]: attachment versions sent and not yet confirmed; see AgreedVersions.sent. */
+  sent?: Array<[number, string, string[]]>;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -33,6 +35,8 @@ const MAX_AGREED_PEERS = 32;
 const SAVE_DELAY_MS = 1000;
 /** While changes keep coming, writes take a tenth of the time at most, up to this long apart. */
 const MAX_SAVE_DELAY_MS = 3000;
+/** At most this many versions of one file sent to one peer are remembered, the latest ones. */
+const MAX_SENT_PER_FILE = 8;
 
 /** A time in a peer's file list that can be compared with ours. */
 export function isTime(value: unknown): value is number {
@@ -62,6 +66,16 @@ export class AgreedVersions {
    * made, changed here or by another peer's version (see confirmed).
    */
   private changedSince = new Map<string, Set<string>>();
+  /**
+   * Per peer and attachment: versions sent to that peer that it has not
+   * confirmed (by listing the file, or sending it back). A peer records a
+   * version it got only a moment later (see SAVE_DELAY_MS), and a phone's
+   * app killed meanwhile lost that record: it still had the copy, but
+   * neither side knew it as a version the two shared, so when the file was
+   * changed and deleted here, the old copy came back from it. These go
+   * with a deletion of the file (see Tombstone.older and sentVersions).
+   */
+  private sent = new Map<string, Map<string, string[]>>();
   private changed = false;
   private saving: Promise<void> = Promise.resolve();
   private saveTimer: number | null = null;
@@ -152,6 +166,40 @@ export class AgreedVersions {
   }
 
   /**
+   * An attachment version was sent to a peer, which may have it from now on
+   * whether or not it records that (see `sent`).
+   */
+  noteSent(deviceId: string, path: string, hash: string): void {
+    if (!hash) return;
+    let files = this.sent.get(deviceId);
+    if (!files) this.sent.set(deviceId, (files = new Map()));
+    const hashes = (files.get(path) ?? []).filter((h) => h !== hash);
+    hashes.push(hash);
+    files.set(path, hashes.slice(-MAX_SENT_PER_FILE));
+    this.changed = true;
+    this._scheduleSave();
+  }
+
+  /**
+   * The versions of an attachment sent to peers and not confirmed by them,
+   * oldest first: a peer may hold any of them without knowing it shares it.
+   */
+  sentVersions(path: string): string[] {
+    const out: string[] = [];
+    for (const files of this.sent.values()) {
+      for (const h of files.get(path) ?? []) if (!out.includes(h)) out.push(h);
+    }
+    return out;
+  }
+
+  private _forgetSent(deviceId: string, path: string): void {
+    const files = this.sent.get(deviceId);
+    if (!files?.delete(path)) return;
+    if (files.size === 0) this.sent.delete(deviceId);
+    this.changed = true;
+  }
+
+  /**
    * A peer's version of a file was received and is now our copy: we share
    * it with that peer. Called on receipt only, never when we send: what we
    * send may be refused. Our copy moved on from what other peers had.
@@ -164,6 +212,8 @@ export class AgreedVersions {
       this.changed = true;
     }
     this._clearChanged(deviceId, path);
+    // What we sent the peer before is no longer its copy: this is.
+    this._forgetSent(deviceId, path);
     for (const [other, records] of this.byPeer) {
       const theirs = records.get(path);
       if (other !== deviceId && theirs !== undefined && theirs !== hash) this._markChanged(other, path);
@@ -233,6 +283,7 @@ export class AgreedVersions {
       }
       // Both have this copy now, whatever happened to it before.
       this._clearChanged(deviceId, path);
+      this._forgetSent(deviceId, path);
       if (agreed.get(path) === local.hash) continue;
       agreed.set(path, local.hash);
       this.changed = true;
@@ -264,6 +315,14 @@ export class AgreedVersions {
       this.times.delete(path);
       this.changed = true;
     }
+    // A file gone here took the versions sent with its deletion record, if
+    // it needed them; one the peer does not list it does not have.
+    for (const [peer, files] of this.sent) {
+      for (const path of files.keys()) {
+        if (localFiles.has(path) && (peer !== deviceId || remoteFiles.has(path))) continue;
+        this._forgetSent(peer, path);
+      }
+    }
     // Only a day's precision is needed (see _forgetOldPeers); a save at
     // every exchange would not be.
     const now = Date.now();
@@ -289,6 +348,7 @@ export class AgreedVersions {
       if (i < MAX_AGREED_PEERS && now - (this.peerSeen.get(peer) ?? 0) <= AGREED_PEER_TTL_MS) return;
       for (const path of this.byPeer.get(peer)!.keys()) this._clearChanged(peer, path);
       this.byPeer.delete(peer);
+      if (this.sent.delete(peer)) this.changed = true;
       this.peerSeen.delete(peer);
       this.changed = true;
     });
@@ -324,6 +384,17 @@ export class AgreedVersions {
           this.times.set(path, { hash: time[0], at: time[1] });
         }
       }
+      for (const entry of Array.isArray(saved.sent) ? saved.sent : []) {
+        if (!Array.isArray(entry)) continue;
+        const [i, path, hashes] = entry;
+        const peer = typeof i === "number" ? saved.peers[i]?.id : undefined;
+        if (typeof peer !== "string" || !this.byPeer.has(peer) || typeof path !== "string" || !Array.isArray(hashes)) continue;
+        const kept = hashes.filter((h): h is string => typeof h === "string" && h !== "").slice(-MAX_SENT_PER_FILE);
+        if (kept.length === 0) continue;
+        let files = this.sent.get(peer);
+        if (!files) this.sent.set(peer, (files = new Map()));
+        files.set(path, kept);
+      }
       for (const [path, indexes] of Object.entries(saved.changed ?? {})) {
         if (!Array.isArray(indexes)) continue;
         for (const i of indexes) {
@@ -344,12 +415,13 @@ export class AgreedVersions {
    * `peers`, null where there is none.
    */
   private _toSave(): SavedAgreedHashes {
-    const ids = [...this.byPeer.keys()];
+    // A peer we only sent to is listed too, with no records of its own.
+    const ids = [...new Set([...this.byPeer.keys(), ...this.sent.keys()])];
     const files: SavedAgreedHashes["files"] = {};
     const paths = new Set<string>();
     for (const records of this.byPeer.values()) for (const path of records.keys()) paths.add(path);
     for (const path of paths) {
-      const hashes = ids.map((id) => this.byPeer.get(id)!.get(path) ?? null);
+      const hashes = ids.map((id) => this.byPeer.get(id)?.get(path) ?? null);
       files[path] = hashes.every((h) => h !== null && h === hashes[0]) ? hashes[0]! : hashes;
     }
     const times: SavedAgreedHashes["times"] = {};
@@ -365,6 +437,14 @@ export class AgreedVersions {
       saved.changed = {};
       for (const [path, peers] of this.changedSince) {
         saved.changed[path] = [...peers].map((id) => ids.indexOf(id)).filter((i) => i >= 0);
+      }
+    }
+    // Left out when empty too (the usual case).
+    if (this.sent.size > 0) {
+      saved.sent = [];
+      for (const [peer, files] of this.sent) {
+        const i = ids.indexOf(peer);
+        for (const [path, hashes] of files) saved.sent.push([i, path, hashes]);
       }
     }
     return saved;

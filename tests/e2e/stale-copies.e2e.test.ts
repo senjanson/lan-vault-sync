@@ -311,3 +311,58 @@ describe('e2e old copies of a changed and deleted attachment, two devices away',
     });
   }
 });
+
+/**
+ * The device that got an attachment was killed a moment after it wrote the
+ * file, before it saved its record of the version it now shared (see
+ * AgreedVersions, whose writes wait a second or more). The sender records
+ * nothing when it sends. The file was then changed and deleted on the
+ * sender; when the other device came back, neither knew its copy was the
+ * version from before the change, and the sender fetched it back.
+ */
+describe('e2e old copy kept by a device killed right after it got the file', { timeout: 60000 }, () => {
+  for (const made of ['created', 'changed'] as const) {
+    it(`stays deleted when the file was ${made} and sent just before the kill`, async () => {
+      const { AGREED_HASHES_FILE } = await import('../../src/constants');
+      const ra = tmpRoot('a'), rb = tmpRoot('b');
+      const V0 = Buffer.alloc(200, 7);
+      seed(ra, made === 'changed' ? { 'p.png': V0, 'n.md': 'x' } : { 'n.md': 'x' });
+      const pa = ports();
+      const A = track(await startNode(ra, 'aaaa', pa, []));
+      let B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+      await until(() => B.vault.exists('n.md') && (made === 'created' || B.vault.bin('p.png')?.equals(V0) === true), 10000);
+      await sleep(1500);
+      await exchange(B);
+      await sleep(1500);
+      // What B has on disk before the live send: all a kill leaves of its records.
+      const agreedFile = path.join(rb, AGREED_HASHES_FILE);
+      const before = fs.existsSync(agreedFile) ? fs.readFileSync(agreedFile) : null;
+      await A.vault.writeBin('p.png', V1);
+      await until(() => is(B, V1), 5000);
+      // Killed before its records were written.
+      await B.coord.stop();
+      nodes = nodes.filter((x) => x !== B);
+      if (before) fs.writeFileSync(agreedFile, before);
+      else fs.rmSync(agreedFile, { force: true });
+      await A.vault.writeBin('p.png', V2);
+      await sleep(300);
+      await A.vault.rm('p.png');
+      await sleep(300);
+      const asked: string[] = [];
+      const bs = (A.coord as any).binarySync;
+      const request = bs.requestFile.bind(bs);
+      bs.requestFile = (id: string, p: string, ...rest: unknown[]) => { asked.push(p); return request(id, p, ...rest); };
+      B = track(await startNode(rb, 'bbbb', pa + 1, [pa]));
+      await until(() => !B.vault.exists('p.png'), 8000);
+      for (let round = 0; round < 2; round++) {
+        await sleep(1500);
+        await exchange(B);
+        await exchange(A);
+      }
+      await sleep(1000);
+      expect(asked).toEqual([]);
+      expect(A.vault.exists('p.png')).toBe(false);
+      expect(B.vault.exists('p.png')).toBe(false);
+    });
+  }
+});

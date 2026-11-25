@@ -117,3 +117,45 @@ describe('AgreedVersions and files the peer deleted', () => {
   });
 });
 
+
+describe('AgreedVersions.sentVersions', () => {
+  it('lists the versions sent to peers until each peer confirms its copy', () => {
+    const agreed = new AgreedVersions(null as unknown as DataAdapter);
+    agreed.noteSent('mac', 'p.png', 'v1');
+    agreed.noteSent('pixel', 'p.png', 'v1');
+    agreed.noteSent('mac', 'p.png', 'v2');
+    expect(agreed.sentVersions('p.png')).toEqual(['v1', 'v2']);
+    // Mac lists our copy: the two share it; the Pixel has not said yet.
+    agreed.noteLists('mac', list(meta('p.png', 'v2')), list(meta('p.png', 'v2')), () => undefined);
+    expect(agreed.sentVersions('p.png')).toEqual(['v1']);
+    // The Pixel sends its own version back: that is its copy now.
+    agreed.noteShared('pixel', 'p.png', 'v3');
+    expect(agreed.sentVersions('p.png')).toEqual([]);
+  });
+
+  it('keeps them while the peer lists another version, and drops them when it lists none', () => {
+    const agreed = new AgreedVersions(null as unknown as DataAdapter);
+    agreed.noteSent('mac', 'p.png', 'v1');
+    agreed.noteLists('mac', list(meta('p.png', 'v2')), list(meta('p.png', 'v1')), () => undefined);
+    expect(agreed.sentVersions('p.png')).toEqual(['v1']);
+    agreed.noteLists('mac', list(meta('p.png', 'v2')), list(), () => undefined);
+    expect(agreed.sentVersions('p.png')).toEqual([]);
+  });
+
+  it('forgets them once the file is gone here', () => {
+    const agreed = new AgreedVersions(null as unknown as DataAdapter);
+    agreed.noteSent('mac', 'p.png', 'v1');
+    agreed.noteLists('pixel', list(), list(), () => undefined);
+    expect(agreed.sentVersions('p.png')).toEqual([]);
+  });
+
+  it('remembers them across a restart, also for a peer that never listed its files', async () => {
+    const adapter = new MemoryAdapter();
+    const first = new AgreedVersions(adapter as unknown as DataAdapter);
+    first.noteSent('mac', 'p.png', 'v1');
+    await first.save();
+    const second = new AgreedVersions(adapter as unknown as DataAdapter);
+    await second.load();
+    expect(second.sentVersions('p.png')).toEqual(['v1']);
+  });
+});

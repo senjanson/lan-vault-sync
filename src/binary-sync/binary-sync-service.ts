@@ -101,6 +101,7 @@ export class BinaryFileSyncService {
     | ((oldPath: string, newPath: string) => Promise<void> | void)
     | null = null;
   private onRemoteFolderMadeCb: ((path: string) => void) | null = null;
+  private onFileSentCb: ((deviceId: string, path: string, hash: string) => void) | null = null;
   private onBackupCreatedCb:
     | ((path: string, backupId: string, reason: string) => void)
     | null = null;
@@ -221,6 +222,14 @@ export class BinaryFileSyncService {
     this.onRemoteFolderMadeCb = cb;
   }
 
+  /**
+   * Called as a version of a file goes to a peer (live, or at a file list
+   * exchange), whether or not the peer takes it.
+   */
+  onFileSent(cb: (deviceId: string, path: string, hash: string) => void): void {
+    this.onFileSentCb = cb;
+  }
+
   /** `by`: the device that made the deletion, as "deviceId (name)". */
   onRemoteFileDeleted(cb: (path: string, movedTo?: string, record?: Tombstone, by?: string, deletedHash?: string) => Promise<void> | void): void {
     this.onRemoteFileDeletedCb = cb;
@@ -313,6 +322,7 @@ export class BinaryFileSyncService {
     } else {
       this.connectionManager.broadcast(msg);
     }
+    for (const deviceId of peers) this.onFileSentCb?.(deviceId, path, hash);
     return hash;
   }
 
@@ -382,6 +392,7 @@ export class BinaryFileSyncService {
       return;
     }
     this._sendMessage(deviceId, path, encodeFileData({ path, content: out.content, mtime: out.mtime, ...out.info }));
+    if (out.info.hash) this.onFileSentCb?.(deviceId, path, out.info.hash);
   }
 
   /**
@@ -503,6 +514,7 @@ export class BinaryFileSyncService {
       if ((this.outgoingEpoch.get(deviceId) ?? 0) !== epoch || !this.connectionManager.isConnectedTo(deviceId)) return;
       const out = await load();
       if (!out) return;
+      if (out.info.hash) this.onFileSentCb?.(deviceId, path, out.info.hash);
       const sent = await this.connectionManager.sendToPaced(deviceId, this._chunkFrames(path, out));
       if (!sent) logger.info(`Stopped sending ${path} to ${deviceId}: the peer disconnected`);
     });
@@ -829,9 +841,6 @@ export class BinaryFileSyncService {
         return;
       }
       if (!existing && this.canCreateCb && !(await this.canCreateCb(path))) return;
-      if (expected) this.expected.delete(path);
-      // Mark remote write BEFORE modifying vault to prevent echo-back
-      this.onRemoteFileWrittenCb?.(path, "write", content);
       if (existing instanceof TFile && currentContent) {
         const kept = await this.gate.keepOld(path, currentContent, "remote-file-overwrite", ctx);
         if (!kept) {
@@ -839,9 +848,28 @@ export class BinaryFileSyncService {
           return;
         }
         this.onBackupCreatedCb?.(path, kept.id, "remote-file-overwrite");
+        // Keeping the old version takes a while on a phone; a change made
+        // here meanwhile is not what was kept, and would be written over
+        // with no copy left. Checked again, as a deletion is (see
+        // _deleteFileNow): left as it is, it is sent as a change of the
+        // version peers have, and the file lists settle the two.
+        const now = this.vault.getAbstractFileByPath(path) === existing
+          ? new Uint8Array(await this.vault.readBinary(existing))
+          : null;
+        if (!now || !this._isSameBinary(now, currentContent)) {
+          this.gate.preconditionFailed("overwrite", path, ctx, currentHash ?? undefined, actual, "changed here while its old version was kept");
+          return;
+        }
+        if (expected) this.expected.delete(path);
+        // Marked only now, so that the change above is not taken for this
+        // write's own modify event (and not sent).
+        this.onRemoteFileWrittenCb?.(path, "write", content);
         await this.vault.modifyBinary(existing, toExactArrayBuffer(content), mtimeOption(info.madeAt ?? mtime));
         this.gate.applied("overwrite", path, ctx, actual ?? undefined, { hash, size: content.byteLength }, kept.hash ?? kept.id);
       } else {
+        if (expected) this.expected.delete(path);
+        // Mark remote write BEFORE modifying vault to prevent echo-back
+        this.onRemoteFileWrittenCb?.(path, "write", content);
         await ensureVaultParentFolder(this.vault, path, (folder) => this.onRemoteFolderMadeCb?.(folder));
         await this.vault.createBinary(path, toExactArrayBuffer(content), mtimeOption(info.madeAt ?? mtime));
       }
